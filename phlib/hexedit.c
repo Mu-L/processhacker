@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010-2015
- *     dmex    2017
+ *     dmex    2017-2023
  *
  */
 
@@ -30,7 +30,7 @@ BOOLEAN PhHexEditInitialization(
     c.cbWndExtra = sizeof(PVOID);
     c.hInstance = PhInstanceHandle;
     c.lpfnWndProc = PhpHexEditWndProc;
-    c.hCursor = LoadCursor(NULL, IDC_ARROW);
+    c.hCursor = PhLoadCursor(NULL, IDC_ARROW);
 
     if (!RegisterClassEx(&c))
         return FALSE;
@@ -97,12 +97,12 @@ LRESULT CALLBACK PhpHexEditWndProc(
 {
     PPHP_HEXEDIT_CONTEXT context;
 
-    context = PhGetWindowContext(hwnd, MAXCHAR);
+    context = PhGetWindowContextEx(hwnd);
 
     if (uMsg == WM_CREATE)
     {
         PhpCreateHexEditContext(&context);
-        PhSetWindowContext(hwnd, MAXCHAR, context);
+        PhSetWindowContextEx(hwnd, context);
     }
 
     if (!context)
@@ -112,12 +112,31 @@ LRESULT CALLBACK PhpHexEditWndProc(
     {
     case WM_CREATE:
         {
-            context->Font = CreateFont(-(LONG)PhMultiplyDivide(12, PhGlobalDpi, 96), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, L"Courier New");
+            LONG dpiValue;
+
+            dpiValue = PhGetWindowDpi(hwnd);
+
+            context->Font = CreateFont(
+                -(LONG)PhGetDpi(12, dpiValue),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                L"Courier New"
+                );
         }
         break;
     case WM_DESTROY:
         {
-            PhRemoveWindowContext(hwnd, MAXCHAR);
+            PhRemoveWindowContextEx(hwnd);
             PhpFreeHexEditContext(context);
         }
         break;
@@ -250,9 +269,12 @@ LRESULT CALLBACK PhpHexEditWndProc(
             if (context->Data)
             {
                 ULONG wheelScrollLines;
+                LONG dpiValue;
 
-                if (!SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, &wheelScrollLines, 0))
-                    wheelScrollLines = 3;
+                dpiValue = PhGetWindowDpi(hwnd);
+
+                if (!PhGetSystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, &wheelScrollLines, dpiValue))
+                    wheelScrollLines = PhGetDpi(3, dpiValue);
 
                 context->TopIndex += context->BytesPerRow * (LONG)wheelScrollLines * -wheelDelta / WHEEL_DELTA;
 

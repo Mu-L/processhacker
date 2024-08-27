@@ -1,3 +1,15 @@
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     wj32    2010-2016
+ *     dmex    2018-2024
+ *
+ */
+
 #ifndef _PH_PHNATINL_H
 #define _PH_PHNATINL_H
 
@@ -154,7 +166,7 @@ FORCEINLINE
 NTSTATUS
 PhGetProcessPeb32(
     _In_ HANDLE ProcessHandle,
-    _Out_ PVOID *Peb32
+    _Out_ PVOID* Peb32
     )
 {
     NTSTATUS status;
@@ -170,6 +182,10 @@ PhGetProcessPeb32(
 
     if (NT_SUCCESS(status))
     {
+        // No PEB for System, Minimal or Pico processes. (dmex)
+        if (!wow64)
+            return STATUS_UNSUCCESSFUL;
+
         *Peb32 = (PVOID)wow64;
     }
 
@@ -186,13 +202,14 @@ PhGetProcessPeb(
     NTSTATUS status;
     PROCESS_BASIC_INFORMATION basicInfo;
 
-    status = PhGetProcessBasicInformation(
-        ProcessHandle,
-        &basicInfo
-        );
+    status = PhGetProcessBasicInformation(ProcessHandle, &basicInfo);
 
     if (NT_SUCCESS(status))
     {
+        // No PEB for System, Minimal or Pico processes. (dmex)
+        if (!basicInfo.PebBaseAddress)
+            return STATUS_UNSUCCESSFUL;
+
         *PebBaseAddress = (PVOID)basicInfo.PebBaseAddress;
     }
 
@@ -221,6 +238,22 @@ PhGetProcessDebugObject(
         ProcessDebugObjectHandle,
         DebugObjectHandle,
         sizeof(HANDLE),
+        NULL
+        );
+}
+
+FORCEINLINE
+NTSTATUS
+PhGetProcessEnergyValues(
+    _In_ HANDLE ProcessHandle,
+    _Out_ PPROCESS_EXTENDED_ENERGY_VALUES EnergyValues
+    )
+{
+    return NtQueryInformationProcess(
+        ProcessHandle,
+        ProcessEnergyValues,
+        EnergyValues,
+        sizeof(PROCESS_EXTENDED_ENERGY_VALUES),
         NULL
         );
 }
@@ -279,37 +312,6 @@ PhGetProcessExecuteFlags(
         );
 }
 
-FORCEINLINE
-NTSTATUS
-PhGetProcessPriority(
-    _In_ HANDLE ProcessHandle,
-    _Out_ PPROCESS_PRIORITY_CLASS PriorityClass
-    )
-{
-    return NtQueryInformationProcess(
-        ProcessHandle,
-        ProcessPriorityClass,
-        PriorityClass,
-        sizeof(PROCESS_PRIORITY_CLASS),
-        NULL
-        );
-}
-
-FORCEINLINE
-NTSTATUS
-PhSetProcessPriority(
-    _In_ HANDLE ProcessHandle,
-    _In_ PROCESS_PRIORITY_CLASS PriorityClass
-    )
-{
-    return NtSetInformationProcess(
-        ProcessHandle, 
-        ProcessPriorityClass, 
-        &PriorityClass,
-        sizeof(PROCESS_PRIORITY_CLASS)
-        );
-}
-
 /**
  * Gets a process' I/O priority.
  *
@@ -330,27 +332,6 @@ PhGetProcessIoPriority(
         IoPriority,
         sizeof(IO_PRIORITY_HINT),
         NULL
-        );
-}
-
-/**
- * Sets a process' I/O priority.
- *
- * \param ProcessHandle A handle to a process. The handle must have PROCESS_SET_INFORMATION access.
- * \param IoPriority The new I/O priority.
- */
-FORCEINLINE
-NTSTATUS
-PhSetProcessIoPriority(
-    _In_ HANDLE ProcessHandle,
-    _In_ IO_PRIORITY_HINT IoPriority
-    )
-{
-    return NtSetInformationProcess(
-        ProcessHandle,
-        ProcessIoPriority,
-        &IoPriority,
-        sizeof(IO_PRIORITY_HINT)
         );
 }
 
@@ -389,66 +370,28 @@ PhGetProcessPagePriority(
 
 FORCEINLINE
 NTSTATUS
-PhSetProcessPagePriority(
-    _In_ HANDLE ProcessHandle,
-    _In_ ULONG PagePriority
-    )
-{
-    PAGE_PRIORITY_INFORMATION pagePriorityInfo;
-
-    pagePriorityInfo.PagePriority = PagePriority;
-
-    return NtSetInformationProcess(
-        ProcessHandle,
-        ProcessPagePriority,
-        &pagePriorityInfo,
-        sizeof(PAGE_PRIORITY_INFORMATION)
-        );
-}
-
-FORCEINLINE
-NTSTATUS
 PhGetProcessPriorityBoost(
     _In_ HANDLE ProcessHandle,
-    _Out_ PBOOLEAN PriorityBoost
+    _Out_ PBOOLEAN PriorityBoostDisabled
     )
 {
     NTSTATUS status;
-    ULONG priorityBoost;
+    ULONG priorityBoostDisabled;
 
     status = NtQueryInformationProcess(
         ProcessHandle,
         ProcessPriorityBoost,
-        &priorityBoost,
+        &priorityBoostDisabled,
         sizeof(ULONG),
         NULL
         );
 
     if (NT_SUCCESS(status))
     {
-        *PriorityBoost = !!priorityBoost;
+        *PriorityBoostDisabled = !!priorityBoostDisabled;
     }
 
     return status;
-}
-
-FORCEINLINE
-NTSTATUS
-PhSetProcessPriorityBoost(
-    _In_ HANDLE ProcessHandle,
-    _In_ BOOLEAN PriorityBoost
-    )
-{
-    ULONG priorityBoost;
-
-    priorityBoost = PriorityBoost ? 1 : 0;
-
-    return NtSetInformationProcess(
-        ProcessHandle,
-        ProcessPriorityBoost,
-        &priorityBoost,
-        sizeof(ULONG)
-        );
 }
 
 /**
@@ -554,82 +497,40 @@ PhGetProcessProtection(
 
 FORCEINLINE
 NTSTATUS
-PhGetProcessQuotaLimits(
-    _In_ HANDLE ProcessHandle,
-    _Out_ PQUOTA_LIMITS QuotaLimits
-    )
-{
-    return NtQueryInformationProcess(
-        ProcessHandle,
-        ProcessQuotaLimits,
-        QuotaLimits,
-        sizeof(QUOTA_LIMITS),
-        NULL
-        );
-}
-
-FORCEINLINE
-NTSTATUS
-PhSetProcessQuotaLimits(
-    _In_ HANDLE ProcessHandle,
-    _In_ QUOTA_LIMITS QuotaLimits
-    )
-{
-    return NtSetInformationProcess(
-        ProcessHandle,
-        ProcessQuotaLimits,
-        &QuotaLimits,
-        sizeof(QUOTA_LIMITS)
-        );
-}
-
-FORCEINLINE
-NTSTATUS
 PhGetProcessAffinityMask(
     _In_ HANDLE ProcessHandle,
     _Out_ PKAFFINITY AffinityMask
     )
 {
-    //NTSTATUS status;
-    //PROCESS_BASIC_INFORMATION basicInfo;
-    //
-    //status = PhGetProcessBasicInformation(ProcessHandle, &basicInfo);
-    //
-    //if (NT_SUCCESS(status))
-    //{
-    //    *AffinityMask = basicInfo.AffinityMask;
-    //}
-    //
-    //return status;
+    NTSTATUS status;
+    KAFFINITY affinityMask;
 
-    return NtQueryInformationProcess(
+    memset(&affinityMask, 0, sizeof(KAFFINITY));
+
+    status = NtQueryInformationProcess(
         ProcessHandle,
         ProcessAffinityMask,
-        AffinityMask,
+        &affinityMask,
         sizeof(KAFFINITY),
         NULL
         );
-}
 
-/**
- * Sets a process' affinity mask.
- *
- * \param ProcessHandle A handle to a process. The handle must have PROCESS_SET_INFORMATION access.
- * \param AffinityMask The new affinity mask.
- */
-FORCEINLINE
-NTSTATUS
-PhSetProcessAffinityMask(
-    _In_ HANDLE ProcessHandle,
-    _In_ KAFFINITY AffinityMask
-    )
-{
-    return NtSetInformationProcess(
-        ProcessHandle,
-        ProcessAffinityMask,
-        &AffinityMask,
-        sizeof(KAFFINITY)
-        );
+    if (NT_SUCCESS(status))
+    {
+        *AffinityMask = affinityMask;
+    }
+    else // Windows 7 (dmex)
+    {
+        PROCESS_BASIC_INFORMATION basicInfo;
+
+        if (NT_SUCCESS(PhGetProcessBasicInformation(ProcessHandle, &basicInfo)))
+        {
+            *AffinityMask = basicInfo.AffinityMask;
+            return STATUS_SUCCESS;
+        }
+    }
+
+    return status;
 }
 
 FORCEINLINE
@@ -652,10 +553,9 @@ PhGetProcessGroupInformation(
         &returnLength
         );
 
-    // (int)(status + 0x80000000) < 0 || status == STATUS_BUFFER_TOO_SMALL
     if (NT_SUCCESS(status) || status == STATUS_BUFFER_TOO_SMALL)
     {
-        *GroupCount = (USHORT)returnLength >> 1;
+        *GroupCount = (USHORT)returnLength / sizeof(USHORT); // (USHORT)returnLength >> 1
     }
 
     return status;
@@ -668,28 +568,36 @@ PhGetProcessGroupAffinity(
     _Out_ PGROUP_AFFINITY GroupAffinity
     )
 {
-    return NtQueryInformationProcess(
+    NTSTATUS status;
+    GROUP_AFFINITY groupAffinity;
+
+    memset(&groupAffinity, 0, sizeof(GROUP_AFFINITY));
+
+    status = NtQueryInformationProcess(
         ProcessHandle,
         ProcessAffinityMask,
-        GroupAffinity,
+        &groupAffinity,
         sizeof(GROUP_AFFINITY),
         NULL
         );
-}
 
-FORCEINLINE
-NTSTATUS
-PhSetProcessGroupAffinity(
-    _In_ HANDLE ProcessHandle,
-    _In_ GROUP_AFFINITY GroupAffinity
-    )
-{
-    return NtSetInformationProcess(
-        ProcessHandle,
-        ProcessAffinityMask,
-        &GroupAffinity,
-        sizeof(GROUP_AFFINITY)
-        );
+    if (NT_SUCCESS(status))
+    {
+        memcpy(GroupAffinity, &groupAffinity, sizeof(GROUP_AFFINITY));
+    }
+    else // Windows 7 (dmex)
+    {
+        KAFFINITY affinityMask;
+
+        if (NT_SUCCESS(PhGetProcessAffinityMask(ProcessHandle, &affinityMask)))
+        {
+            groupAffinity.Mask = affinityMask;
+            memcpy(GroupAffinity, &groupAffinity, sizeof(GROUP_AFFINITY));
+            return STATUS_SUCCESS;
+        }
+    }
+
+    return status;
 }
 
 FORCEINLINE
@@ -703,6 +611,7 @@ PhGetProcessIsCFGuardEnabled(
     PROCESS_MITIGATION_POLICY_INFORMATION policyInfo;
 
     policyInfo.Policy = ProcessControlFlowGuardPolicy;
+    policyInfo.ControlFlowGuardPolicy.Flags = 0;
 
     status = NtQueryInformationProcess(
         ProcessHandle,
@@ -732,6 +641,7 @@ PhGetProcessIsXFGuardEnabled(
     PROCESS_MITIGATION_POLICY_INFORMATION policyInfo;
 
     policyInfo.Policy = ProcessControlFlowGuardPolicy;
+    policyInfo.ControlFlowGuardPolicy.Flags = 0;
 
     status = NtQueryInformationProcess(
         ProcessHandle,
@@ -845,6 +755,42 @@ PhGetProcessAppMemoryInformation(
 
 FORCEINLINE
 NTSTATUS
+PhGetProcessMitigationPolicyInformation(
+    _In_ HANDLE ProcessHandle,
+    _In_ PROCESS_MITIGATION_POLICY Policy,
+    _Out_ PPROCESS_MITIGATION_POLICY_INFORMATION MitigationPolicy
+    )
+{
+    memset(MitigationPolicy, 0, sizeof(PROCESS_MITIGATION_POLICY_INFORMATION));
+    MitigationPolicy->Policy = Policy;
+
+    return NtQueryInformationProcess(
+        ProcessHandle,
+        ProcessMitigationPolicy,
+        MitigationPolicy,
+        sizeof(PROCESS_MITIGATION_POLICY_INFORMATION),
+        NULL
+        );
+}
+
+FORCEINLINE
+NTSTATUS
+PhGetProcesNetworkIoCounters(
+    _In_ HANDLE ProcessHandle,
+    _Out_ PPROCESS_NETWORK_COUNTERS NetworkIoCounters
+    )
+{
+    return NtQueryInformationProcess(
+        ProcessHandle,
+        ProcessNetworkIoCounters,
+        NetworkIoCounters,
+        sizeof(PROCESS_NETWORK_COUNTERS),
+        NULL
+        );
+}
+
+FORCEINLINE
+NTSTATUS
 PhGetProcessPowerThrottlingState(
     _In_ HANDLE ProcessHandle,
     _Out_ PPOWER_THROTTLING_PROCESS_STATE PowerThrottlingState
@@ -874,25 +820,28 @@ PhGetProcessPowerThrottlingState(
 
 FORCEINLINE
 NTSTATUS
-PhSetProcessPowerThrottlingState(
-    _In_ HANDLE ProcessHandle,
-    _In_ ULONG ControlMask,
-    _In_ ULONG StateMask
+PhGetThreadPowerThrottlingState(
+    _In_ HANDLE ThreadHandle,
+    _Out_ PPOWER_THROTTLING_THREAD_STATE PowerThrottlingState
     )
 {
-    POWER_THROTTLING_PROCESS_STATE powerThrottlingState;
+    NTSTATUS status;
+    POWER_THROTTLING_THREAD_STATE powerThrottlingState = { .Version = POWER_THROTTLING_THREAD_CURRENT_VERSION };
 
-    memset(&powerThrottlingState, 0, sizeof(POWER_THROTTLING_PROCESS_STATE));
-    powerThrottlingState.Version = POWER_THROTTLING_PROCESS_CURRENT_VERSION;
-    powerThrottlingState.ControlMask = ControlMask;
-    powerThrottlingState.StateMask = StateMask;
-
-    return NtSetInformationProcess(
-        ProcessHandle,
-        ProcessPowerThrottlingState,
+    status = NtQueryInformationThread(
+        ThreadHandle,
+        ThreadPowerThrottlingState,
         &powerThrottlingState,
-        sizeof(POWER_THROTTLING_PROCESS_STATE)
-        );
+        sizeof(powerThrottlingState),
+        NULL
+    );
+
+    if (NT_SUCCESS(status))
+    {
+        *PowerThrottlingState = powerThrottlingState;
+    }
+
+    return status;
 }
 
 /**
@@ -948,32 +897,63 @@ PhGetThreadBasePriority(
 
 FORCEINLINE
 NTSTATUS
+PhGetThreadTeb(
+    _In_ HANDLE ThreadHandle,
+    _Out_ PULONG_PTR TebBaseAddress
+    )
+{
+    NTSTATUS status;
+    THREAD_BASIC_INFORMATION basicInfo;
+
+    status = PhGetThreadBasicInformation(ThreadHandle, &basicInfo);
+
+    if (NT_SUCCESS(status))
+    {
+        if (!basicInfo.TebBaseAddress)
+            return STATUS_UNSUCCESSFUL;
+
+        *TebBaseAddress = (ULONG_PTR)basicInfo.TebBaseAddress;
+    }
+
+    return status;
+}
+
+FORCEINLINE
+NTSTATUS
+PhGetThreadTeb32(
+    _In_ HANDLE ThreadHandle,
+    _Out_ PULONG_PTR TebBaseAddress
+    )
+{
+    NTSTATUS status;
+    THREAD_BASIC_INFORMATION basicInfo;
+
+    status = PhGetThreadBasicInformation(ThreadHandle, &basicInfo);
+
+    if (NT_SUCCESS(status))
+    {
+        if (!basicInfo.TebBaseAddress)
+            return STATUS_UNSUCCESSFUL;
+
+        *TebBaseAddress = (ULONG_PTR)WOW64_GET_TEB32(basicInfo.TebBaseAddress);
+    }
+
+    return status;
+}
+
+FORCEINLINE
+NTSTATUS
 PhGetThreadStartAddress(
     _In_ HANDLE ThreadHandle,
-    _Out_ PVOID *StartAddress
+    _Out_ PULONG_PTR StartAddress
     )
 {
     return NtQueryInformationThread(
         ThreadHandle,
         ThreadQuerySetWin32StartAddress,
         StartAddress,
-        sizeof(PVOID),
+        sizeof(ULONG_PTR),
         NULL
-        );
-}
-
-FORCEINLINE
-NTSTATUS
-PhSetThreadBasePriority(
-    _In_ HANDLE ThreadHandle,
-    _In_ KPRIORITY Increment
-    )
-{
-    return NtSetInformationThread(
-        ThreadHandle,
-        ThreadBasePriority,
-        &Increment,
-        sizeof(KPRIORITY)
         );
 }
 
@@ -997,28 +977,6 @@ PhGetThreadIoPriority(
         IoPriority,
         sizeof(IO_PRIORITY_HINT),
         NULL
-        );
-}
-
-/**
- * Sets a thread's I/O priority.
- *
- * \param ThreadHandle A handle to a thread. The handle must have THREAD_SET_LIMITED_INFORMATION
- * access.
- * \param IoPriority The new I/O priority.
- */
-FORCEINLINE
-NTSTATUS
-PhSetThreadIoPriority(
-    _In_ HANDLE ThreadHandle,
-    _In_ IO_PRIORITY_HINT IoPriority
-    )
-{
-    return NtSetInformationThread(
-        ThreadHandle,
-        ThreadIoPriority,
-        &IoPriority,
-        sizeof(IO_PRIORITY_HINT)
         );
 }
 
@@ -1057,28 +1015,9 @@ PhGetThreadPagePriority(
 
 FORCEINLINE
 NTSTATUS
-PhSetThreadPagePriority(
-    _In_ HANDLE ThreadHandle,
-    _In_ ULONG PagePriority
-    )
-{
-    PAGE_PRIORITY_INFORMATION pagePriorityInfo;
-
-    pagePriorityInfo.PagePriority = PagePriority;
-
-    return NtSetInformationThread(
-        ThreadHandle,
-        ThreadPagePriority,
-        &pagePriorityInfo,
-        sizeof(PAGE_PRIORITY_INFORMATION)
-        );
-}
-
-FORCEINLINE
-NTSTATUS
 PhGetThreadPriorityBoost(
     _In_ HANDLE ThreadHandle,
-    _Out_ PBOOLEAN PriorityBoost
+    _Out_ PBOOLEAN PriorityBoostDisabled
     )
 {
     NTSTATUS status;
@@ -1094,29 +1033,10 @@ PhGetThreadPriorityBoost(
 
     if (NT_SUCCESS(status))
     {
-        *PriorityBoost = !!priorityBoost;
+        *PriorityBoostDisabled = !!priorityBoost;
     }
 
     return status;
-}
-
-FORCEINLINE
-NTSTATUS
-PhSetThreadPriorityBoost(
-    _In_ HANDLE ThreadHandle,
-    _In_ BOOLEAN PriorityBoost
-    )
-{
-    ULONG priorityBoost;
-
-    priorityBoost = PriorityBoost ? 1 : 0;
-
-    return NtSetInformationThread(
-        ThreadHandle,
-        ThreadPriorityBoost,
-        &priorityBoost,
-        sizeof(ULONG)
-        );
 }
 
 /**
@@ -1170,31 +1090,6 @@ PhGetThreadIdealProcessor(
 
 FORCEINLINE
 NTSTATUS
-PhSetThreadIdealProcessor(
-    _In_ HANDLE ThreadHandle,
-    _In_ PPROCESSOR_NUMBER ProcessorNumber,
-    _Out_opt_ PPROCESSOR_NUMBER PreviousIdealProcessor
-    )
-{
-    NTSTATUS status;
-    PROCESSOR_NUMBER processorNumber;
-
-    processorNumber = *ProcessorNumber;
-    status = NtSetInformationThread(
-        ThreadHandle,
-        ThreadIdealProcessorEx,
-        &processorNumber,
-        sizeof(PROCESSOR_NUMBER)
-        );
-
-    if (PreviousIdealProcessor)
-        *PreviousIdealProcessor = processorNumber;
-
-    return status;
-}
-
-FORCEINLINE
-NTSTATUS
 PhGetThreadSuspendCount(
     _In_ HANDLE ThreadHandle,
     _Out_ PULONG SuspendCount
@@ -1205,22 +1100,6 @@ PhGetThreadSuspendCount(
         ThreadSuspendCount,
         SuspendCount,
         sizeof(ULONG),
-        NULL
-        );
-}
-
-FORCEINLINE
-NTSTATUS
-PhGetThreadLastSystemCall(
-    _In_ HANDLE ThreadHandle,
-    _Out_ PTHREAD_LAST_SYSCALL_INFORMATION LastSystemCall
-    )
-{
-    return NtQueryInformationThread(
-        ThreadHandle,
-        ThreadLastSystemCall,
-        LastSystemCall,
-        RTL_SIZEOF_THROUGH_FIELD(THREAD_LAST_SYSCALL_INFORMATION, Pad), // HACK: Win7 requires exact size. (dmex)
         NULL
         );
 }
@@ -1240,6 +1119,24 @@ PhGetThreadWow64Context(
         NULL
         );
 }
+
+#if defined(_ARM64_)
+FORCEINLINE
+NTSTATUS
+PhGetThreadArm32Context(
+    _In_ HANDLE ThreadHandle,
+    _Out_ PARM_NT_CONTEXT Context
+    )
+{
+    return NtQueryInformationThread(
+        ThreadHandle,
+        ThreadWow64Context,
+        Context,
+        sizeof(ARM_NT_CONTEXT),
+        NULL
+        );
+}
+#endif
 
 FORCEINLINE
 NTSTATUS
@@ -1362,6 +1259,26 @@ PhGetThreadIsTerminated(
 }
 
 FORCEINLINE
+BOOLEAN
+PhGetThreadIsTerminated2(
+    _In_ HANDLE ThreadHandle
+    )
+{
+    NTSTATUS status;
+    LARGE_INTEGER timeout;
+
+    memset(&timeout, 0, sizeof(LARGE_INTEGER));
+
+    status = NtWaitForSingleObject(
+        ThreadHandle,
+        FALSE,
+        &timeout
+        );
+
+    return status == STATUS_WAIT_0;
+}
+
+FORCEINLINE
 NTSTATUS
 PhGetThreadAffinityMask(
     _In_ HANDLE ThreadHandle,
@@ -1389,28 +1306,6 @@ PhGetThreadAffinityMask(
     //    );
 }
 
-/**
- * Sets a thread's affinity mask.
- *
- * \param ThreadHandle A handle to a thread. The handle must have THREAD_SET_LIMITED_INFORMATION
- * access.
- * \param AffinityMask The new affinity mask.
- */
-FORCEINLINE
-NTSTATUS
-PhSetThreadAffinityMask(
-    _In_ HANDLE ThreadHandle,
-    _In_ KAFFINITY AffinityMask
-    )
-{
-    return NtSetInformationThread(
-        ThreadHandle,
-        ThreadAffinityMask,
-        &AffinityMask,
-        sizeof(KAFFINITY)
-        );
-}
-
 FORCEINLINE
 NTSTATUS
 PhGetThreadGroupAffinity(
@@ -1429,16 +1324,19 @@ PhGetThreadGroupAffinity(
 
 FORCEINLINE
 NTSTATUS
-PhSetThreadGroupAffinity(
-    _In_ HANDLE ThreadHandle,
-    _In_ GROUP_AFFINITY GroupAffinity
+PhGetTokenType(
+    _In_ HANDLE TokenHandle,
+    _Out_ PTOKEN_TYPE Type
     )
 {
-    return NtSetInformationThread(
-        ThreadHandle,
-        ThreadGroupInformation,
-        &GroupAffinity,
-        sizeof(GROUP_AFFINITY)
+    ULONG returnLength;
+
+    return NtQueryInformationToken(
+        TokenHandle,
+        TokenType,
+        Type,
+        sizeof(TOKEN_TYPE),
+        &returnLength
         );
 }
 
@@ -1494,13 +1392,13 @@ PhGetTokenElevationType(
  * Gets whether a token is elevated.
  *
  * \param TokenHandle A handle to a token. The handle must have TOKEN_QUERY access.
- * \param Elevated A variable which receives a boolean indicating whether the token is elevated.
+ * \param TokenIsElevated A variable which receives a boolean indicating whether the token is elevated.
  */
 FORCEINLINE
 NTSTATUS
-PhGetTokenIsElevated(
+PhGetTokenElevation(
     _In_ HANDLE TokenHandle,
-    _Out_ PBOOLEAN Elevated
+    _Out_ PBOOLEAN TokenIsElevated
     )
 {
     NTSTATUS status;
@@ -1517,7 +1415,7 @@ PhGetTokenIsElevated(
 
     if (NT_SUCCESS(status))
     {
-        *Elevated = !!elevation.TokenIsElevated;
+        *TokenIsElevated = !!elevation.TokenIsElevated;
     }
 
     return status;
@@ -1709,7 +1607,7 @@ PhGetTokenIsVirtualizationEnabled(
 */
 FORCEINLINE
 NTSTATUS
-PhGetTokenIsUIAccessEnabled(
+PhGetTokenUIAccess(
     _In_ HANDLE TokenHandle,
     _Out_ PBOOLEAN IsUIAccessEnabled
     )
@@ -1743,7 +1641,7 @@ PhGetTokenIsUIAccessEnabled(
 */
 FORCEINLINE
 NTSTATUS
-PhSetTokenUIAccessEnabled(
+PhSetTokenUIAccess(
     _In_ HANDLE TokenHandle,
     _In_ BOOLEAN IsUIAccessEnabled
     )
@@ -1808,20 +1706,25 @@ PhGetTokenMandatoryPolicy(
     _Out_ PTOKEN_MANDATORY_POLICY MandatoryPolicy
     )
 {
-    NTSTATUS status;
     ULONG returnLength;
 
-    status = NtQueryInformationToken(
+    return NtQueryInformationToken(
         TokenHandle,
         TokenMandatoryPolicy,
         MandatoryPolicy,
         sizeof(TOKEN_MANDATORY_POLICY),
         &returnLength
         );
-    
-    return status;
 }
 
+/**
+* The TOKEN_ORIGIN structure contains information about the origin of the logon session.
+*
+* \param TokenHandle A handle to a token. The handle must have TOKEN_QUERY access.
+* \param Origin A variable which receives the Locally unique identifier (LUID) for the logon session.
+*
+* \return Successful or errant status.
+*/
 FORCEINLINE
 NTSTATUS
 PhGetTokenOrigin(
@@ -1840,6 +1743,15 @@ PhGetTokenOrigin(
         );
 }
 
+/**
+* Gets a value that is nonzero if the token is an app container token.
+*
+* \param TokenHandle A handle to a token. The handle must have TOKEN_QUERY access.
+* \param IsAppContainer Any callers who check the TokenIsAppContainer and have it return 0 should
+* also verify that the caller token is not an identify level impersonation token.
+*
+* \return Successful or errant status.
+*/
 FORCEINLINE
 NTSTATUS
 PhGetTokenIsAppContainer(
@@ -1867,6 +1779,14 @@ PhGetTokenIsAppContainer(
     return status;
 }
 
+/**
+* Gets a value that includes the app container number for the token.
+*
+* \param TokenHandle A handle to a token. The handle must have TOKEN_QUERY access.
+* \param AppContainerNumber The app container number for the token.
+*
+* \return Successful or errant status.
+*/
 FORCEINLINE
 NTSTATUS
 PhGetTokenAppContainerNumber(
@@ -1884,7 +1804,6 @@ PhGetTokenAppContainerNumber(
         &returnLength
         );
 }
-
 
 FORCEINLINE
 NTSTATUS
@@ -1982,6 +1901,15 @@ PhGetTimerBasicInformation(
         );
 }
 
+/**
+* The action to be performed when the calling thread exits.
+*
+* \param DebugObjectHandle A handle to a process' debug object.
+* \param KillProcessOnExit If this parameter is TRUE, the thread terminates all attached processes on exit
+* (note that this is the default). Otherwise, the thread detaches from all processes being debugged on exit.
+*
+* \return Successful or errant status.
+*/
 FORCEINLINE
 NTSTATUS
 PhSetDebugKillProcessOnExit(
@@ -2034,6 +1962,31 @@ PhGetProcessIsCetEnabled(
 
 FORCEINLINE
 NTSTATUS
+NTAPI
+PhGetSystemHypervisorSharedPageInformation(
+    _Out_ PPVOID HypervisorSharedUserVa
+    )
+{
+    NTSTATUS status;
+    SYSTEM_HYPERVISOR_SHARED_PAGE_INFORMATION HypervisorSharedPageInfo;
+
+    status = NtQuerySystemInformation(
+        SystemHypervisorSharedPageInformation,
+        &HypervisorSharedPageInfo,
+        sizeof(SYSTEM_HYPERVISOR_SHARED_PAGE_INFORMATION),
+        NULL
+        );
+
+    if (NT_SUCCESS(status))
+    {
+        *HypervisorSharedUserVa = HypervisorSharedPageInfo.HypervisorSharedUserVa;
+    }
+
+    return status;
+}
+
+FORCEINLINE
+NTSTATUS
 PhGetSystemShadowStackInformation(
     _Out_ PSYSTEM_SHADOW_STACK_INFORMATION ShadowStackInformation
     )
@@ -2044,6 +1997,88 @@ PhGetSystemShadowStackInformation(
         sizeof(SYSTEM_SHADOW_STACK_INFORMATION),
         NULL
         );
+}
+
+/**
+* The system boot time in Coordinated Universal Time (UTC) format.
+*
+* \param BootTime A pointer to a LARGE_INTEGER structure to receive the current system boot date and time.
+*
+* \return Successful or errant status.
+*/
+FORCEINLINE
+NTSTATUS
+PhGetSystemBootTime(
+    _Out_ PLARGE_INTEGER BootTime
+    )
+{
+    NTSTATUS status;
+    SYSTEM_TIMEOFDAY_INFORMATION timeOfDayInfo;
+
+    status = NtQuerySystemInformation(
+        SystemTimeOfDayInformation,
+        &timeOfDayInfo,
+        sizeof(SYSTEM_TIMEOFDAY_INFORMATION),
+        NULL
+        );
+
+    if (NT_SUCCESS(status))
+    {
+        *BootTime = timeOfDayInfo.BootTime;
+    }
+
+    return status;
+}
+
+/**
+* The system uptime in Coordinated Universal Time (UTC) format.
+*
+* \param Uptime A pointer to a LARGE_INTEGER structure to receive the current system uptime.
+*
+* \return Successful or errant status.
+*/
+FORCEINLINE
+NTSTATUS
+PhGetSystemUptime(
+    _Out_ PLARGE_INTEGER Uptime
+    )
+{
+    NTSTATUS status;
+    SYSTEM_TIMEOFDAY_INFORMATION timeOfDayInfo;
+
+    status = NtQuerySystemInformation(
+        SystemTimeOfDayInformation,
+        &timeOfDayInfo,
+        sizeof(SYSTEM_TIMEOFDAY_INFORMATION),
+        NULL
+        );
+
+    if (NT_SUCCESS(status))
+    {
+        Uptime->QuadPart = timeOfDayInfo.CurrentTime.QuadPart - timeOfDayInfo.BootTime.QuadPart;
+    }
+
+    return status;
+}
+
+/**
+ * Waits until the specified object is in the signaled state or the time-out interval elapses.
+ *
+ * \param Handle A handle to the object.
+ * \param Timeout The time-out interval.
+ * If a nonzero value is specified, the function waits until the object is signaled or the interval elapses.
+ * If Timeout is zero, the function does not enter a wait state if the object is not signaled; it always returns immediately.
+ * If Timeout is INFINITE, the function will return only when the object is signaled.
+ *
+ * \return Successful or errant status.
+ */
+FORCEINLINE
+NTSTATUS PhWaitForSingleObject(
+    _In_ HANDLE Handle,
+    _In_opt_ PLARGE_INTEGER Timeout
+    )
+{
+    return NtWaitForSingleObject(Handle, FALSE, Timeout);
 }
 
 #endif

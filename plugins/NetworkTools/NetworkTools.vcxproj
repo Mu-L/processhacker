@@ -75,7 +75,6 @@
       <AdditionalDependencies>iphlpapi.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>iphlpapi.dll;ws2_32.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
-    <ClCompile />
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Link>
@@ -126,9 +125,6 @@
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="NetworkTools.rc" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="CHANGELOG.txt" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="resources\ad.png" />

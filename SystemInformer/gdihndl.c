@@ -6,17 +6,21 @@
  * Authors:
  *
  *     wj32    2010
- *     dmex    2021
+ *     dmex    2021-2023
  *
  */
 
 #include <phapp.h>
-#include <ntgdi.h>
 #include <procprv.h>
 #include <phsettings.h>
+#include <emenu.h>
+
+#include <ntgdi.h>
 
 typedef struct _PH_GDI_HANDLES_CONTEXT
 {
+    HWND ListViewHandle;
+    HWND ParentWindowHandle;
     PPH_PROCESS_ITEM ProcessItem;
     PPH_LIST List;
     PH_LAYOUT_MANAGER LayoutManager;
@@ -49,6 +53,7 @@ VOID PhShowGdiHandlesDialog(
     context = PhAllocateZero(sizeof(PH_GDI_HANDLES_CONTEXT));
     context->ProcessItem = PhReferenceObject(ProcessItem);
     context->List = PhCreateList(20);
+    context->ParentWindowHandle = ParentWindowHandle;
 
     windowHandle = PhCreateDialog(
         PhInstanceHandle,
@@ -205,11 +210,9 @@ PPH_STRING PhpGetGdiHandleInformation(
 }
 
 VOID PhpRefreshGdiHandles(
-    _In_ HWND hwndDlg,
     _In_ PPH_GDI_HANDLES_CONTEXT Context
     )
 {
-    HWND lvHandle;
     ULONG i;
     PGDI_SHARED_MEMORY gdiShared;
     USHORT processId;
@@ -218,11 +221,10 @@ VOID PhpRefreshGdiHandles(
     PPH_GDI_HANDLE_ITEM gdiHandleItem;
     MEMORY_BASIC_INFORMATION basicInfo;
 
-    lvHandle = GetDlgItem(hwndDlg, IDC_LIST);
     memset(&basicInfo, 0, sizeof(MEMORY_BASIC_INFORMATION));
 
-    ExtendedListView_SetRedraw(lvHandle, FALSE);
-    ListView_DeleteAllItems(lvHandle);
+    ExtendedListView_SetRedraw(Context->ListViewHandle, FALSE);
+    ListView_DeleteAllItems(Context->ListViewHandle);
 
     for (i = 0; i < Context->List->Count; i++)
     {
@@ -232,6 +234,7 @@ VOID PhpRefreshGdiHandles(
             PhDereferenceObject(gdiHandleItem->Information);
 
         PhFree(Context->List->Items[i]);
+        Context->List->Items[i] = NULL;
     }
 
     PhClearList(Context->List);
@@ -269,7 +272,7 @@ VOID PhpRefreshGdiHandles(
         if (!typeName)
             continue;
 
-        gdiHandleItem = PhAllocate(sizeof(PH_GDI_HANDLE_ITEM));
+        gdiHandleItem = PhAllocateZero(sizeof(PH_GDI_HANDLE_ITEM));
         gdiHandleItem->Entry = handle;
         gdiHandleItem->Handle = GDI_MAKE_HANDLE(i, handle->Unique);
         gdiHandleItem->Object = handle->Object;
@@ -277,16 +280,16 @@ VOID PhpRefreshGdiHandles(
         gdiHandleItem->Information = PhpGetGdiHandleInformation(gdiHandleItem->Handle);
         PhAddItemList(Context->List, gdiHandleItem);
 
-        lvItemIndex = PhAddListViewItem(lvHandle, MAXINT, gdiHandleItem->TypeName, gdiHandleItem);
+        lvItemIndex = PhAddListViewItem(Context->ListViewHandle, MAXINT, gdiHandleItem->TypeName, gdiHandleItem);
         PhPrintPointer(pointer, UlongToPtr(gdiHandleItem->Handle));
-        PhSetListViewSubItem(lvHandle, lvItemIndex, 1, pointer);
+        PhSetListViewSubItem(Context->ListViewHandle, lvItemIndex, 1, pointer);
         PhPrintPointer(pointer, gdiHandleItem->Object);
-        PhSetListViewSubItem(lvHandle, lvItemIndex, 2, pointer);
-        PhSetListViewSubItem(lvHandle, lvItemIndex, 3, PhGetString(gdiHandleItem->Information));
+        PhSetListViewSubItem(Context->ListViewHandle, lvItemIndex, 2, pointer);
+        PhSetListViewSubItem(Context->ListViewHandle, lvItemIndex, 3, PhGetString(gdiHandleItem->Information));
     }
 
-    ExtendedListView_SortItems(lvHandle);
-    ExtendedListView_SetRedraw(lvHandle, TRUE);
+    ExtendedListView_SortItems(Context->ListViewHandle);
+    ExtendedListView_SetRedraw(Context->ListViewHandle, TRUE);
 }
 
 INT NTAPI PhpGdiHandleHandleCompareFunction(
@@ -340,31 +343,31 @@ INT_PTR CALLBACK PhpGdiHandlesDlgProc(
     {
     case WM_INITDIALOG:
         {
-            HWND lvHandle;
+            context->ListViewHandle = GetDlgItem(hwndDlg, IDC_LIST);
 
             PhSetApplicationWindowIcon(hwndDlg);
 
-            PhCenterWindow(hwndDlg, GetParent(hwndDlg));
+            PhCenterWindow(hwndDlg, context->ParentWindowHandle);
 
-            lvHandle = GetDlgItem(hwndDlg, IDC_LIST);
+            PhRegisterDialog(hwndDlg);
 
             PhInitializeLayoutManager(&context->LayoutManager, hwndDlg);
-            PhAddLayoutItem(&context->LayoutManager, lvHandle, NULL, PH_ANCHOR_ALL);
+            PhAddLayoutItem(&context->LayoutManager, context->ListViewHandle, NULL, PH_ANCHOR_ALL);
             PhAddLayoutItem(&context->LayoutManager, GetDlgItem(hwndDlg, IDC_REFRESH), NULL, PH_ANCHOR_BOTTOM | PH_ANCHOR_RIGHT);
             PhAddLayoutItem(&context->LayoutManager, GetDlgItem(hwndDlg, IDOK), NULL, PH_ANCHOR_BOTTOM | PH_ANCHOR_RIGHT);
 
-            PhSetListViewStyle(lvHandle, TRUE, TRUE);
-            PhSetControlTheme(lvHandle, L"explorer");
-            PhAddListViewColumn(lvHandle, 0, 0, 0, LVCFMT_LEFT, 100, L"Type");
-            PhAddListViewColumn(lvHandle, 1, 1, 1, LVCFMT_LEFT, 80, L"Handle");
-            PhAddListViewColumn(lvHandle, 2, 2, 2, LVCFMT_LEFT, 102, L"Object");
-            PhAddListViewColumn(lvHandle, 3, 3, 3, LVCFMT_LEFT, 200, L"Information");
+            PhSetListViewStyle(context->ListViewHandle, TRUE, TRUE);
+            PhSetControlTheme(context->ListViewHandle, L"explorer");
+            PhAddListViewColumn(context->ListViewHandle, 0, 0, 0, LVCFMT_LEFT, 100, L"Type");
+            PhAddListViewColumn(context->ListViewHandle, 1, 1, 1, LVCFMT_LEFT, 80, L"Handle");
+            PhAddListViewColumn(context->ListViewHandle, 2, 2, 2, LVCFMT_LEFT, 102, L"Object");
+            PhAddListViewColumn(context->ListViewHandle, 3, 3, 3, LVCFMT_LEFT, 200, L"Information");
 
-            PhSetExtendedListView(lvHandle);
-            ExtendedListView_SetCompareFunction(lvHandle, 1, PhpGdiHandleHandleCompareFunction);
-            ExtendedListView_SetCompareFunction(lvHandle, 2, PhpGdiHandleObjectCompareFunction);
-            ExtendedListView_AddFallbackColumn(lvHandle, 0);
-            ExtendedListView_AddFallbackColumn(lvHandle, 1);
+            PhSetExtendedListView(context->ListViewHandle);
+            ExtendedListView_SetCompareFunction(context->ListViewHandle, 1, PhpGdiHandleHandleCompareFunction);
+            ExtendedListView_SetCompareFunction(context->ListViewHandle, 2, PhpGdiHandleObjectCompareFunction);
+            ExtendedListView_AddFallbackColumn(context->ListViewHandle, 0);
+            ExtendedListView_AddFallbackColumn(context->ListViewHandle, 1);
 
             {
                 PPH_STRING windowTitle;
@@ -381,23 +384,31 @@ INT_PTR CALLBACK PhpGdiHandlesDlgProc(
                 PhDereferenceObject(windowTitle);
             }
 
-            PhpRefreshGdiHandles(hwndDlg, context);
+            PhpRefreshGdiHandles(context);
+
+            PhInitializeWindowTheme(hwndDlg, PhEnableThemeSupport);
         }
         break;
     case WM_DESTROY:
         {
-            PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
+            PhUnregisterDialog(hwndDlg);
 
             PhDeleteLayoutManager(&context->LayoutManager);
 
-            for (ULONG i = 0; i < context->List->Count; i++)
+            if (context->List)
             {
-                PPH_GDI_HANDLE_ITEM gdiHandleItem = context->List->Items[i];
+                for (ULONG i = 0; i < context->List->Count; i++)
+                {
+                    PPH_GDI_HANDLE_ITEM gdiHandleItem = context->List->Items[i];
 
-                if (gdiHandleItem->Information)
-                    PhDereferenceObject(gdiHandleItem->Information);
+                    if (gdiHandleItem->Information)
+                        PhDereferenceObject(gdiHandleItem->Information);
 
-                PhFree(context->List->Items[i]);
+                    PhFree(context->List->Items[i]);
+                    context->List->Items[i] = NULL;
+                }
+
+                PhDereferenceObject(context->List);
             }
 
             if (context->ProcessItem)
@@ -405,7 +416,7 @@ INT_PTR CALLBACK PhpGdiHandlesDlgProc(
                 PhDereferenceObject(context->ProcessItem);
             }
 
-            PhDereferenceObject(context->List);
+            PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
             PhFree(context);
         }
         break;
@@ -415,12 +426,10 @@ INT_PTR CALLBACK PhpGdiHandlesDlgProc(
             {
             case IDCANCEL:
             case IDOK:
-                EndDialog(hwndDlg, IDOK);
+                DestroyWindow(hwndDlg);
                 break;
             case IDC_REFRESH:
-                {
-                    PhpRefreshGdiHandles(hwndDlg, context);
-                }
+                PhpRefreshGdiHandles(context);
                 break;
             }
         }
@@ -432,7 +441,60 @@ INT_PTR CALLBACK PhpGdiHandlesDlgProc(
         break;
     case WM_NOTIFY:
         {
-            PhHandleListViewNotifyForCopy(lParam, GetDlgItem(hwndDlg, IDC_LIST));
+            PhHandleListViewNotifyForCopy(lParam, context->ListViewHandle);
+        }
+        break;
+    case WM_CONTEXTMENU:
+        {
+            if ((HWND)wParam == context->ListViewHandle)
+            {
+                POINT point;
+                PPH_EMENU menu;
+                PPH_EMENU item;
+                PVOID* listviewItems;
+                ULONG numberOfItems;
+
+                point.x = GET_X_LPARAM(lParam);
+                point.y = GET_Y_LPARAM(lParam);
+
+                if (point.x == -1 && point.y == -1)
+                    PhGetListViewContextMenuPoint(context->ListViewHandle, &point);
+
+                PhGetSelectedListViewItemParams(context->ListViewHandle, &listviewItems, &numberOfItems);
+
+                if (numberOfItems != 0)
+                {
+                    menu = PhCreateEMenu();
+                    PhInsertEMenuItem(menu, PhCreateEMenuItem(0, IDC_COPY, L"&Copy", NULL, NULL), ULONG_MAX);
+                    PhInsertCopyListViewEMenuItem(menu, IDC_COPY, context->ListViewHandle);
+
+                    item = PhShowEMenu(
+                        menu,
+                        hwndDlg,
+                        PH_EMENU_SHOW_SEND_COMMAND | PH_EMENU_SHOW_LEFTRIGHT,
+                        PH_ALIGN_LEFT | PH_ALIGN_TOP,
+                        point.x,
+                        point.y
+                        );
+
+                    if (item)
+                    {
+                        if (!PhHandleCopyListViewEMenuItem(item))
+                        {
+                            switch (item->Id)
+                            {
+                            case IDC_COPY:
+                                PhCopyListView(context->ListViewHandle);
+                                break;
+                            }
+                        }
+                    }
+
+                    PhDestroyEMenu(menu);
+                }
+
+                PhFree(listviewItems);
+            }
         }
         break;
     case WM_CTLCOLORBTN:

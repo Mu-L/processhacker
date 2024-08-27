@@ -5,13 +5,12 @@
  *
  * Authors:
  *
- *     wj32    2011-2013
- *
+ *     wj32    2011-2016
+ *     dmex    2017-2023
  */
 
 #include <phapp.h>
 #include <settings.h>
-
 #include <winsta.h>
 
 #define SIP(String, Integer) { (String), (PVOID)(Integer) }
@@ -107,12 +106,12 @@ VOID PhShowSessionShadowDialog(
         return;
     }
 
-    DialogBoxParam(
+    PhDialogBox(
         PhInstanceHandle,
         MAKEINTRESOURCE(IDD_SHADOWSESSION),
         ParentWindowHandle,
         PhpSessionShadowDlgProc,
-        (LPARAM)SessionId
+        UlongToPtr(SessionId)
         );
 }
 
@@ -179,8 +178,7 @@ INT_PTR CALLBACK PhpSessionShadowDlgProc(
                     ULONG sessionId = PtrToUlong(PhGetWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT));
                     ULONG virtualKey;
                     ULONG modifiers;
-                    WCHAR computerName[64];
-                    ULONG computerNameLength = 64;
+                    PPH_STRING computerName;
 
                     virtualKey = VK_MULTIPLY;
                     PhFindIntegerSiKeyValuePairs(
@@ -199,9 +197,9 @@ INT_PTR CALLBACK PhpSessionShadowDlgProc(
                     if (Button_GetCheck(GetDlgItem(hwndDlg, IDC_ALT)) == BST_CHECKED)
                         modifiers |= KBDALT;
 
-                    if (GetComputerName(computerName, &computerNameLength))
+                    if (computerName = PhGetActiveComputerName())
                     {
-                        if (WinStationShadow(NULL, computerName, sessionId, (UCHAR)virtualKey, (USHORT)modifiers))
+                        if (WinStationShadow(NULL, PhGetString(computerName), sessionId, (UCHAR)virtualKey, (USHORT)modifiers))
                         {
                             PH_INTEGER_PAIR hotkey;
 
@@ -215,6 +213,8 @@ INT_PTR CALLBACK PhpSessionShadowDlgProc(
                         {
                             PhShowStatus(hwndDlg, L"Unable to remote control the session", 0, GetLastError());
                         }
+
+                        PhDereferenceObject(computerName);
                     }
                     else
                     {
@@ -225,6 +225,12 @@ INT_PTR CALLBACK PhpSessionShadowDlgProc(
             }
         }
         break;
+    case WM_CTLCOLORBTN:
+        return HANDLE_WM_CTLCOLORBTN(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+    case WM_CTLCOLORDLG:
+        return HANDLE_WM_CTLCOLORDLG(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+    case WM_CTLCOLORSTATIC:
+        return HANDLE_WM_CTLCOLORSTATIC(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
     }
 
     return FALSE;

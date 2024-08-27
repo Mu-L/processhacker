@@ -1,3 +1,15 @@
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     wj32    2016
+ *     dmex    2017-2023
+ *
+ */
+
 #ifndef PH_MAINWND_H
 #define PH_MAINWND_H
 
@@ -7,6 +19,8 @@ extern BOOLEAN PhMainWndExiting;
 // begin_phapppub
 #define WM_PH_FIRST (WM_APP + 99)
 #define WM_PH_ACTIVATE (WM_APP + 99)
+#define WM_PH_SHOW_DIALOG (WM_APP + 100) // unused (plugins only)
+#define WM_PH_UPDATE_DIALOG (WM_APP + 101) // unused (plugins only)
 #define PH_ACTIVATE_REPLY 0x1119
 #define WM_PH_NOTIFY_ICON_MESSAGE (WM_APP + 126)
 #define WM_PH_UPDATE_FONT (WM_APP + 136)
@@ -15,30 +29,6 @@ extern BOOLEAN PhMainWndExiting;
 #define WM_PH_LAST (WM_APP + 145)
 
 // begin_phapppub
-PHAPPAPI
-HWND
-NTAPI
-PhGetMainWindowHandle(
-    VOID
-    );
-
-PHAPPAPI
-ULONG
-NTAPI
-PhGetWindowsVersion(
-    VOID
-    );
-
-PHAPPAPI
-BOOLEAN
-NTAPI
-PhGetKernelDriverSystemStart(
-    VOID
-    );
-// plugin macros (dmex)
-#define PhWindowsVersion PhGetWindowsVersion()
-#define PhMainWindowHandle PhGetMainWindowHandle()
-
 typedef enum _PH_MAINWINDOW_CALLBACK_TYPE
 {
     PH_MAINWINDOW_CALLBACK_TYPE_DESTROY,
@@ -48,7 +38,6 @@ typedef enum _PH_MAINWINDOW_CALLBACK_TYPE
     PH_MAINWINDOW_CALLBACK_TYPE_CANCEL_EARLY_SHUTDOWN,
     PH_MAINWINDOW_CALLBACK_TYPE_TOGGLE_VISIBLE,
     PH_MAINWINDOW_CALLBACK_TYPE_SHOW_MEMORY_EDITOR,
-    PH_MAINWINDOW_CALLBACK_TYPE_SHOW_MEMORY_RESULTS,
     PH_MAINWINDOW_CALLBACK_TYPE_SELECT_TAB_PAGE,
     PH_MAINWINDOW_CALLBACK_TYPE_GET_CALLBACK_LAYOUT_PADDING,
     PH_MAINWINDOW_CALLBACK_TYPE_INVALIDATE_LAYOUT_PADDING,
@@ -63,6 +52,12 @@ typedef enum _PH_MAINWINDOW_CALLBACK_TYPE
     PH_MAINWINDOW_CALLBACK_TYPE_GET_UPDATE_AUTOMATICALLY,
     PH_MAINWINDOW_CALLBACK_TYPE_SET_UPDATE_AUTOMATICALLY,
     PH_MAINWINDOW_CALLBACK_TYPE_ICON_CLICK,
+    PH_MAINWINDOW_CALLBACK_TYPE_WINDOW_BASE,
+    PH_MAINWINDOW_CALLBACK_TYPE_WINDOW_PROCEDURE,
+    PH_MAINWINDOW_CALLBACK_TYPE_WINDOW_HANDLE,
+    PH_MAINWINDOW_CALLBACK_TYPE_VERSION,
+    PH_MAINWINDOW_CALLBACK_TYPE_PORTABLE,
+    PH_MAINWINDOW_CALLBACK_TYPE_MAXIMUM
 } PH_MAINWINDOW_CALLBACK_TYPE;
 
 PHAPPAPI
@@ -88,8 +83,6 @@ PhPluginInvokeWindowCallback(
     PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_TOGGLE_VISIBLE, (PVOID)(ULONG_PTR)(AlwaysShow), 0)
 #define ProcessHacker_ShowMemoryEditor(ShowMemoryEditor) \
     PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_SHOW_MEMORY_EDITOR, 0, (PVOID)(ULONG_PTR)(ShowMemoryEditor))
-#define ProcessHacker_ShowMemoryResults(ShowMemoryResults) \
-    PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_SHOW_MEMORY_RESULTS, 0, (PVOID)(ULONG_PTR)(ShowMemoryResults))
 #define ProcessHacker_SelectTabPage(Index) \
     PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_SELECT_TAB_PAGE, (PVOID)(ULONG_PTR)(Index), 0)
 #define ProcessHacker_GetCallbackLayoutPadding() \
@@ -108,17 +101,30 @@ PhPluginInvokeWindowCallback(
     ((HFONT)PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_GET_FONT, 0, 0))
 #define ProcessHacker_Invoke(Function, Parameter) \
     PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_INVOKE, (PVOID)(ULONG_PTR)(Parameter), (PVOID)(ULONG_PTR)(Function))
-#define ProcessHacker_CreateTabPage(Template) \
-    PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_CREATE_TAB_PAGE, 0, (PVOID)(ULONG_PTR)(Template))
+//#define ProcessHacker_CreateTabPage(Template) \
+//    PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_CREATE_TAB_PAGE, 0, (PVOID)(ULONG_PTR)(Template))
 #define ProcessHacker_Refresh() \
     PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_REFRESH, 0, 0)
 #define ProcessHacker_GetUpdateAutomatically() \
-    ((BOOLEAN)PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_GET_UPDATE_AUTOMATICALLY, 0, 0))
+    ((BOOLEAN)PtrToUlong(PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_GET_UPDATE_AUTOMATICALLY, 0, 0)))
 #define ProcessHacker_SetUpdateAutomatically(Value) \
     PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_SET_UPDATE_AUTOMATICALLY, (PVOID)(ULONG_PTR)(Value), 0)
-// end_phapppub
 #define ProcessHacker_IconClick() \
     PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_ICON_CLICK, 0, 0)
+#define ProcessHacker_GetInstanceHandle() \
+    ((PVOID)PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_WINDOW_BASE, 0, 0))
+#define ProcessHacker_GetWindowProcedure() \
+    ((WNDPROC)PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_WINDOW_PROCEDURE, 0, 0))
+#define ProcessHacker_GetWindowHandle() \
+    ((HWND)PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_WINDOW_HANDLE, 0, 0))
+#define ProcessHacker_GetWindowsVersion() \
+    (PtrToUlong(PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_VERSION, 0, 0)))
+#define ProcessHacker_IsPortableMode() \
+    ((BOOLEAN)PtrToUlong(PhPluginInvokeWindowCallback(PH_MAINWINDOW_CALLBACK_TYPE_PORTABLE, 0, 0)))
+
+#define PhWindowsVersion ProcessHacker_GetWindowsVersion() // Temporary backwards compat (dmex)
+#define PhMainWindowHandle ProcessHacker_GetWindowHandle() // Temporary backwards compat (dmex)
+// end_phapppub
 
 // begin_phapppub
 PHAPPAPI
@@ -141,12 +147,6 @@ typedef struct _PH_SHOW_MEMORY_EDITOR
     ULONG Flags;
 } PH_SHOW_MEMORY_EDITOR, *PPH_SHOW_MEMORY_EDITOR;
 
-typedef struct _PH_SHOW_MEMORY_RESULTS
-{
-    HANDLE ProcessId;
-    PPH_LIST Results;
-} PH_SHOW_MEMORY_RESULTS, *PPH_SHOW_MEMORY_RESULTS;
-
 // begin_phapppub
 typedef struct _PH_LAYOUT_PADDING_DATA
 {
@@ -159,7 +159,7 @@ typedef enum _PH_MAIN_TAB_PAGE_MESSAGE
 {
     MainTabPageCreate,
     MainTabPageDestroy,
-    MainTabPageCreateWindow, // HWND *Parameter1 (WindowHandle)
+    MainTabPageCreateWindow, // HWND *Parameter1 (WindowHandle), HWND Parameter2 (ParentWindow)
     MainTabPageSelected, // BOOLEAN Parameter1 (Selected)
     MainTabPageInitializeSectionMenuItems, // PPH_MAIN_TAB_PAGE_MENU_INFORMATION Parameter1
 
@@ -168,12 +168,15 @@ typedef enum _PH_MAIN_TAB_PAGE_MESSAGE
     MainTabPageExportContent, // PPH_MAIN_TAB_PAGE_EXPORT_CONTENT Parameter1
     MainTabPageFontChanged, // HFONT Parameter1 (Font)
     MainTabPageUpdateAutomaticallyChanged, // BOOLEAN Parameter1 (UpdateAutomatically)
+    MainTabPageDpiChanged,
 
     MaxMainTabPageMessage
 } PH_MAIN_TAB_PAGE_MESSAGE;
 
+typedef struct _PH_MAIN_TAB_PAGE *PPH_MAIN_TAB_PAGE;
+
 typedef BOOLEAN (NTAPI *PPH_MAIN_TAB_PAGE_CALLBACK)(
-    _In_ struct _PH_MAIN_TAB_PAGE *Page,
+    _In_ PPH_MAIN_TAB_PAGE Page,
     _In_ PH_MAIN_TAB_PAGE_MESSAGE Message,
     _In_opt_ PVOID Parameter1,
     _In_opt_ PVOID Parameter2
@@ -187,7 +190,7 @@ typedef struct _PH_MAIN_TAB_PAGE_EXPORT_CONTENT
 
 typedef struct _PH_MAIN_TAB_PAGE_MENU_INFORMATION
 {
-    struct _PH_EMENU_ITEM *Menu;
+    PPH_EMENU_ITEM Menu;
     ULONG StartIndex;
 } PH_MAIN_TAB_PAGE_MENU_INFORMATION, *PPH_MAIN_TAB_PAGE_MENU_INFORMATION;
 
@@ -230,8 +233,10 @@ typedef struct _PH_MAIN_TAB_PAGE
 #define PH_NOTIFY_SERVICE_START 0x10
 #define PH_NOTIFY_SERVICE_STOP 0x20
 #define PH_NOTIFY_SERVICE_MODIFIED 0x40
-#define PH_NOTIFY_MAXIMUM 0x80
-#define PH_NOTIFY_VALID_MASK 0x7f
+#define PH_NOTIFY_DEVICE_ARRIVED 0x80
+#define PH_NOTIFY_DEVICE_REMOVED 0x100
+#define PH_NOTIFY_MAXIMUM 0x200
+#define PH_NOTIFY_VALID_MASK 0x1ff
 // end_phapppub
 
 BOOLEAN PhMainWndInitialization(
@@ -239,15 +244,16 @@ BOOLEAN PhMainWndInitialization(
     );
 
 VOID PhAddMiniProcessMenuItems(
-    _Inout_ struct _PH_EMENU_ITEM *Menu,
+    _Inout_ PPH_EMENU_ITEM Menu,
     _In_ HANDLE ProcessId
     );
 
 BOOLEAN PhHandleMiniProcessMenuItem(
-    _Inout_ struct _PH_EMENU_ITEM *MenuItem
+    _Inout_ PPH_EMENU_ITEM MenuItem
     );
 
 VOID PhShowIconContextMenu(
+    _In_ HWND WindowHandle,
     _In_ POINT Location
     );
 
@@ -263,6 +269,15 @@ PhShowIconNotification(
 
 VOID PhShowDetailsForIconNotification(
     VOID
+    );
+
+VOID PhShowOptionsRestartRequired(
+    _In_ HWND WindowHandle
+    );
+
+BOOLEAN PhShowOptionsDefaultInstallLocation(
+    _In_ HWND ParentWindowHandle,
+    _In_ PWSTR Message
     );
 
 VOID PhShowProcessContextMenu(

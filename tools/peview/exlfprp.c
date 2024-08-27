@@ -186,7 +186,7 @@ static NTSTATUS PvpQueryWslImageThreadStart(
 {
     HWND windowHandle = Parameter;
 
-    PhInitializeLxssImageVersionInfo(&PvImageVersionInfo, PvFileName);
+    PhInitializeLxssImageVersionInfo(&PvImageVersionInfo, &PvFileName->sr);
 
     PhSetDialogItemText(windowHandle, IDC_NAME, PvpGetStringOrNa(PvImageVersionInfo.FileDescription));
     PhSetDialogItemText(windowHandle, IDC_COMPANYNAME, PvpGetStringOrNa(PvImageVersionInfo.CompanyName));
@@ -203,7 +203,7 @@ VOID PvpSetWslmageVersionInfo(
     PhSetDialogItemText(WindowHandle, IDC_COMPANYNAME, L"Loading...");
     PhSetDialogItemText(WindowHandle, IDC_VERSION, L"Loading...");
 
-    PhQueueItemWorkQueue(PhGetGlobalWorkQueue(), PvpQueryWslImageThreadStart, WindowHandle);
+    PhCreateThread2(PvpQueryWslImageThreadStart, WindowHandle);
 
     Static_SetIcon(GetDlgItem(WindowHandle, IDC_FILEICON), PvImageLargeIcon);
 }
@@ -380,8 +380,8 @@ PPH_STRING PvpGetWslImageSectionFlagsString(
     else
         PhAppendStringBuilder2(&sb, L"(None)");
 
-    // TODO: The "objdump -h /bin/su --wide" command shows section flags 
-    // such as CONTENT which appears to be based on ElfSectionType != SHT_NOBITS 
+    // TODO: The "objdump -h /bin/su --wide" command shows section flags
+    // such as CONTENT which appears to be based on ElfSectionType != SHT_NOBITS
     // but I can't find the relevant source-code and check.
 
     return PhFinalStringBuilderString(&sb);
@@ -463,7 +463,7 @@ INT_PTR CALLBACK PvpExlfGeneralDlgProc(
 
             PvpLoadWslSections(lvHandle);
 
-            PhInitializeWindowTheme(hwndDlg, PeEnableThemeSupport);
+            PhInitializeWindowTheme(hwndDlg, PhEnableThemeSupport);
         }
         break;
     case WM_DESTROY:

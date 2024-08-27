@@ -51,10 +51,52 @@ static WCHAR PhpFormatDecimalSeparator = L'.';
 static WCHAR PhpFormatThousandSeparator = L',';
 static _locale_t PhpFormatUserLocale = NULL;
 
-// We previously used an internal CRT routine named _cfltcvt_l for floating-point
-// conversion (which also handled the locale) but this was changed in newer versions
-// of the CRT and was no longer available. We're now using the high-performance std::to_chars
-// but it doesn't handle the users locale so we'll fixup the locale here. (dmex)
+VOID PhpFormatSingleToUtf8Locale(
+    _In_ FLOAT Value,
+    _In_ ULONG Type,
+    _In_ INT32 Precision,
+    _Out_writes_bytes_opt_(BufferLength) PSTR Buffer,
+    _In_opt_ SIZE_T BufferLength
+    )
+{
+    if (!PhFormatSingleToUtf8(
+        Value,
+        Type,
+        Precision,
+        Buffer,
+        BufferLength,
+        NULL
+        ))
+    {
+        if (Buffer)
+            *Buffer = ANSI_NULL;
+        return;
+    }
+
+    if (PhpFormatUserLocale && Buffer)
+    {
+        for (PCH c = Buffer; *c; ++c)
+        {
+            if (*c == '.')
+            {
+                *c = (CHAR)PhpFormatDecimalSeparator;
+                break;
+            }
+        }
+    }
+
+    if (Type & FormatUpperCase)
+    {
+        if (PhpFormatUserLocale)
+            _strupr_l(Buffer, PhpFormatUserLocale);
+        else
+            _strupr(Buffer);
+
+        //for (PCH c = Buffer; *c; ++c)
+        //    *c = RtlUpperChar(*c);
+    }
+}
+
 VOID PhpFormatDoubleToUtf8Locale(
     _In_ DOUBLE Value,
     _In_ ULONG Type,

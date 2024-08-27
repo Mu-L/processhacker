@@ -1,11 +1,13 @@
-﻿using System;
-using System.IO;
-using System.Net;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Text;
-using System.Text.Json;
-using System.Collections.Generic;
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     dmex
+ *
+ */
 
 namespace CustomBuildTool
 {
@@ -16,8 +18,8 @@ namespace CustomBuildTool
 
         static Github()
         {
-            BaseUrl = Win32.GetEnvironmentVariable("%APPVEYOR_GITHUB_MIRROR_API%");
-            BaseToken = Win32.GetEnvironmentVariable("%APPVEYOR_GITHUB_MIRROR_KEY%");
+            BaseUrl = Win32.GetEnvironmentVariable("GITHUB_MIRROR_API");
+            BaseToken = Win32.GetEnvironmentVariable("GITHUB_MIRROR_KEY");
         }
 
         public static GithubReleasesResponse CreateRelease(string Version)
@@ -34,17 +36,20 @@ namespace CustomBuildTool
                     ReleaseTag = Version,
                     Name = Version,
                     Draft = true,
-                    Prerelease = true
+                    GenerateReleaseNotes = true,
+                    //Prerelease = true
                 };
 
                 byte[] buildPostString = JsonSerializer.SerializeToUtf8Bytes(buildUpdateRequest, GithubReleasesRequestContext.Default.GithubReleasesRequest);
 
-                if (buildPostString == null || buildPostString.LongLength == 0)
+                if (buildPostString.LongLength == 0)
                     return null;
 
                 using (HttpClientHandler httpClientHandler = new HttpClientHandler())
                 {
                     httpClientHandler.AutomaticDecompression = DecompressionMethods.All;
+                    httpClientHandler.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
+                    httpClientHandler.ServerCertificateCustomValidationCallback = CertValidationCallback;
 
                     using (HttpClient httpClient = new HttpClient(httpClientHandler))
                     {
@@ -63,7 +68,7 @@ namespace CustomBuildTool
 
                             if (!httpTask.Result.IsSuccessStatusCode)
                             {
-                                Program.PrintColorMessage("[CreateRelease-Post] " + httpTask.Result, ConsoleColor.Red);
+                                Program.PrintColorMessage($"[CreateRelease-Post] {httpTask.Result}", ConsoleColor.Red);
                                 return null;
                             }
 
@@ -84,7 +89,7 @@ namespace CustomBuildTool
                                 return null;
                             }
 
-                            if (string.IsNullOrWhiteSpace(response.upload_url))
+                            if (string.IsNullOrWhiteSpace(response.UploadUrl))
                             {
                                 Program.PrintColorMessage("[CreateRelease-upload_url]", ConsoleColor.Red);
                                 return null;
@@ -97,7 +102,7 @@ namespace CustomBuildTool
             }
             catch (Exception ex)
             {
-                Program.PrintColorMessage("[CreateRelease] " + ex, ConsoleColor.Red);
+                Program.PrintColorMessage($"[CreateRelease] {ex}", ConsoleColor.Red);
             }
 
             return null;
@@ -115,6 +120,8 @@ namespace CustomBuildTool
                 using (HttpClientHandler httpClientHandler = new HttpClientHandler())
                 {
                     httpClientHandler.AutomaticDecompression = DecompressionMethods.All;
+                    httpClientHandler.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
+                    httpClientHandler.ServerCertificateCustomValidationCallback = CertValidationCallback;
 
                     using (HttpClient httpClient = new HttpClient(httpClientHandler))
                     {
@@ -201,17 +208,19 @@ namespace CustomBuildTool
                 var buildUpdateRequest = new GithubReleasesRequest
                 {
                     Draft = false,
-                    Prerelease = true
+                    //Prerelease = true
                 };
 
                 byte[] buildPostString = JsonSerializer.SerializeToUtf8Bytes(buildUpdateRequest, GithubReleasesRequestContext.Default.GithubReleasesRequest);
 
-                if (buildPostString == null || buildPostString.LongLength == 0)
+                if (buildPostString.LongLength == 0)
                     return null;
 
                 using (HttpClientHandler httpClientHandler = new HttpClientHandler())
                 {
                     httpClientHandler.AutomaticDecompression = DecompressionMethods.All;
+                    httpClientHandler.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
+                    httpClientHandler.ServerCertificateCustomValidationCallback = CertValidationCallback;
 
                     using (HttpClient httpClient = new HttpClient(httpClientHandler))
                     {
@@ -251,7 +260,7 @@ namespace CustomBuildTool
                                 return null;
                             }
 
-                            if (string.IsNullOrWhiteSpace(response.upload_url))
+                            if (string.IsNullOrWhiteSpace(response.UploadUrl))
                             {
                                 Program.PrintColorMessage("[UpdateRelease-upload_url]", ConsoleColor.Red);
                                 return null;
@@ -292,6 +301,8 @@ namespace CustomBuildTool
                 using (HttpClientHandler httpClientHandler = new HttpClientHandler())
                 {
                     httpClientHandler.AutomaticDecompression = DecompressionMethods.All;
+                    httpClientHandler.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
+                    httpClientHandler.ServerCertificateCustomValidationCallback = CertValidationCallback;
 
                     using (HttpClient httpClient = new HttpClient(httpClientHandler))
                     {
@@ -333,7 +344,7 @@ namespace CustomBuildTool
                                 return null;
                             }
 
-                            if (!response.Uploaded || string.IsNullOrWhiteSpace(response.download_url))
+                            if (!response.Uploaded || string.IsNullOrWhiteSpace(response.DownloadUrl))
                             {
                                 Program.PrintColorMessage("[UploadAssets-download_url]", ConsoleColor.Red);
                                 return null;
@@ -350,6 +361,29 @@ namespace CustomBuildTool
             }
 
             return null;
+        }
+
+        private static readonly string[] TrustedSubjects =
+        {
+            "CN=*.github.com",
+            "CN=*.github.com, O=\"GitHub, Inc.\", L=San Francisco, S=California, C=US",
+        };
+
+        private static bool CertValidationCallback(
+            HttpRequestMessage Rquest,
+            X509Certificate Cert,
+            X509Chain Chain,
+            SslPolicyErrors Errors
+            )
+        {
+            if (Errors != SslPolicyErrors.None)
+                return false;
+
+            if (TrustedSubjects.Contains(Cert.Subject))
+                return true;
+
+            Program.PrintColorMessage($"[CertValidationCallback] {Cert.Subject}", ConsoleColor.Red);
+            return false;
         }
     }
 
@@ -397,18 +431,12 @@ namespace CustomBuildTool
 
         public override bool Equals(object obj)
         {
-            if (obj == null)
-                return false;
-
-            if (obj is not GithubRelease file)
-                return false;
-
-            return this.ReleaseId.Equals(file.ReleaseId, StringComparison.OrdinalIgnoreCase);
+            return obj is GithubRelease file && this.ReleaseId.Equals(file.ReleaseId, StringComparison.OrdinalIgnoreCase);
         }
 
         public bool Equals(GithubRelease other)
         {
-            return this.ReleaseId.Equals(other.ReleaseId, StringComparison.OrdinalIgnoreCase);
+            return other != null && this.ReleaseId.Equals(other.ReleaseId, StringComparison.OrdinalIgnoreCase);
         }
 
         public int CompareTo(object obj)
@@ -417,7 +445,7 @@ namespace CustomBuildTool
                 return 1;
 
             if (obj is GithubRelease package)
-                return this.ReleaseId.CompareTo(package.ReleaseId);
+                return string.Compare(this.ReleaseId, package.ReleaseId, StringComparison.OrdinalIgnoreCase);
             else
                 return 1;
         }
@@ -427,20 +455,15 @@ namespace CustomBuildTool
             if (obj == null)
                 return 1;
 
-            return this.ReleaseId.CompareTo(obj.ReleaseId);
+            return string.Compare(this.ReleaseId, obj.ReleaseId, StringComparison.OrdinalIgnoreCase);
         }
     }
 
-    public class GithubReleaseAsset : IComparable, IComparable<GithubReleaseAsset>, IEquatable<GithubReleaseAsset>
+    public class GithubReleaseAsset(string Filename, string DownloadUrl)
+        : IComparable, IComparable<GithubReleaseAsset>, IEquatable<GithubReleaseAsset>
     {
-        public string Filename { get; private set; }
-        public string DownloadUrl { get; private set; }
-
-        public GithubReleaseAsset(string Filename, string DownloadUrl)
-        {
-            this.Filename = Filename;
-            this.DownloadUrl = DownloadUrl;
-        }
+        public string Filename { get; } = Filename;
+        public string DownloadUrl { get; } = DownloadUrl;
 
         public override string ToString()
         {
@@ -454,18 +477,12 @@ namespace CustomBuildTool
 
         public override bool Equals(object obj)
         {
-            if (obj == null)
-                return false;
-
-            if (obj is not GithubReleaseAsset file)
-                return false;
-
-            return this.Filename.Equals(file.Filename, StringComparison.OrdinalIgnoreCase);
+            return obj is GithubReleaseAsset file && this.Filename.Equals(file.Filename, StringComparison.OrdinalIgnoreCase);
         }
 
         public bool Equals(GithubReleaseAsset other)
         {
-            return this.Filename.Equals(other.Filename, StringComparison.OrdinalIgnoreCase);
+            return other != null && this.Filename.Equals(other.Filename, StringComparison.OrdinalIgnoreCase);
         }
 
         public int CompareTo(object obj)
@@ -474,7 +491,7 @@ namespace CustomBuildTool
                 return 1;
 
             if (obj is GithubReleaseAsset package)
-                return this.Filename.CompareTo(package.Filename);
+                return string.Compare(this.Filename, package.Filename, StringComparison.OrdinalIgnoreCase);
             else
                 return 1;
         }
@@ -484,7 +501,7 @@ namespace CustomBuildTool
             if (obj == null)
                 return 1;
 
-            return this.Filename.CompareTo(obj.Filename);
+            return string.Compare(this.Filename, obj.Filename, StringComparison.OrdinalIgnoreCase);
         }
     }
 }

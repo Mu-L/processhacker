@@ -11,7 +11,7 @@
 
 #include <peview.h>
 
-typedef struct _PVP_PE_ATTRIBUTES_CONTEXT
+typedef struct _PV_PE_ATTRIBUTES_CONTEXT
 {
     HWND WindowHandle;
     HWND ListViewHandle;
@@ -25,41 +25,42 @@ typedef struct _PV_EA_CALLBACK
     ULONG Count;
 } PV_EA_CALLBACK, *PPV_EA_CALLBACK;
 
-BOOLEAN NTAPI PvpEnumFileAttributesCallback(
+NTSTATUS NTAPI PvpEnumFileAttributesCallback(
+    _In_ HANDLE RootDirectory,
     _In_ PFILE_FULL_EA_INFORMATION Information,
-    _In_opt_ PVOID Context
+    _In_opt_ PPV_EA_CALLBACK Context
     )
 {
-    PPV_EA_CALLBACK context = Context;
-    PPH_STRING attributeName;
-    INT lvItemIndex;
-    WCHAR number[PH_INT32_STR_LEN_1];
+    for (PFILE_FULL_EA_INFORMATION i = PH_FIRST_FILE_EA(Information); i; i = PH_NEXT_FILE_EA(i))
+    {
+        PPH_STRING attributeName;
+        INT lvItemIndex;
+        WCHAR number[PH_INT32_STR_LEN_1];
 
-    if (!context)
-        return TRUE;
-    if (Information->EaNameLength == 0)
-        return TRUE;
+        PhPrintUInt32(number, ++Context->Count);
+        lvItemIndex = PhAddListViewItem(Context->ListViewHandle, MAXINT, number, NULL);
 
-    PhPrintUInt32(number, ++context->Count);
-    lvItemIndex = PhAddListViewItem(context->ListViewHandle, MAXINT, number, NULL);
+        if (i->EaNameLength)
+        {
+            attributeName = PhConvertUtf8ToUtf16Ex(i->EaName, i->EaNameLength);
+            PhSetListViewSubItem(
+                Context->ListViewHandle,
+                lvItemIndex,
+                1,
+                attributeName->Buffer
+                );
+            PhDereferenceObject(attributeName);
+        }
 
-    attributeName = PhZeroExtendToUtf16Ex(Information->EaName, Information->EaNameLength);
-    PhSetListViewSubItem(
-        context->ListViewHandle,
-        lvItemIndex,
-        1,
-        attributeName->Buffer
-        );
-    PhDereferenceObject(attributeName);
+        PhSetListViewSubItem(
+            Context->ListViewHandle,
+            lvItemIndex,
+            2,
+            PhaFormatSize(i->EaValueLength, ULONG_MAX)->Buffer
+            );
+    }
 
-    PhSetListViewSubItem(
-        context->ListViewHandle,
-        lvItemIndex,
-        2,
-        PhaFormatSize(Information->EaValueLength, ULONG_MAX)->Buffer
-        );
-
-    return TRUE;
+    return STATUS_SUCCESS;
 }
 
 VOID PvEnumerateFileExtendedAttributes(
@@ -110,7 +111,7 @@ INT_PTR CALLBACK PvpPeExtendedAttributesDlgProc(
 
         if (lParam)
         {
-            LPPROPSHEETPAGE propSheetPage = (LPPROPSHEETPAGE)lParam;
+            const LPPROPSHEETPAGE propSheetPage = (LPPROPSHEETPAGE)lParam;
             context->PropSheetContext = (PPV_PROPPAGECONTEXT)propSheetPage->lParam;
         }
     }
@@ -126,8 +127,6 @@ INT_PTR CALLBACK PvpPeExtendedAttributesDlgProc(
     {
     case WM_INITDIALOG:
         {
-            HIMAGELIST listViewImageList;
-
             context->WindowHandle = hwndDlg;
             context->ListViewHandle = GetDlgItem(hwndDlg, IDC_LIST);
 
@@ -139,16 +138,14 @@ INT_PTR CALLBACK PvpPeExtendedAttributesDlgProc(
             PhSetExtendedListView(context->ListViewHandle);
             PhLoadListViewColumnsFromSetting(L"ImageAttributesListViewColumns", context->ListViewHandle);
             PvConfigTreeBorders(context->ListViewHandle);
+            PvSetListViewImageList(context->WindowHandle, context->ListViewHandle);
 
             PhInitializeLayoutManager(&context->LayoutManager, hwndDlg);
             PhAddLayoutItem(&context->LayoutManager, context->ListViewHandle, NULL, PH_ANCHOR_ALL);
 
-            if (listViewImageList = PhImageListCreate(2, 20, ILC_MASK | ILC_COLOR, 1, 1))
-                ListView_SetImageList(context->ListViewHandle, listViewImageList, LVSIL_SMALL);
-
             PvEnumerateFileExtendedAttributes(context->ListViewHandle);
 
-            PhInitializeWindowTheme(hwndDlg, PeEnableThemeSupport);
+            PhInitializeWindowTheme(hwndDlg, PhEnableThemeSupport);
         }
         break;
     case WM_DESTROY:
@@ -157,7 +154,13 @@ INT_PTR CALLBACK PvpPeExtendedAttributesDlgProc(
 
             PhDeleteLayoutManager(&context->LayoutManager);
 
+            PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
             PhFree(context);
+        }
+        break;
+    case WM_DPICHANGED:
+        {
+            PvSetListViewImageList(context->WindowHandle, context->ListViewHandle);
         }
         break;
     case WM_SHOWWINDOW:
@@ -225,7 +228,7 @@ INT_PTR CALLBACK PvpPeExtendedAttributesDlgProc(
                                     PPH_BYTES nameAnsi = NULL;
                                     INT index;
 
-                                    if ((index = PhFindListViewItemByFlags(context->ListViewHandle, -1, LVNI_SELECTED)) != -1)
+                                    if ((index = PhFindListViewItemByFlags(context->ListViewHandle, INT_ERROR, LVNI_SELECTED)) != INT_ERROR)
                                     {
                                         nameUtf = PhGetListViewItemText(context->ListViewHandle, index, 1);
                                     }

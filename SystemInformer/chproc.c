@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010
- *     dmex    2016-2021
+ *     dmex    2016-2023
  *
  */
 
@@ -45,12 +45,12 @@ BOOLEAN PhShowChooseProcessDialog(
     context.Message = Message;
     context.ProcessId = NULL;
 
-    if (DialogBoxParam(
+    if (PhDialogBox(
         PhInstanceHandle,
         MAKEINTRESOURCE(IDD_CHOOSEPROCESS),
         ParentWindowHandle,
         PhpChooseProcessDlgProc,
-        (LPARAM)&context
+        &context
         ) == IDOK)
     {
         *ProcessId = context.ProcessId;
@@ -98,7 +98,7 @@ static VOID PhpRefreshProcessList(
         if (process->UniqueProcessId != SYSTEM_IDLE_PROCESS_ID)
             name = PhCreateStringFromUnicodeString(&process->ImageName);
         else
-            name = PhCreateString(SYSTEM_IDLE_PROCESS_NAME);
+            name = PhCreateStringFromUnicodeString(&SYSTEM_IDLE_PROCESS_NAME);
 
         lvItemIndex = PhAddListViewItem(Context->ListViewHandle, MAXINT, name->Buffer, process->UniqueProcessId);
         PhDereferenceObject(name);
@@ -106,14 +106,13 @@ static VOID PhpRefreshProcessList(
         if (NT_SUCCESS(PhOpenProcess(&processHandle, PROCESS_QUERY_LIMITED_INFORMATION, process->UniqueProcessId)))
         {
             HANDLE tokenHandle;
-            PTOKEN_USER user;
+            PH_TOKEN_USER tokenUser;
 
             if (NT_SUCCESS(PhOpenProcessToken(processHandle, TOKEN_QUERY, &tokenHandle)))
             {
-                if (NT_SUCCESS(PhGetTokenUser(tokenHandle, &user)))
+                if (NT_SUCCESS(PhGetTokenUser(tokenHandle, &tokenUser)))
                 {
-                    userName = PhGetSidFullName(user->User.Sid, TRUE, NULL);
-                    PhFree(user);
+                    userName = PhGetSidFullName(tokenUser.User.Sid, TRUE, NULL);
                 }
 
                 NtClose(tokenHandle);
@@ -124,11 +123,11 @@ static VOID PhpRefreshProcessList(
 
         if (process->UniqueProcessId == SYSTEM_IDLE_PROCESS_ID && !userName)
         {
-            PhSetReference(&userName, PhGetSidFullName(&PhSeLocalSystemSid, TRUE, NULL));
+            PhSetReference(&userName, PhGetSidFullName((PSID)&PhSeLocalSystemSid, TRUE, NULL));
         }
 
         if (process->UniqueProcessId == SYSTEM_PROCESS_ID)
-            fileName = PhGetKernelFileName();
+            fileName = PhGetKernelFileName2();
         else if (PH_IS_REAL_PROCESS_ID(process->UniqueProcessId))
             PhGetProcessImageFileNameByProcessId(process->UniqueProcessId, &fileName);
 
@@ -138,7 +137,7 @@ static VOID PhpRefreshProcessList(
         // Icon
         if (!PhIsNullOrEmptyString(fileName))
         {
-            PhExtractIcon(PhGetString(fileName), NULL, &icon);
+            PhExtractIcon(PhGetString(fileName), &icon, NULL);
         }
 
         if (icon)
@@ -171,6 +170,35 @@ static VOID PhpRefreshProcessList(
     ExtendedListView_SetRedraw(Context->ListViewHandle, TRUE);
 }
 
+static VOID PhpChooseProcessSetImagelist(
+    _Inout_ PPH_CHOOSE_PROCESS_DIALOG_CONTEXT context
+    )
+{
+    LONG dpiValue;
+
+    dpiValue = PhGetWindowDpi(context->ListViewHandle);
+
+    if (context->ImageList)
+    {
+        PhImageListSetIconSize(
+            context->ImageList,
+            PhGetSystemMetrics(SM_CXSMICON, dpiValue),
+            PhGetSystemMetrics(SM_CYSMICON, dpiValue)
+            );
+    }
+    else
+    {
+        context->ImageList = PhImageListCreate(
+            PhGetSystemMetrics(SM_CXSMICON, dpiValue),
+            PhGetSystemMetrics(SM_CYSMICON, dpiValue),
+            ILC_MASK | ILC_COLOR32,
+            0, 40
+            );
+    }
+
+    ListView_SetImageList(context->ListViewHandle, context->ImageList, LVSIL_SMALL);
+}
+
 INT_PTR CALLBACK PhpChooseProcessDlgProc(
     _In_ HWND hwndDlg,
     _In_ UINT uMsg,
@@ -188,11 +216,6 @@ INT_PTR CALLBACK PhpChooseProcessDlgProc(
     else
     {
         context = PhGetWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
-
-        if (uMsg == WM_DESTROY)
-        {
-            PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
-        }
     }
 
     if (!context)
@@ -225,7 +248,6 @@ INT_PTR CALLBACK PhpChooseProcessDlgProc(
             MapDialogRect(hwndDlg, &context->MinimumSize);
 
             context->ListViewHandle = lvHandle = GetDlgItem(hwndDlg, IDC_LIST);
-            context->ImageList = PhImageListCreate(PhSmallIconSize.X, PhSmallIconSize.Y, ILC_COLOR32 | ILC_MASK, 0, 40);
 
             PhSetListViewStyle(lvHandle, FALSE, TRUE);
             PhSetControlTheme(lvHandle, L"explorer");
@@ -234,7 +256,7 @@ INT_PTR CALLBACK PhpChooseProcessDlgProc(
             PhAddListViewColumn(lvHandle, 2, 2, 2, LVCFMT_LEFT, 160, L"User name");
             PhSetExtendedListView(lvHandle);
 
-            ListView_SetImageList(lvHandle, context->ImageList, LVSIL_SMALL);
+            PhpChooseProcessSetImagelist(context);
 
             PhpRefreshProcessList(hwndDlg, context);
 
@@ -243,8 +265,22 @@ INT_PTR CALLBACK PhpChooseProcessDlgProc(
         break;
     case WM_DESTROY:
         {
-            //PhImageListDestroy(context->ImageList);
             PhDeleteLayoutManager(&context->LayoutManager);
+
+            if (context->ImageList)
+            {
+                PhImageListDestroy(context->ImageList);
+                context->ImageList = NULL;
+            }
+
+            PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
+        }
+        break;
+    case WM_DPICHANGED:
+        {
+            PhpChooseProcessSetImagelist(context);
+
+            PhpRefreshProcessList(hwndDlg, context);
         }
         break;
     case WM_COMMAND:

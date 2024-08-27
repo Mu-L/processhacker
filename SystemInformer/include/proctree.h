@@ -1,3 +1,15 @@
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     wj32    2009-2016
+ *     dmex    2017-2023
+ *
+ */
+
 #ifndef PH_PROCTREE_H
 #define PH_PROCTREE_H
 
@@ -107,8 +119,16 @@
 #define PHPRTLC_PARENTCONSOLEPID 94
 #define PHPRTLC_COMMITSIZE 95
 #define PHPRTLC_PRIORITYBOOST 96
+#define PHPRTLC_CPUAVERAGE 97
+#define PHPRTLC_CPUKERNEL 98
+#define PHPRTLC_CPUUSER 99
+#define PHPRTLC_GRANTEDACCESS 100
+#define PHPRTLC_TLSBITMAPDELTA 101
+#define PHPRTLC_REFERENCEDELTA 102
+#define PHPRTLC_LXSSPID 103
+#define PHPRTLC_START_KEY 104
 
-#define PHPRTLC_MAXIMUM 97
+#define PHPRTLC_MAXIMUM 105
 #define PHPRTLC_IOGROUP_COUNT 9
 
 #define PHPN_WSCOUNTERS 0x1
@@ -129,7 +149,11 @@
 #define PHPN_ERRORMODE 0x8000
 #define PHPN_CODEPAGE 0x10000
 #define PHPN_POWERTHROTTLING 0x20000
-#define PHPN_PRIORITYBOOST 0x40000
+//#define UNUSED 0x40000
+#define PHPN_PRIORITYBOOST 0x80000
+#define PHPN_GRANTEDACCESS 0x100000
+#define PHPN_TLSBITMAPDELTA 0x200000
+#define PHPN_REFERENCEDELTA 0x400000
 
 // begin_phapppub
 typedef struct _PH_PROCESS_NODE
@@ -148,8 +172,6 @@ typedef struct _PH_PROCESS_NODE
 // end_phapppub
 
     PH_STRINGREF TextCache[PHPRTLC_MAXIMUM];
-
-    PH_STRINGREF DescriptionText;
 
     // If the user has selected certain columns we need extra information that isn't retrieved by
     // the process provider.
@@ -181,13 +203,18 @@ typedef struct _PH_PROCESS_NODE
     // Image
     ULONG ImageTimeDateStamp;
     USHORT ImageCharacteristics;
-    USHORT ImageReserved;
+    USHORT ImageMachine;
     USHORT ImageSubsystem;
     USHORT ImageDllCharacteristics;
+#ifdef _ARM64_
+    ULONG ImageCHPEVersion;
+#endif
+    USHORT Architecture;
+
     // App ID
     PPH_STRING AppIdText;
     // DPI awareness
-    ULONG DpiAwareness;
+    PH_PROCESS_DPI_AWARENESS DpiAwareness;
     // File attributes
     LARGE_INTEGER FileLastWriteTime;
     LARGE_INTEGER FileEndOfFile;
@@ -199,6 +226,10 @@ typedef struct _PH_PROCESS_NODE
     BOOLEAN PowerThrottling;
     // Priority boost
     BOOLEAN PriorityBoost;
+    // TLS bitmap
+    USHORT TlsBitmapCount;
+    // Reference count
+    ULONG ReferenceCount;
 
     PPH_STRING TooltipText;
     ULONG64 TooltipTextValidToTickCount;
@@ -250,7 +281,6 @@ typedef struct _PH_PROCESS_NODE
     PPH_STRING JobObjectIdText;
     PPH_STRING ProtectionText;
     PPH_STRING DesktopInfoText;
-    PPH_STRING PidHexText;
     PPH_STRING CpuCoreUsageText;
     PPH_STRING ImageCoherencyText;
     PPH_STRING ImageCoherencyStatusText;
@@ -259,6 +289,12 @@ typedef struct _PH_PROCESS_NODE
     PPH_STRING ParentPidText;
     PPH_STRING ParentConsolePidText;
     PPH_STRING SharedCommitText;
+    PPH_STRING CpuAverageText;
+    PPH_STRING CpuKernelText;
+    PPH_STRING CpuUserText;
+    PPH_STRING GrantedAccessText;
+    PPH_STRING TlsBitmapDeltaText;
+    PPH_STRING ReferenceCountText;
 
     // Graph buffers
     PH_GRAPH_BUFFERS CpuGraphBuffers;
@@ -300,7 +336,7 @@ VOID PhReloadSettingsProcessTreeList(
 
 // begin_phapppub
 PHAPPAPI
-struct _PH_TN_FILTER_SUPPORT *
+PPH_TN_FILTER_SUPPORT
 NTAPI
 PhGetFilterSupportProcessTreeList(
     VOID
@@ -351,6 +387,22 @@ VOID
 NTAPI
 PhGetSelectedProcessItems(
     _Out_ PPH_PROCESS_ITEM **Processes,
+    _Out_ PULONG NumberOfProcesses
+    );
+
+PHAPPAPI
+VOID
+NTAPI
+PhGetSelectedProcessNodes(
+    _Out_ PPH_PROCESS_NODE** Nodes,
+    _Out_ PULONG NumberOfNodes
+    );
+
+PHAPPAPI
+VOID
+NTAPI
+PhGetSelectedAndPropagateProcessItems(
+    _Out_ PPH_PROCESS_ITEM** Processes,
     _Out_ PULONG NumberOfProcesses
     );
 

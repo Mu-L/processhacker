@@ -9,12 +9,28 @@
  *
  */
 
-#include <setup.h>
+#include "setup.h"
 
-PH_STRINGREF UninstallKeyName = PH_STRINGREF_INIT(L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ProcessHacker");
-//PH_STRINGREF PhImageOptionsKeyName = PH_STRINGREF_INIT(L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\ProcessHacker.exe");
-//PH_STRINGREF PhImageOptionsWow64KeyName = PH_STRINGREF_INIT(L"Software\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\ProcessHacker.exe");
-PH_STRINGREF TmImageOptionsKeyName = PH_STRINGREF_INIT(L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\taskmgr.exe");
+#ifdef PH_RELEASE_CHANNEL_ID
+#if PH_RELEASE_CHANNEL_ID == 0
+#define SETUP_APP_PARAMETERS L"-channel release"
+#elif PH_RELEASE_CHANNEL_ID == 1
+#define SETUP_APP_PARAMETERS L"-channel preview"
+#elif PH_RELEASE_CHANNEL_ID == 2
+#define SETUP_APP_PARAMETERS L"-channel canary"
+#elif PH_RELEASE_CHANNEL_ID == 3
+#define SETUP_APP_PARAMETERS L"-channel developer"
+#endif
+#endif
+
+#ifndef SETUP_APP_PARAMETERS
+#error PH_RELEASE_CHANNEL_ID undefined
+#endif
+
+PH_STRINGREF UninstallKeyName = PH_STRINGREF_INIT(L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SystemInformer");
+PH_STRINGREF AppPathsKeyName = PH_STRINGREF_INIT(L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\SystemInformer.exe");
+PH_STRINGREF TaskmgrIfeoKeyName = PH_STRINGREF_INIT(L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\taskmgr.exe");
+PH_STRINGREF CurrentUserRunKeyName = PH_STRINGREF_INIT(L"Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 
 NTSTATUS SetupCreateUninstallKey(
     _In_ PPH_SETUP_CONTEXT Context
@@ -22,7 +38,6 @@ NTSTATUS SetupCreateUninstallKey(
 {
     NTSTATUS status;
     HANDLE keyHandle;
-    PH_STRINGREF name;
     PH_STRINGREF value;
     ULONG ulong = 1;
 
@@ -31,52 +46,39 @@ NTSTATUS SetupCreateUninstallKey(
         KEY_ALL_ACCESS | KEY_WOW64_64KEY,
         PH_KEY_LOCAL_MACHINE,
         &UninstallKeyName,
-        0,
+        OBJ_OPENIF,
         0,
         NULL
         );
 
     if (NT_SUCCESS(status))
     {
-        PPH_STRING tempString;
+        PPH_STRING string;
 
-        PhInitializeStringRef(&name, L"DisplayIcon");
-        tempString = SetupCreateFullPath(Context->SetupInstallPath, L"\\processhacker.exe,0");
-        PhSetValueKey(keyHandle, &name, REG_SZ, tempString->Buffer, (ULONG)tempString->Length + sizeof(UNICODE_NULL));
-        PhDereferenceObject(tempString);
+        string = SetupCreateFullPath(Context->SetupInstallPath, L"\\systeminformer.exe,0");
+        PhSetValueKeyZ(keyHandle, L"DisplayIcon", REG_SZ, string->Buffer, (ULONG)string->Length + sizeof(UNICODE_NULL));
 
-        PhInitializeStringRef(&name, L"DisplayName");
-        PhInitializeStringRef(&value, L"Process Hacker");
-        PhSetValueKey(keyHandle, &name, REG_SZ, value.Buffer, (ULONG)value.Length + sizeof(UNICODE_NULL));
+        PhInitializeStringRef(&value, L"System Informer");
+        PhSetValueKeyZ(keyHandle, L"DisplayName", REG_SZ, value.Buffer, (ULONG)value.Length + sizeof(UNICODE_NULL));
 
-        PhInitializeStringRef(&name, L"DisplayVersion");
-        PhInitializeStringRef(&value, L"3.x");
-        PhSetValueKey(keyHandle, &name, REG_SZ, value.Buffer, (ULONG)value.Length + sizeof(UNICODE_NULL));
+        PhInitializeStringRef(&value, L"3.0");
+        PhSetValueKeyZ(keyHandle, L"DisplayVersion", REG_SZ, value.Buffer, (ULONG)value.Length + sizeof(UNICODE_NULL));
 
-        PhInitializeStringRef(&name, L"HelpLink");
-        PhInitializeStringRef(&value, L"https://processhacker.sourceforge.io/");
-        PhSetValueKey(keyHandle, &name, REG_SZ, value.Buffer, (ULONG)value.Length + sizeof(UNICODE_NULL));
+        PhInitializeStringRef(&value, L"https://systeminformer.sourceforge.io/");
+        PhSetValueKeyZ(keyHandle, L"HelpLink", REG_SZ, value.Buffer, (ULONG)value.Length + sizeof(UNICODE_NULL));
 
-        PhInitializeStringRef(&name, L"InstallLocation");
-        PhInitializeStringRef(&value, PhGetString(Context->SetupInstallPath));
-        PhSetValueKey(keyHandle, &name, REG_SZ, value.Buffer, (ULONG)value.Length + sizeof(UNICODE_NULL));
+        string = SetupCreateFullPath(Context->SetupInstallPath, L"");
+        PhSetValueKeyZ(keyHandle, L"InstallLocation", REG_SZ, string->Buffer, (ULONG)string->Length + sizeof(UNICODE_NULL));
 
-        PhInitializeStringRef(&name, L"Publisher");
-        PhInitializeStringRef(&value, L"Process Hacker");
-        PhSetValueKey(keyHandle, &name, REG_SZ, value.Buffer, (ULONG)value.Length + sizeof(UNICODE_NULL));
+        PhInitializeStringRef(&value, L"System Informer");
+        PhSetValueKeyZ(keyHandle, L"Publisher", REG_SZ, value.Buffer, (ULONG)value.Length + sizeof(UNICODE_NULL));
 
-        PhInitializeStringRef(&name, L"UninstallString");
-        tempString = PhFormatString(L"\"%s\\processhacker-setup.exe\" -uninstall", PhGetString(Context->SetupInstallPath));
-        PhSetValueKey(keyHandle, &name, REG_SZ, tempString->Buffer, (ULONG)tempString->Length + sizeof(UNICODE_NULL));
-        PhDereferenceObject(tempString);
+        string = SetupCreateFullPath(Context->SetupInstallPath, L"\\systeminformer-setup.exe");
+        PhMoveReference(&string, PhFormatString(L"\"%s\" -uninstall", PhGetString(string)));
+        PhSetValueKeyZ(keyHandle, L"UninstallString", REG_SZ, string->Buffer, (ULONG)string->Length + sizeof(UNICODE_NULL));
 
-        PhInitializeStringRef(&name, L"NoModify");
-        ulong = TRUE;
-        PhSetValueKey(keyHandle, &name, REG_DWORD, &ulong, sizeof(ULONG));
-
-        PhInitializeStringRef(&name, L"NoRepair");
-        ulong = TRUE;
-        PhSetValueKey(keyHandle, &name, REG_DWORD, &ulong, sizeof(ULONG));
+        PhSetValueKeyZ(keyHandle, L"NoModify", REG_DWORD, &(ULONG){TRUE}, sizeof(ULONG));
+        PhSetValueKeyZ(keyHandle, L"NoRepair", REG_DWORD, &(ULONG){TRUE}, sizeof(ULONG));
 
         NtClose(keyHandle);
     }
@@ -112,14 +114,12 @@ PPH_STRING SetupFindInstallDirectory(
     VOID
     )
 {
-    // Find the current installation path.
-    PPH_STRING setupInstallPath = GetProcessHackerInstallPath();
+    PPH_STRING setupInstallPath = GetApplicationInstallPath();
 
-    // Check if the string is valid.
     if (PhIsNullOrEmptyString(setupInstallPath))
     {
-        static PH_STRINGREF programW6432 = PH_STRINGREF_INIT(L"%ProgramW6432%\\Process Hacker\\");
-        static PH_STRINGREF programFiles = PH_STRINGREF_INIT(L"%ProgramFiles%\\Process Hacker\\");
+        static PH_STRINGREF programW6432 = PH_STRINGREF_INIT(L"%ProgramW6432%\\SystemInformer\\");
+        static PH_STRINGREF programFiles = PH_STRINGREF_INIT(L"%ProgramFiles%\\SystemInformer\\");
         SYSTEM_INFO info;
 
         GetNativeSystemInfo(&info);
@@ -132,47 +132,31 @@ PPH_STRING SetupFindInstallDirectory(
 
     if (PhIsNullOrEmptyString(setupInstallPath))
     {
-        setupInstallPath = PhCreateString(L"C:\\Program Files\\Process Hacker\\");
+        setupInstallPath = PhCreateString(L"C:\\Program Files\\SystemInformer\\");
     }
 
     if (!PhIsNullOrEmptyString(setupInstallPath))
     {
-        if (!PhEndsWithString2(setupInstallPath, L"\\", TRUE))
+        if (!PhEndsWithStringRef(&setupInstallPath->sr, &PhNtPathSeperatorString, TRUE))
         {
-            PhSwapReference(&setupInstallPath, PhConcatStringRefZ(&setupInstallPath->sr, L"\\"));
+            PhSwapReference(&setupInstallPath, PhConcatStringRef2(&setupInstallPath->sr, &PhNtPathSeperatorString));
         }
     }
 
     return setupInstallPath;
 }
 
-PPH_STRING SetupFindAppdataDirectory(
-    VOID
-    )
-{
-    static PH_STRINGREF appdataPath = PH_STRINGREF_INIT(L"%APPDATA%\\Process Hacker\\");
-    PPH_STRING appdataFilePath;
-
-    if (appdataFilePath = PhExpandEnvironmentStrings(&appdataPath))
-    {
-        PhMoveReference(&appdataFilePath, PhGetFullPath(appdataFilePath->Buffer, NULL));
-        return appdataFilePath;
-    }
-
-    return NULL;
-}
-
 VOID SetupDeleteAppdataDirectory(
     _In_ PPH_SETUP_CONTEXT Context
     )
 {
-    PPH_STRING uninstallFilePath;
+    PPH_STRING appdataDirectory;
 
-    if (uninstallFilePath = SetupFindAppdataDirectory())
+    if (appdataDirectory = PhGetKnownFolderPathZ(&FOLDERID_RoamingAppData, L"\\SystemInformer\\"))
     {
-        PhDeleteDirectory(uninstallFilePath);
+        PhDeleteDirectoryWin32(&appdataDirectory->sr);
 
-        PhDereferenceObject(uninstallFilePath);
+        PhDereferenceObject(appdataDirectory);
     }
 }
 
@@ -182,71 +166,45 @@ BOOLEAN SetupCreateUninstallFile(
 {
     NTSTATUS status;
     PPH_STRING currentFilePath;
-    PPH_STRING backupFilePath;
     PPH_STRING uninstallFilePath;
 
     if (!NT_SUCCESS(status = PhGetProcessImageFileNameWin32(NtCurrentProcess(), &currentFilePath)))
     {
-        Context->ErrorCode = WIN32_FROM_NTSTATUS(status);
+        Context->ErrorCode = PhNtStatusToDosError(status);
         return FALSE;
     }
 
-    // Check if the user has started the setup from the installation folder.
+    // Check if the current image is running from the installation folder.
+
     if (PhStartsWithStringRef2(&currentFilePath->sr, PhGetString(Context->SetupInstallPath), TRUE))
     {
-        PhDereferenceObject(currentFilePath);
         return TRUE;
     }
 
-    backupFilePath = PhConcatStrings2(PhGetString(Context->SetupInstallPath), L"\\processhacker-setup.bak");
-    uninstallFilePath = PhConcatStrings2(PhGetString(Context->SetupInstallPath), L"\\processhacker-setup.exe");
+    // Move the outdated setup.exe into the trash (temp) folder.
 
-    if (PhDoesFileExistsWin32(backupFilePath->Buffer))
-    {    
-        PPH_STRING tempFileName;
-        PPH_STRING tempFilePath;
+    uninstallFilePath = SetupCreateFullPath(Context->SetupInstallPath, L"\\systeminformer-setup.exe");
 
-        tempFileName = PhCreateString(L"processhacker-setup.bak");
-        tempFilePath = PhCreateCacheFile(tempFileName);
+    if (PhDoesFileExistWin32(PhGetString(uninstallFilePath)))
+    {
+        PPH_STRING tempFileName = PhGetTemporaryDirectoryRandomAlphaFileName();
 
-        //if (!NT_SUCCESS(PhDeleteFileWin32(backupFilePath->Buffer)))
-        if (!MoveFile(backupFilePath->Buffer, tempFilePath->Buffer))
+        if (!NT_SUCCESS(status = PhMoveFileWin32(PhGetString(uninstallFilePath), PhGetString(tempFileName), FALSE)))
         {
-            Context->ErrorCode = GetLastError();
+            Context->ErrorCode = PhNtStatusToDosError(status);
             return FALSE;
         }
-
-        PhDereferenceObject(tempFilePath);
-        PhDereferenceObject(tempFileName);
     }
 
-    if (PhDoesFileExistsWin32(uninstallFilePath->Buffer))
+    // Copy the latest setup.exe to the installation folder, so that:
+    // 1. The setup program doesn't disappear for user.
+    // 2. The correct ACL is applied to the file. Moving the file would retain the existing ACL.
+
+    if (!NT_SUCCESS(status = PhCopyFileWin32(PhGetString(currentFilePath), PhGetString(uninstallFilePath), FALSE)))
     {
-        PPH_STRING tempFileName;
-        PPH_STRING tempFilePath;
-
-        //if (!NT_SUCCESS(PhDeleteFileWin32(uninstallFilePath->Buffer)))
-        tempFileName = PhCreateString(L"processhacker-setup.exe");
-        tempFilePath = PhCreateCacheFile(tempFileName);
-
-        if (!MoveFile(uninstallFilePath->Buffer, tempFilePath->Buffer))
-        {
-            Context->ErrorCode = GetLastError();
-            return FALSE;
-        }
-
-        PhDereferenceObject(tempFilePath);
-        PhDereferenceObject(tempFileName);
-    }
-
-    if (!CopyFile(currentFilePath->Buffer, uninstallFilePath->Buffer, TRUE))
-    {
-        Context->ErrorCode = GetLastError();
+        Context->ErrorCode = PhNtStatusToDosError(status);
         return FALSE;
     }
-
-    PhDereferenceObject(uninstallFilePath);
-    PhDereferenceObject(currentFilePath);
 
     return TRUE;
 }
@@ -257,137 +215,52 @@ VOID SetupDeleteUninstallFile(
 {
     PPH_STRING uninstallFilePath;
 
-    uninstallFilePath = PhConcatStrings2(PhGetString(Context->SetupInstallPath), L"\\processhacker-setup.exe");
+    uninstallFilePath = SetupCreateFullPath(Context->SetupInstallPath, L"\\systeminformer-setup.exe");
 
-    if (PhDoesFileExistsWin32(uninstallFilePath->Buffer))
+    if (PhDoesFileExistWin32(PhGetString(uninstallFilePath)))
     {
-        PPH_STRING tempFileName;
-        PPH_STRING tempFilePath;
+        PPH_STRING tempFileName = PhGetTemporaryDirectoryRandomAlphaFileName();
 
-        tempFileName = PhCreateString(L"processhacker-setup.exe");
-        tempFilePath = PhCreateCacheFile(tempFileName);
+        PhMoveFileWin32(
+            PhGetString(uninstallFilePath),
+            PhGetString(tempFileName),
+            FALSE
+            );
 
-        if (PhIsNullOrEmptyString(tempFilePath))
-        {
-            PhDereferenceObject(tempFileName);
-            goto CleanupExit;
-        }
-    
-        MoveFile(uninstallFilePath->Buffer, tempFilePath->Buffer);
-
-        PhDereferenceObject(tempFilePath);
         PhDereferenceObject(tempFileName);
     }
-
-CleanupExit:
 
     PhDereferenceObject(uninstallFilePath);
 }
 
-VOID SetupStartService(
-    _In_ PWSTR ServiceName
+BOOLEAN SetupUninstallDriver(
+    _In_ PPH_SETUP_CONTEXT Context
     )
 {
+    BOOLEAN success = TRUE;
     SC_HANDLE serviceHandle;
 
-    serviceHandle = PhOpenService(
-        ServiceName, 
-        SERVICE_QUERY_STATUS | SERVICE_START
-        );
-
-    if (serviceHandle)
+    if (NT_SUCCESS(PhOpenService(
+        &serviceHandle,
+        SERVICE_QUERY_STATUS | SERVICE_STOP,
+        PhIsNullOrEmptyString(Context->SetupServiceName) ? L"KSystemInformer" : PhGetString(Context->SetupServiceName)
+        )))
     {
-        ULONG statusLength = 0;
-        SERVICE_STATUS_PROCESS status;
+        SERVICE_STATUS_PROCESS serviceStatus;
 
-        memset(&status, 0, sizeof(SERVICE_STATUS_PROCESS));
-
-        if (QueryServiceStatusEx(
-            serviceHandle,
-            SC_STATUS_PROCESS_INFO,
-            (PBYTE)&status,
-            sizeof(SERVICE_STATUS_PROCESS),
-            &statusLength
-            ))
+        if (NT_SUCCESS(PhQueryServiceStatus(serviceHandle, &serviceStatus)))
         {
-            if (status.dwCurrentState != SERVICE_RUNNING)
-            {
-                ULONG attempts = 10;
-
-                do
-                {
-                    StartService(serviceHandle, 0, NULL);
-
-                    if (QueryServiceStatusEx(
-                        serviceHandle,
-                        SC_STATUS_PROCESS_INFO,
-                        (PBYTE)&status,
-                        sizeof(SERVICE_STATUS_PROCESS),
-                        &statusLength
-                        ))
-                    {
-                        if (status.dwCurrentState == SERVICE_RUNNING)
-                        {
-                            break;
-                        }
-                    }
-
-                    PhDelayExecution(1000);
-
-                } while (--attempts != 0);
-            }
-        }
-
-        CloseServiceHandle(serviceHandle);
-    }
-}
-
-VOID SetupStopService(
-    _In_ PWSTR ServiceName,
-    _In_ BOOLEAN RemoveService
-    )
-{
-    SC_HANDLE serviceHandle;
-
-    if (serviceHandle = PhOpenService(
-        ServiceName,
-        SERVICE_QUERY_STATUS | SERVICE_STOP
-        ))
-    {
-        ULONG statusLength = 0;
-        SERVICE_STATUS_PROCESS status;
-
-        memset(&status, 0, sizeof(SERVICE_STATUS_PROCESS));
-
-        if (QueryServiceStatusEx(
-            serviceHandle,
-            SC_STATUS_PROCESS_INFO,
-            (PBYTE)&status,
-            sizeof(SERVICE_STATUS_PROCESS),
-            &statusLength
-            ))
-        {
-            if (status.dwCurrentState != SERVICE_STOPPED)
+            if (serviceStatus.dwCurrentState != SERVICE_STOPPED)
             {
                 ULONG attempts = 60;
 
                 do
                 {
-                    SERVICE_STATUS serviceStatus;
+                    PhStopService(serviceHandle);
 
-                    memset(&serviceStatus, 0, sizeof(SERVICE_STATUS));
-
-                    ControlService(serviceHandle, SERVICE_CONTROL_STOP, &serviceStatus);
-
-                    if (QueryServiceStatusEx(
-                        serviceHandle,
-                        SC_STATUS_PROCESS_INFO,
-                        (PBYTE)&status,
-                        sizeof(SERVICE_STATUS_PROCESS),
-                        &statusLength
-                        ))
+                    if (NT_SUCCESS(PhQueryServiceStatus(serviceHandle, &serviceStatus)))
                     {
-                        if (status.dwCurrentState == SERVICE_STOPPED)
+                        if (serviceStatus.dwCurrentState == SERVICE_STOPPED)
                         {
                             break;
                         }
@@ -399,192 +272,72 @@ VOID SetupStopService(
             }
         }
 
-        CloseServiceHandle(serviceHandle);
+        PhCloseServiceHandle(serviceHandle);
     }
 
-    if (RemoveService)
-    {
-        if (serviceHandle = PhOpenService(
-            ServiceName,
-            DELETE
-            ))
-        {
-            DeleteService(serviceHandle);
-            CloseServiceHandle(serviceHandle);
-        }
-    }
-}
-
-BOOLEAN SetupKphCheckInstallState(
-    VOID
-    )
-{
-    static PH_STRINGREF kph3ServiceKeyName = PH_STRINGREF_INIT(L"System\\CurrentControlSet\\Services\\KProcessHacker3");
-    BOOLEAN kphInstallRequired = FALSE;
-    HANDLE runKeyHandle;
-
-    if (NT_SUCCESS(PhOpenKey(
-        &runKeyHandle,
-        KEY_READ,
-        PH_KEY_LOCAL_MACHINE,
-        &kph3ServiceKeyName,
-        0
+    if (NT_SUCCESS(PhOpenService(
+        &serviceHandle,
+        DELETE,
+        PhIsNullOrEmptyString(Context->SetupServiceName) ? L"KSystemInformer" : PhGetString(Context->SetupServiceName)
         )))
     {
-        // Make sure we re-install the driver when KPH was installed as a service. 
-        if (PhQueryRegistryUlong(runKeyHandle, L"Start") == SERVICE_SYSTEM_START)
+        NTSTATUS status;
+
+        if (!NT_SUCCESS(status = PhDeleteService(serviceHandle)))
         {
-            kphInstallRequired = TRUE;
+            success = FALSE;
+            Context->ErrorCode = PhNtStatusToDosError(status);
         }
 
-        NtClose(runKeyHandle);
+        PhCloseServiceHandle(serviceHandle);
     }
 
-    return kphInstallRequired;
+    return success;
 }
 
-VOID SetupStartKph(
-    _In_ PPH_SETUP_CONTEXT Context,
-    _In_ BOOLEAN ForceInstall
+VOID SetupCreateWindowsOptions(
+    _In_ PPH_SETUP_CONTEXT Context
     )
 {
-    if (ForceInstall || Context->SetupKphInstallRequired)
+    // Create the app paths keys
     {
-        PPH_STRING clientPath;
+        NTSTATUS status;
+        HANDLE keyHandle;
+        PPH_STRING string;
 
-        clientPath = SetupCreateFullPath(Context->SetupInstallPath, L"\\SystemInformer.exe");
+        status = PhCreateKey(
+            &keyHandle,
+            KEY_ALL_ACCESS | KEY_WOW64_64KEY,
+            PH_KEY_LOCAL_MACHINE,
+            &AppPathsKeyName,
+            OBJ_OPENIF,
+            0,
+            NULL
+            );
 
-        if (PhDoesFileExistsWin32(PhGetString(clientPath)))
+        if (NT_SUCCESS(status))
         {
-            HANDLE processHandle;
+            //string = PhFormatString(L"\"%s\\SystemInformer.exe\"", PhGetString(Context->SetupInstallPath));
 
-            if (PhShellExecuteEx(
-                NULL,
-                PhGetString(clientPath),
-                L"-installkph -s",
-                SW_NORMAL,
-                PhGetOwnTokenAttributes().Elevated ? 0 : PH_SHELL_EXECUTE_ADMIN,
-                0,
-                &processHandle
-                ))
+            if (string = SetupCreateFullPath(Context->SetupInstallPath, L"\\SystemInformer.exe"))
             {
-                NtWaitForSingleObject(processHandle, FALSE, NULL);
-                NtClose(processHandle);
+                PhSetValueKey(keyHandle, NULL, REG_SZ, string->Buffer, (ULONG)string->Length + sizeof(UNICODE_NULL));
+                PhDereferenceObject(string);
             }
-        }
 
-        PhDereferenceObject(clientPath);
-    }
-
-    SetupStartService(L"KProcessHacker3");
-}
-
-BOOLEAN SetupUninstallKph(
-    _In_ PPH_SETUP_CONTEXT Context
-    )
-{
-    PPH_STRING clientPath;
-
-    // Query the current KPH installation state.
-    Context->SetupKphInstallRequired = SetupKphCheckInstallState();
-
-    // Stop and uninstall the current installation.
-    clientPath = SetupCreateFullPath(Context->SetupInstallPath, L"\\SystemInformer.exe");
-
-    if (PhDoesFileExistsWin32(PhGetString(clientPath)))
-    {
-        HANDLE processHandle;
-
-        if (PhShellExecuteEx(
-            NULL,
-            PhGetString(clientPath),
-            L"-uninstallkph -s",
-            SW_NORMAL,
-            0,
-            0,
-            &processHandle
-            ))
-        {
-            NtWaitForSingleObject(processHandle, FALSE, NULL);
-            NtClose(processHandle);
+            NtClose(keyHandle);
         }
     }
-    else
-    {
-        SetupStopService(L"KProcessHacker3", TRUE);
-    }
-
-    return TRUE;
-}
-
-VOID SetupSetWindowsOptions(
-    _In_ PPH_SETUP_CONTEXT Context
-    )
-{
-    static PH_STRINGREF desktopStartmenuPathSr = PH_STRINGREF_INIT(L"%ALLUSERSPROFILE%\\Microsoft\\Windows\\Start Menu\\Programs\\System Informer.lnk");
-    static PH_STRINGREF peviewerShortcutPathSr = PH_STRINGREF_INIT(L"%ALLUSERSPROFILE%\\Microsoft\\Windows\\Start Menu\\Programs\\PE Viewer.lnk");
-    static PH_STRINGREF desktopAllusersPathSr = PH_STRINGREF_INIT(L"%PUBLIC%\\Desktop\\System Informer.lnk");
-    PPH_STRING clientPathString;
-    PPH_STRING string;
-
-    if (string = PhExpandEnvironmentStrings(&desktopStartmenuPathSr))
-    {
-        clientPathString = SetupCreateFullPath(Context->SetupInstallPath, L"\\SystemInformer.exe");
-
-        SetupCreateLink(
-            PhGetString(string),
-            PhGetString(clientPathString),
-            PhGetString(Context->SetupInstallPath),
-            L"ProcessHacker3.0.0"
-            );
-
-        PhDereferenceObject(clientPathString);
-        PhDereferenceObject(string);
-    }
-
-    if (string = PhExpandEnvironmentStrings(&desktopAllusersPathSr))
-    {
-        clientPathString = SetupCreateFullPath(Context->SetupInstallPath, L"\\SystemInformer.exe");
-
-        SetupCreateLink(
-            PhGetString(string),
-            PhGetString(clientPathString),
-            PhGetString(Context->SetupInstallPath),
-            L"ProcessHacker3.0.0"
-            );
-
-        PhDereferenceObject(clientPathString);
-        PhDereferenceObject(string);
-    }
-
-    if (string = PhExpandEnvironmentStrings(&peviewerShortcutPathSr))
-    {
-        clientPathString = SetupCreateFullPath(Context->SetupInstallPath, L"\\peview.exe");
-
-        SetupCreateLink(
-            PhGetString(string),
-            PhGetString(clientPathString),
-            PhGetString(Context->SetupInstallPath),
-            L"PeViewer3.0.0"
-            );
-
-        PhDereferenceObject(clientPathString);
-        PhDereferenceObject(string);
-    }
-
-    // PhGetKnownLocation(CSIDL_COMMON_PROGRAMS, L"\\System Informer.lnk"))
-    // PhGetKnownLocation(CSIDL_COMMON_DESKTOPDIRECTORY, L"\\System Informer.lnk")
-    // PhGetKnownLocation(CSIDL_COMMON_PROGRAMS, L"\\PE Viewer.lnk")
 
     // Reset the settings file.
     //if (Context->SetupResetSettings)
     //{
-    //    static PH_STRINGREF settingsPath = PH_STRINGREF_INIT(L"%APPDATA%\\Process Hacker\\settings.xml");
+    //    static PH_STRINGREF settingsPath = PH_STRINGREF_INIT(L"%APPDATA%\\SystemInformer\\settings.xml");
     //    PPH_STRING settingsFilePath;
     //
     //    if (settingsFilePath = PhExpandEnvironmentStrings(&settingsPath))
     //    {
-    //        if (PhDoesFileExistsWin32(settingsFilePath->Buffer))
+    //        if (PhDoesFileExistWin32(settingsFilePath->Buffer))
     //        {
     //            PhDeleteFileWin32(settingsFilePath->Buffer);
     //        }
@@ -618,11 +371,11 @@ VOID SetupSetWindowsOptions(
     //
     //        value = PhConcatStrings(3, L"\"", PhGetString(clientPathString), L"\"");
     //        status = NtSetValueKey(
-    //            taskmgrKeyHandle, 
+    //            taskmgrKeyHandle,
     //            &valueName,
     //            0,
     //            REG_SZ,
-    //            value->Buffer, 
+    //            value->Buffer,
     //            (ULONG)value->Length + sizeof(UNICODE_NULL)
     //            );
     //
@@ -670,63 +423,201 @@ VOID SetupSetWindowsOptions(
     //}
 }
 
+BOOLEAN NTAPI SetupDeleteAutoRunKeyCallback(
+    _In_ HANDLE RootDirectory,
+    _In_ PKEY_VALUE_FULL_INFORMATION Information,
+    _In_opt_ PVOID Context
+    )
+{
+    if (Information->Type == REG_SZ)
+    {
+        static PH_STRINGREF fileName = PH_STRINGREF_INIT(L"\\SystemInformer.exe");
+        PH_STRINGREF value;
+
+        value.Length = Information->DataLength;
+        value.Buffer = PTR_ADD_OFFSET(Information, Information->DataOffset);
+
+        if (PhFindStringInStringRef(&value, &fileName, TRUE) != SIZE_MAX)
+        {
+            PH_STRINGREF name;
+
+            name.Length = Information->NameLength;
+            name.Buffer = Information->Name;
+
+            PhDeleteValueKey(RootDirectory, &name);
+        }
+    }
+
+    return TRUE;
+}
+
 VOID SetupDeleteWindowsOptions(
     _In_ PPH_SETUP_CONTEXT Context
     )
 {
-    static PH_STRINGREF desktopShortcutPathSr = PH_STRINGREF_INIT(L"%ALLUSERSPROFILE%\\Microsoft\\Windows\\Start Menu\\Programs\\System Informer.lnk");
-    static PH_STRINGREF peviewerShortcutPathSr = PH_STRINGREF_INIT(L"%ALLUSERSPROFILE%\\Microsoft\\Windows\\Start Menu\\Programs\\PE Viewer.lnk");
-    static PH_STRINGREF desktopAllusersPathSr = PH_STRINGREF_INIT(L"%PUBLIC%\\Desktop\\System Informer.lnk");
     PPH_STRING string;
     HANDLE keyHandle;
 
-    if (string = PhExpandEnvironmentStrings(&desktopShortcutPathSr))
-    {
-        PhDeleteFileWin32(string->Buffer);
-        PhDereferenceObject(string);
-    }
- 
-    if (string = PhExpandEnvironmentStrings(&peviewerShortcutPathSr))
+    if (string = PhGetKnownFolderPathZ(&FOLDERID_ProgramData, L"\\Microsoft\\Windows\\Start Menu\\Programs\\System Informer.lnk"))
     {
         PhDeleteFileWin32(string->Buffer);
         PhDereferenceObject(string);
     }
 
-    if (string = PhExpandEnvironmentStrings(&desktopAllusersPathSr))
+    if (string = PhGetKnownFolderPathZ(&FOLDERID_ProgramData, L"\\Microsoft\\Windows\\Start Menu\\Programs\\PE Viewer.lnk"))
     {
         PhDeleteFileWin32(string->Buffer);
         PhDereferenceObject(string);
     }
 
-    //if (NT_SUCCESS(PhOpenKey(
-    //    &keyHandle,
-    //    DELETE,
-    //    PH_KEY_LOCAL_MACHINE,
-    //    &PhImageOptionsKeyName,
-    //    0
-    //    )))
-    //{
-    //    NtDeleteKey(keyHandle);
-    //    NtClose(keyHandle);
-    //}
-    //
-    //if (NT_SUCCESS(PhOpenKey(
-    //    &keyHandle,
-    //    DELETE,
-    //    PH_KEY_LOCAL_MACHINE,
-    //    &PhImageOptionsWow64KeyName,
-    //    0
-    //    )))
-    //{
-    //    NtDeleteKey(keyHandle);
-    //    NtClose(keyHandle);
-    //}
+    if (string = PhGetKnownFolderPathZ(&FOLDERID_PublicDesktop, L"\\System Informer.lnk"))
+    {
+        PhDeleteFileWin32(string->Buffer);
+        PhDereferenceObject(string);
+    }
 
     if (NT_SUCCESS(PhOpenKey(
         &keyHandle,
         DELETE,
         PH_KEY_LOCAL_MACHINE,
-        &TmImageOptionsKeyName,
+        &AppPathsKeyName,
+        0
+        )))
+    {
+        NtDeleteKey(keyHandle);
+        NtClose(keyHandle);
+    }
+
+    if (NT_SUCCESS(PhOpenKey(
+        &keyHandle,
+        DELETE,
+        PH_KEY_LOCAL_MACHINE,
+        &TaskmgrIfeoKeyName,
+        0
+        )))
+    {
+        NtDeleteKey(keyHandle);
+        NtClose(keyHandle);
+    }
+
+    if (NT_SUCCESS(PhOpenKey(
+        &keyHandle,
+        KEY_READ | KEY_WRITE,
+        PH_KEY_CURRENT_USER,
+        &CurrentUserRunKeyName,
+        0
+        )))
+    {
+        PhEnumerateValueKey(keyHandle, KeyValueFullInformation, SetupDeleteAutoRunKeyCallback, NULL);
+        NtClose(keyHandle);
+    }
+}
+
+VOID SetupCreateShortcuts(
+    _In_ PPH_SETUP_CONTEXT Context
+    )
+{
+    PPH_STRING string;
+    PPH_STRING clientPathString;
+    //PH_STRINGREF desktopStartmenuPathSr = PH_STRINGREF_INIT(L"%ALLUSERSPROFILE%\\Microsoft\\Windows\\Start Menu\\Programs\\System Informer.lnk");
+    //PH_STRINGREF peviewerShortcutPathSr = PH_STRINGREF_INIT(L"%ALLUSERSPROFILE%\\Microsoft\\Windows\\Start Menu\\Programs\\PE Viewer.lnk");
+    //PH_STRINGREF desktopAllusersPathSr = PH_STRINGREF_INIT(L"%PUBLIC%\\Desktop\\System Informer.lnk");
+
+    if (string = PhGetKnownFolderPathZ(&FOLDERID_ProgramData, L"\\Microsoft\\Windows\\Start Menu\\Programs\\System Informer.lnk"))
+    {
+        clientPathString = SetupCreateFullPath(Context->SetupInstallPath, L"\\SystemInformer.exe");
+
+        SetupCreateLink(
+            PhGetString(string),
+            PhGetString(clientPathString),
+            PhGetString(Context->SetupInstallPath),
+            L"SystemInformer"
+            );
+
+        if (PhDoesFileExistWin32(PhGetString(string)))
+        {
+            SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATH, PhGetString(string), NULL);
+        }
+
+        PhDereferenceObject(clientPathString);
+        PhDereferenceObject(string);
+    }
+
+    if (string = PhGetKnownFolderPathZ(&FOLDERID_ProgramData, L"\\Microsoft\\Windows\\Start Menu\\Programs\\PE Viewer.lnk"))
+    {
+        clientPathString = SetupCreateFullPath(Context->SetupInstallPath, L"\\peview.exe");
+
+        SetupCreateLink(
+            PhGetString(string),
+            PhGetString(clientPathString),
+            PhGetString(Context->SetupInstallPath),
+            L"SystemInformer_PEViewer"
+            );
+
+        if (PhDoesFileExistWin32(PhGetString(string)))
+        {
+            SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATH, PhGetString(string), NULL);
+        }
+
+        PhDereferenceObject(clientPathString);
+        PhDereferenceObject(string);
+    }
+
+    if (string = PhGetKnownFolderPathZ(&FOLDERID_PublicDesktop, L"\\System Informer.lnk"))
+    {
+        clientPathString = SetupCreateFullPath(Context->SetupInstallPath, L"\\SystemInformer.exe");
+
+        SetupCreateLink(
+            PhGetString(string),
+            PhGetString(clientPathString),
+            PhGetString(Context->SetupInstallPath),
+            L"SystemInformer"
+            );
+
+        if (PhDoesFileExistWin32(PhGetString(string)))
+        {
+            SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATH, PhGetString(string), NULL);
+        }
+
+        PhDereferenceObject(clientPathString);
+        PhDereferenceObject(string);
+    }
+
+    // PhGetKnownLocation(CSIDL_COMMON_PROGRAMS, L"\\System Informer.lnk"))
+    // PhGetKnownLocation(CSIDL_COMMON_DESKTOPDIRECTORY, L"\\System Informer.lnk")
+    // PhGetKnownLocation(CSIDL_COMMON_PROGRAMS, L"\\PE Viewer.lnk")
+}
+
+VOID SetupDeleteShortcuts(
+    _In_ PPH_SETUP_CONTEXT Context
+    )
+{
+    PPH_STRING string;
+    HANDLE keyHandle;
+
+    if (string = PhGetKnownFolderPathZ(&FOLDERID_ProgramData, L"\\Microsoft\\Windows\\Start Menu\\Programs\\System Informer.lnk"))
+    {
+        PhDeleteFileWin32(string->Buffer);
+        PhDereferenceObject(string);
+    }
+
+    if (string = PhGetKnownFolderPathZ(&FOLDERID_ProgramData, L"\\Microsoft\\Windows\\Start Menu\\Programs\\PE Viewer.lnk"))
+    {
+        PhDeleteFileWin32(string->Buffer);
+        PhDereferenceObject(string);
+    }
+
+    if (string = PhGetKnownFolderPathZ(&FOLDERID_PublicDesktop, L"\\System Informer.lnk"))
+    {
+        PhDeleteFileWin32(string->Buffer);
+        PhDereferenceObject(string);
+    }
+
+    if (NT_SUCCESS(PhOpenKey(
+        &keyHandle,
+        DELETE,
+        PH_KEY_LOCAL_MACHINE,
+        &AppPathsKeyName,
         0
         )))
     {
@@ -735,171 +626,80 @@ VOID SetupDeleteWindowsOptions(
     }
 }
 
-VOID SetupChangeNotifyShortcuts(
+NTSTATUS SetupExecuteApplication(
     _In_ PPH_SETUP_CONTEXT Context
     )
 {
-    static PH_STRINGREF desktopStartmenuPathSr = PH_STRINGREF_INIT(L"%ALLUSERSPROFILE%\\Microsoft\\Windows\\Start Menu\\Programs\\System Informer.lnk");
-    static PH_STRINGREF peviewerShortcutPathSr = PH_STRINGREF_INIT(L"%ALLUSERSPROFILE%\\Microsoft\\Windows\\Start Menu\\Programs\\PE Viewer.lnk");
-    static PH_STRINGREF desktopAllusersPathSr = PH_STRINGREF_INIT(L"%PUBLIC%\\Desktop\\System Informer.lnk");
+    NTSTATUS status;
     PPH_STRING string;
-
-    if (string = PhExpandEnvironmentStrings(&desktopStartmenuPathSr))
-    {
-        if (PhDoesFileExistsWin32(PhGetString(string)))
-        {
-            SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATH, PhGetString(string), NULL);
-        }
-
-        PhDereferenceObject(string);
-    }
-
-    if (string = PhExpandEnvironmentStrings(&desktopAllusersPathSr))
-    {
-        if (PhDoesFileExistsWin32(PhGetString(string)))
-        {
-            SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATH, PhGetString(string), NULL);
-        }
-
-        PhDereferenceObject(string);
-    }
-
-    if (string = PhExpandEnvironmentStrings(&peviewerShortcutPathSr))
-    {
-        if (PhDoesFileExistsWin32(PhGetString(string)))
-        {
-            SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATH, PhGetString(string), NULL);
-        }
-
-        PhDereferenceObject(string);
-    }
-}
-
-BOOLEAN SetupExecuteProcessHacker(
-    _In_ PPH_SETUP_CONTEXT Context
-    )
-{
-    BOOLEAN success = FALSE;
-    PPH_STRING clientPath;
 
     if (PhIsNullOrEmptyString(Context->SetupInstallPath))
         return FALSE;
 
-    clientPath = SetupCreateFullPath(Context->SetupInstallPath, L"\\SystemInformer.exe");
+    string = SetupCreateFullPath(Context->SetupInstallPath, L"\\SystemInformer.exe");
 
-    if (PhDoesFileExistsWin32(clientPath->Buffer))
+    if (PhDoesFileExistWin32(PhGetString(string)))
     {
-        success = PhShellExecuteEx(
+        status = PhShellExecuteEx(
             Context->DialogHandle,
-            clientPath->Buffer,
+            PhGetString(string),
+            SETUP_APP_PARAMETERS,
             NULL,
-            SW_SHOWNORMAL,
-            0,
+            SW_SHOW,
+            PH_SHELL_EXECUTE_DEFAULT,
             0,
             NULL
             );
     }
+    else
+    {
+        status = STATUS_OBJECT_PATH_NOT_FOUND;
+    }
 
-    PhDereferenceObject(clientPath);
-    return success;
+    PhDereferenceObject(string);
+    return status;
 }
 
 VOID SetupUpgradeSettingsFile(
     VOID
     )
 {
-    static PH_STRINGREF settingsPath = PH_STRINGREF_INIT(L"%APPDATA%\\Process Hacker\\settings.xml");
-    static PH_STRINGREF settingsLegacyPath = PH_STRINGREF_INIT(L"%APPDATA%\\Process Hacker 2\\settings.xml");
+    BOOLEAN migratedNightly = FALSE;
     PPH_STRING settingsFilePath;
-    PPH_STRING oldSettingsFileName;
+    PPH_STRING legacyNightlyFileName;
+    PPH_STRING legacySettingsFileName;
 
-    settingsFilePath = PhExpandEnvironmentStrings(&settingsPath);
-    oldSettingsFileName = PhExpandEnvironmentStrings(&settingsLegacyPath);
+    settingsFilePath = PhGetKnownFolderPathZ(&FOLDERID_RoamingAppData, L"\\SystemInformer\\settings.xml");
+    legacyNightlyFileName = PhGetKnownFolderPathZ(&FOLDERID_RoamingAppData, L"\\Process Hacker\\settings.xml");
+    legacySettingsFileName = PhGetKnownFolderPathZ(&FOLDERID_RoamingAppData, L"\\Process Hacker 2\\settings.xml");
 
-    if (settingsFilePath && oldSettingsFileName)
+    if (settingsFilePath && legacyNightlyFileName)
     {
-        if (!PhDoesFileExistsWin32(settingsFilePath->Buffer))
+        if (!PhDoesFileExistWin32(PhGetString(settingsFilePath)))
         {
-            CopyFile(oldSettingsFileName->Buffer, settingsFilePath->Buffer, FALSE);
+            if (NT_SUCCESS(PhCopyFileWin32(PhGetString(legacyNightlyFileName), PhGetString(settingsFilePath), TRUE)))
+            {
+                migratedNightly = TRUE;
+            }
         }
     }
 
-    if (oldSettingsFileName) PhDereferenceObject(oldSettingsFileName);
+    if (!migratedNightly && settingsFilePath && legacySettingsFileName)
+    {
+        if (!PhDoesFileExistWin32(PhGetString(settingsFilePath)))
+        {
+            PhCopyFileWin32(PhGetString(legacySettingsFileName), PhGetString(settingsFilePath), TRUE);
+        }
+    }
+
+    if (legacySettingsFileName) PhDereferenceObject(legacySettingsFileName);
+    if (legacyNightlyFileName) PhDereferenceObject(legacyNightlyFileName);
     if (settingsFilePath) PhDereferenceObject(settingsFilePath);
 }
 
-//VOID SetupCreateImageFileExecutionOptions(
-//    VOID
-//    )
-//{
-//    HANDLE keyHandle;
-//    SYSTEM_INFO info;
-//
-//    if (WindowsVersion < WINDOWS_10)
-//        return;
-//
-//    GetNativeSystemInfo(&info);
-//
-//    if (NT_SUCCESS(PhCreateKey(
-//        &keyHandle,
-//        KEY_WRITE,
-//        PH_KEY_LOCAL_MACHINE,
-//        &PhImageOptionsKeyName,
-//        OBJ_OPENIF,
-//        0,
-//        NULL
-//        )))
-//    {
-//        static PH_STRINGREF valueName = PH_STRINGREF_INIT(L"MitigationOptions");
-//
-//        PhSetValueKey(keyHandle, &valueName, REG_QWORD, &(ULONG64)
-//        {
-//            PROCESS_CREATION_MITIGATION_POLICY_HEAP_TERMINATE_ALWAYS_ON |
-//            PROCESS_CREATION_MITIGATION_POLICY_BOTTOM_UP_ASLR_ALWAYS_ON |
-//            PROCESS_CREATION_MITIGATION_POLICY_HIGH_ENTROPY_ASLR_ALWAYS_ON |
-//            PROCESS_CREATION_MITIGATION_POLICY_EXTENSION_POINT_DISABLE_ALWAYS_ON |
-//            PROCESS_CREATION_MITIGATION_POLICY_PROHIBIT_DYNAMIC_CODE_ALWAYS_ON |
-//            PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_ON |
-//            PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_REMOTE_ALWAYS_ON |
-//            PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON
-//        }, sizeof(ULONG64));
-//
-//        NtClose(keyHandle);
-//    }
-//
-//    if (info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64)
-//    {
-//        if (NT_SUCCESS(PhCreateKey(
-//            &keyHandle,
-//            KEY_WRITE,
-//            PH_KEY_LOCAL_MACHINE,
-//            &PhImageOptionsWow64KeyName,
-//            OBJ_OPENIF,
-//            0,
-//            NULL
-//            )))
-//        {
-//            static PH_STRINGREF valueName = PH_STRINGREF_INIT(L"MitigationOptions");
-//
-//            PhSetValueKey(keyHandle, &valueName, REG_QWORD, &(ULONG64)
-//            {
-//                PROCESS_CREATION_MITIGATION_POLICY_HEAP_TERMINATE_ALWAYS_ON |
-//                PROCESS_CREATION_MITIGATION_POLICY_BOTTOM_UP_ASLR_ALWAYS_ON |
-//                PROCESS_CREATION_MITIGATION_POLICY_HIGH_ENTROPY_ASLR_ALWAYS_ON |
-//                PROCESS_CREATION_MITIGATION_POLICY_EXTENSION_POINT_DISABLE_ALWAYS_ON |
-//                PROCESS_CREATION_MITIGATION_POLICY_PROHIBIT_DYNAMIC_CODE_ALWAYS_ON |
-//                PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_ON |
-//                PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_REMOTE_ALWAYS_ON |
-//                PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON
-//            }, sizeof(ULONG64));
-//
-//            NtClose(keyHandle);
-//        }
-//    }
-//}
-
 VOID ExtractResourceToFile(
-    _In_ PWSTR Resource, 
+    _In_ PVOID DllBase,
+    _In_ PWSTR Name,
     _In_ PWSTR FileName
     )
 {
@@ -910,10 +710,10 @@ VOID ExtractResourceToFile(
     IO_STATUS_BLOCK isb;
 
     if (!PhLoadResource(
-        PhInstanceHandle, 
-        Resource,
-        RT_RCDATA, 
-        &resourceLength, 
+        DllBase,
+        Name,
+        RT_RCDATA,
+        &resourceLength,
         &resourceBuffer
         ))
     {
@@ -966,10 +766,10 @@ BOOLEAN ConnectionAvailable(VOID)
     INetworkListManager* networkListManager = NULL;
 
     if (SUCCEEDED(CoCreateInstance(
-        &CLSID_NetworkListManager, 
-        NULL, 
-        CLSCTX_ALL, 
-        &IID_INetworkListManager, 
+        &CLSID_NetworkListManager,
+        NULL,
+        CLSCTX_ALL,
+        &IID_INetworkListManager,
         &networkListManager
         )))
     {
@@ -1012,32 +812,27 @@ VOID SetupCreateLink(
 
     if (SUCCEEDED(IShellLinkW_QueryInterface(shellLinkPtr, &IID_IPropertyStore, &propertyStorePtr)))
     {
-        PROPVARIANT propValue;
         SIZE_T propValueLength;
+        PROPVARIANT propValue;
+
+        propValueLength = PhCountStringZ(AppId) * sizeof(WCHAR);
 
         PropVariantInit(&propValue);
-        propValue.vt = VT_LPWSTR;
-        propValueLength = PhCountStringZ(AppId) * sizeof(WCHAR);
-        propValue.pwszVal = (PWSTR)CoTaskMemAlloc(propValueLength + sizeof(UNICODE_NULL));
+        V_VT(&propValue) = VT_LPWSTR;
+        V_UNION(&propValue, pwszVal) = CoTaskMemAlloc(propValueLength + sizeof(UNICODE_NULL));
 
-        if (propValue.pwszVal)
+        if (V_UNION(&propValue, pwszVal))
         {
-            memset(propValue.pwszVal, 0, propValueLength + sizeof(UNICODE_NULL));
-            memcpy(propValue.pwszVal, AppId, propValueLength);
+            memset(V_UNION(&propValue, pwszVal), 0, propValueLength + sizeof(UNICODE_NULL));
+            memcpy(V_UNION(&propValue, pwszVal), AppId, propValueLength);
 
             IPropertyStore_SetValue(propertyStorePtr, &PKEY_AppUserModel_ID, &propValue);
         }
 
-        PropVariantClear(&propValue);
-
-        //PropVariantInit(&propValue);
-        //propValue.vt = VT_CLSID;
-        //propValue.puuid = GUID;
-        //
-        //IPropertyStore_SetValue(propertyStorePtr, &PKEY_AppUserModel_ToastActivatorCLSID, &propValue);
-
         IPropertyStore_Commit(propertyStorePtr);
         IPropertyStore_Release(propertyStorePtr);
+
+        PropVariantClear(&propValue);
     }
 
     // Load existing shell item if it exists...
@@ -1052,22 +847,22 @@ VOID SetupCreateLink(
     if (FAILED(IShellLinkW_SetPath(shellLinkPtr, FilePath)))
         goto CleanupExit;
 
-    if (PhDoesFileExistsWin32(LinkFilePath))
+    if (PhDoesFileExistWin32(LinkFilePath))
         PhDeleteFileWin32(LinkFilePath);
 
     // Save the shortcut to the file system...
     IPersistFile_Save(persistFilePtr, LinkFilePath, TRUE);
-
-    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATH, LinkFilePath, NULL);
 
 CleanupExit:
     if (persistFilePtr)
         IPersistFile_Release(persistFilePtr);
     if (shellLinkPtr)
         IShellLinkW_Release(shellLinkPtr);
+
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATH, LinkFilePath, NULL);
 }
 
-BOOLEAN CheckProcessHackerInstalled(
+BOOLEAN CheckApplicationInstalled(
     VOID
     )
 {
@@ -1075,25 +870,39 @@ BOOLEAN CheckProcessHackerInstalled(
     PPH_STRING installPath;
     PPH_STRING exePath;
 
-    installPath = GetProcessHackerInstallPath();
-
-    if (!PhIsNullOrEmptyString(installPath))
+    if (installPath = GetApplicationInstallPath())
     {
-        exePath = SetupCreateFullPath(installPath, L"\\SystemInformer.exe");
+        if (exePath = SetupCreateFullPath(installPath, L"\\SystemInformer.exe"))
+        {
+            installed = PhDoesFileExistWin32(PhGetString(exePath));
+            PhDereferenceObject(exePath);
+        }
 
-        // Check if the value has a valid file path.
-        installed = PhDoesFileExistsWin32(PhGetString(exePath));
-
-        PhDereferenceObject(exePath);
-    }
-
-    if (installPath)
         PhDereferenceObject(installPath);
+    }
 
     return installed;
 }
 
-PPH_STRING GetProcessHackerInstallPath(
+BOOLEAN CheckApplicationInstallPathLegacy(
+    _In_ PPH_STRING Directory
+    )
+{
+    BOOLEAN installed = FALSE;
+    PPH_STRING exePath;
+
+    // Check the directory for the legacy 'ProcessHacker.exe' executable.
+
+    if (exePath = SetupCreateFullPath(Directory, L"\\ProcessHacker.exe"))
+    {
+        installed = PhDoesFileExistWin32(PhGetString(exePath));
+        PhDereferenceObject(exePath);
+    }
+
+    return installed;
+}
+
+PPH_STRING GetApplicationInstallPath(
     VOID
     )
 {
@@ -1108,9 +917,14 @@ PPH_STRING GetProcessHackerInstallPath(
         0
         )))
     {
-        installPath = PhQueryRegistryString(keyHandle, L"InstallLocation");
+        installPath = PhQueryRegistryStringZ(keyHandle, L"InstallLocation");
         NtClose(keyHandle);
     }
+
+#ifdef FORCE_TEST_UPDATE_LOCAL_INSTALL
+    PH_STRINGREF debugpath = PH_STRINGREF_INIT(L"test_install\\");
+    PhMoveReference(&installPath, PhGetApplicationDirectoryFileName(&debugpath, FALSE));
+#endif
 
     return installPath;
 }
@@ -1126,9 +940,9 @@ static BOOLEAN NTAPI PhpPreviousInstancesCallback(
     OBJECT_ATTRIBUTES objectAttributes;
     MUTANT_OWNER_INFORMATION objectInfo;
 
-    if (!PhStartsWithStringRef2(Name, L"PhMutant_", TRUE) &&
-        !PhStartsWithStringRef2(Name, L"PhSetupMutant_", TRUE) &&
-        !PhStartsWithStringRef2(Name, L"PeViewerMutant_", TRUE))
+    if (!PhStartsWithStringRef2(Name, L"SiMutant_", TRUE) &&
+        !PhStartsWithStringRef2(Name, L"SiSetupMutant_", TRUE) &&
+        !PhStartsWithStringRef2(Name, L"SiViewerMutant_", TRUE))
     {
         return TRUE;
     }
@@ -1165,11 +979,11 @@ static BOOLEAN NTAPI PhpPreviousInstancesCallback(
             goto CleanupExit;
 
         PhOpenProcess(
-            &processHandle, 
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+            &processHandle,
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
             objectInfo.ClientId.UniqueProcess
             );
-        
+
         hwnd = PhGetProcessMainWindowEx(
             objectInfo.ClientId.UniqueProcess,
             processHandle,
@@ -1183,7 +997,10 @@ static BOOLEAN NTAPI PhpPreviousInstancesCallback(
 
         if (processHandle)
         {
+            LARGE_INTEGER timeout;
+
             NtTerminateProcess(processHandle, 1);
+            NtWaitForSingleObject(processHandle, FALSE, PhTimeoutFromMilliseconds(&timeout, 5000));
         }
 
     CleanupExit:
@@ -1195,8 +1012,8 @@ static BOOLEAN NTAPI PhpPreviousInstancesCallback(
     return TRUE;
 }
 
-BOOLEAN ShutdownProcessHacker(
-    VOID
+BOOLEAN SetupShutdownApplication(
+    _In_ PPH_SETUP_CONTEXT Context
     )
 {
     PhEnumDirectoryObjects(PhGetNamespaceHandle(), PhpPreviousInstancesCallback, NULL);
@@ -1255,9 +1072,9 @@ PPH_STRING SetupCreateFullPath(
     PPH_STRING pathString;
     PPH_STRING tempString;
 
-    pathString = PhConcatStrings2(PhGetString(Path), FileName);
+    pathString = PhConcatStringRefZ(&Path->sr, FileName);
 
-    if (NT_SUCCESS(PhGetFullPathEx(pathString->Buffer, NULL, &tempString)))
+    if (NT_SUCCESS(PhGetFullPath(pathString->Buffer, &tempString, NULL)))
     {
         PhMoveReference(&pathString, tempString);
         return pathString;
@@ -1266,42 +1083,126 @@ PPH_STRING SetupCreateFullPath(
     return pathString;
 }
 
-BOOLEAN SetupBase64StringToBufferEx(
-    _In_ PVOID InputBuffer,
-    _In_ ULONG InputBufferLength,
-    _Out_opt_ PVOID* OutputBuffer,
-    _Out_opt_ ULONG* OutputBufferLength
+BOOLEAN SetupOverwriteFile(
+    _In_ PPH_STRING FileName,
+    _In_ PVOID Buffer,
+    _In_ ULONG BufferLength
     )
 {
-    PVOID buffer = NULL;
-    ULONG bufferLength = 0;
-    ULONG bufferSkip = 0;
-    ULONG bufferFlags = 0;
+    BOOLEAN result = FALSE;
+    HANDLE fileHandle = NULL;
+    LARGE_INTEGER allocationSize;
+    IO_STATUS_BLOCK isb;
 
-    if (CryptStringToBinary(InputBuffer, InputBufferLength, CRYPT_STRING_BASE64, NULL, &bufferLength, &bufferSkip, &bufferFlags))
+    allocationSize.QuadPart = BufferLength;
+
+    if (!NT_SUCCESS(PhCreateFileWin32Ex(
+        &fileHandle,
+        PhGetString(FileName),
+        FILE_GENERIC_WRITE,
+        &allocationSize,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_OVERWRITE_IF,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL
+        )))
     {
-        if (buffer = PhAllocateSafe(bufferLength))
-        {
-            if (!CryptStringToBinary(InputBuffer, InputBufferLength, CRYPT_STRING_BASE64, buffer, &bufferLength, &bufferSkip, &bufferFlags))
-            {
-                PhFree(buffer);
-                buffer = NULL;
-            }
-        }
+        goto CleanupExit;
     }
 
-    if (buffer)
+    if (!NT_SUCCESS(NtWriteFile(
+        fileHandle,
+        NULL,
+        NULL,
+        NULL,
+        &isb,
+        Buffer,
+        BufferLength,
+        NULL,
+        NULL
+        )))
     {
-        if (OutputBuffer)
-            *OutputBuffer = buffer;
-        else
-            PhFree(buffer);
-
-        if (OutputBufferLength)
-            *OutputBufferLength = bufferLength;
-
-        return TRUE;
+        goto CleanupExit;
     }
 
-    return FALSE;
+    if (isb.Information != BufferLength)
+        goto CleanupExit;
+
+    result = TRUE;
+
+CleanupExit:
+
+    if (fileHandle)
+        NtClose(fileHandle);
+
+    return result;
+}
+
+_Success_(return)
+BOOLEAN SetupHashFile(
+    _In_ PPH_STRING FileName,
+    _Out_writes_all_(256 / 8) PBYTE Buffer
+    )
+{
+    BOOLEAN result = FALSE;
+    HANDLE fileHandle = NULL;
+    NTSTATUS status;
+    IO_STATUS_BLOCK iosb;
+    PH_HASH_CONTEXT hashContext;
+    LARGE_INTEGER fileSize;
+    ULONG64 bytesRemaining;
+    BYTE buffer[PAGE_SIZE];
+
+    status = PhCreateFileWin32(
+        &fileHandle,
+        PhGetString(FileName),
+        FILE_GENERIC_READ,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT
+        );
+
+    if (!NT_SUCCESS(status))
+        goto CleanupExit;
+
+    status = PhGetFileSize(fileHandle, &fileSize);
+
+    if (!NT_SUCCESS(status))
+        goto CleanupExit;
+
+    PhInitializeHash(&hashContext, Sha256HashAlgorithm);
+
+    bytesRemaining = fileSize.QuadPart;
+
+    while (bytesRemaining)
+    {
+        status = NtReadFile(
+            fileHandle,
+            NULL,
+            NULL,
+            NULL,
+            &iosb,
+            buffer,
+            sizeof(buffer),
+            NULL,
+            NULL
+            );
+
+        if (!NT_SUCCESS(status))
+            goto CleanupExit;
+
+        PhUpdateHash(&hashContext, buffer, (ULONG)iosb.Information);
+        bytesRemaining -= (ULONG)iosb.Information;
+    }
+
+    result = PhFinalHash(&hashContext, Buffer, 256 / 8, NULL);
+
+CleanupExit:
+
+    if (fileHandle)
+        NtClose(fileHandle);
+
+    return result;
 }

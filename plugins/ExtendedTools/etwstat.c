@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010-2011
- *     dmex    2019-2022
+ *     dmex    2019-2024
  *
  */
 
@@ -27,7 +27,7 @@ VOID EtpUpdateProcessInformation(
     VOID
     );
 
-BOOLEAN EtDiskExtEnabled = FALSE;
+BOOLEAN EtDiskCountersEnabled = FALSE;
 static PH_CALLBACK_REGISTRATION EtpProcessesUpdatedCallbackRegistration;
 static PH_CALLBACK_REGISTRATION EtpNetworkItemsUpdatedCallbackRegistration;
 
@@ -71,7 +71,6 @@ VOID EtEtwStatisticsInitialization(
 {
     ULONG sampleCount;
 
-    EtDiskExtEnabled = PhWindowsVersion >= WINDOWS_10_RS3 && !PhIsExecutingInWow64();
     sampleCount = PhGetIntegerSetting(L"SampleCount");
     PhInitializeCircularBuffer_ULONG(&EtDiskReadHistory, sampleCount);
     PhInitializeCircularBuffer_ULONG(&EtDiskWriteHistory, sampleCount);
@@ -83,6 +82,11 @@ VOID EtEtwStatisticsInitialization(
     PhInitializeCircularBuffer_ULONG64(&PhMaxDiskUsageHistory, sampleCount);
     PhInitializeCircularBuffer_ULONG64(&PhMaxNetworkUsageHistory, sampleCount);
 #endif
+
+    if (EtWindowsVersion >= WINDOWS_10_RS3 && !PhIsExecutingInWow64())
+    {
+        EtDiskCountersEnabled = !!PhGetIntegerSetting(SETTING_NAME_ENABLE_DISKPERFCOUNTERS);
+    }
 
     EtEtwMonitorInitialization();
 
@@ -196,23 +200,38 @@ VOID EtProcessNetworkEvent(
         Event->ClientId.UniqueProcess
         );
 
-    if (!networkItem && Event->ProtocolType & PH_UDP_PROTOCOL_TYPE)
+    if (!networkItem && FlagOn(Event->ProtocolType, PH_UDP_PROTOCOL_TYPE))
     {
-        // Note: ETW generates UDP events with the LocalEndpoint set to the LAN endpoint address 
-        // of the local adapter the packet was sent or recieved but GetExtendedUdpTable 
+        PH_IP_ENDPOINT networkEndpoint;
+
+        // Note: ETW generates UDP events with the LocalEndpoint set to the LAN endpoint address
+        // of the local adapter the packet was sent or received but GetExtendedUdpTable
         // returns some UDP connections with endpoints set to in4addr_any/in6addr_any (zero). (dmex)
 
-        if (Event->ProtocolType & PH_IPV4_NETWORK_TYPE)
-            memset(&Event->LocalEndpoint.Address.InAddr, 0, sizeof(IN_ADDR)); // same as in4addr_any
-        else
-            memset(&Event->LocalEndpoint.Address.In6Addr, 0, sizeof(IN6_ADDR)); // same as in6addr_any
+        memset(&networkEndpoint, 0, sizeof(PH_IP_ENDPOINT));
+        networkEndpoint.Address.Type = Event->LocalEndpoint.Address.Type;
+        networkEndpoint.Port = Event->LocalEndpoint.Port;
 
         networkItem = PhReferenceNetworkItem(
             Event->ProtocolType,
-            &Event->LocalEndpoint,
+            &networkEndpoint,
             &Event->RemoteEndpoint,
             Event->ClientId.UniqueProcess
             );
+
+        if (!networkItem)
+        {
+            memset(&networkEndpoint, 0, sizeof(PH_IP_ENDPOINT));
+            networkEndpoint.Address.Type = Event->RemoteEndpoint.Address.Type;
+            networkEndpoint.Port = Event->RemoteEndpoint.Port;
+
+            networkItem = PhReferenceNetworkItem(
+                Event->ProtocolType,
+                &Event->LocalEndpoint,
+                &networkEndpoint,
+                Event->ClientId.UniqueProcess
+                );
+        }
     }
 
     if (networkItem)
@@ -249,7 +268,7 @@ VOID NTAPI EtEtwProcessesUpdatedCallback(
     // Since Windows 8, we no longer get the correct process/thread IDs in the
     // event headers for disk events. We need to update our process information since
     // etwmon uses our EtThreadIdToProcessId function. (wj32)
-    if (PhWindowsVersion >= WINDOWS_8)
+    if (EtWindowsVersion >= WINDOWS_8 && EtEtwEnabled)
         EtpUpdateProcessInformation();
 
     // ETW is extremely lazy when it comes to flushing buffers, so we must do it manually. (wj32)
@@ -277,7 +296,7 @@ VOID NTAPI EtEtwProcessesUpdatedCallback(
 
         block = CONTAINING_RECORD(listEntry, ET_PROCESS_BLOCK, ListEntry);
 
-        if (EtDiskExtEnabled)
+        if (EtDiskCountersEnabled)
         {
             ULONG64 diskReads = block->ProcessItem->DiskCounters.ReadOperationCount;
             ULONG64 diskWrites = block->ProcessItem->DiskCounters.WriteOperationCount;
@@ -292,6 +311,17 @@ VOID NTAPI EtEtwProcessesUpdatedCallback(
                 block->DiskReadRaw = diskReadRaw;
             if (block->DiskWriteRaw < diskWriteRaw)
                 block->DiskWriteRaw = diskWriteRaw;
+
+            if (EtWindowsVersion >= WINDOWS_11_24H2)
+            {
+                ULONG64 networkReadRaw = block->ProcessItem->NetworkCounters.BytesIn;
+                ULONG64 networkWriteRaw = block->ProcessItem->NetworkCounters.BytesOut;
+
+                if (block->NetworkReceiveRaw < networkReadRaw)
+                    block->NetworkReceiveRaw = networkReadRaw;
+                if (block->NetworkSendRaw < networkWriteRaw)
+                    block->NetworkSendRaw = networkWriteRaw;
+            }
         }
 
         PhUpdateDelta(&block->DiskReadDelta, block->DiskReadCount);
@@ -429,7 +459,10 @@ VOID EtpUpdateProcessInformation(
         EtpProcessInformation = NULL;
     }
 
-    PhEnumProcesses(&EtpProcessInformation);
+    if (!PhDuplicateProcessInformation(&EtpProcessInformation))
+    {
+        PhEnumProcesses(&EtpProcessInformation);
+    }
 
     PhReleaseQueuedLockExclusive(&EtpProcessInformationLock);
 }

@@ -25,7 +25,7 @@ typedef struct _PV_PE_CERTIFICATE_CONTEXT
     PH_LAYOUT_MANAGER LayoutManager;
     PPV_PROPPAGECONTEXT PropSheetContext;
     PPH_TN_FILTER_ENTRY TreeFilterEntry;
-    PPH_STRING SearchText;
+    ULONG_PTR SearchMatchHandle;
     ULONG TotalSize;
     ULONG TotalCount;
     ULONG TreeNewSortColumn;
@@ -117,30 +117,6 @@ VOID PvpPeEnumerateNestedSignatures(
     _In_ PCMSG_SIGNER_INFO SignerInfo
     );
 
-static BOOLEAN WordMatchStringRef(
-    _In_ PPV_PE_CERTIFICATE_CONTEXT Context,
-    _In_ PPH_STRINGREF Text
-    )
-{
-    PH_STRINGREF part;
-    PH_STRINGREF remainingPart;
-
-    remainingPart = PhGetStringRef(Context->SearchText);
-
-    while (remainingPart.Length)
-    {
-        PhSplitStringRefAtChar(&remainingPart, L'|', &part, &remainingPart);
-
-        if (part.Length)
-        {
-            if (PhFindStringInStringRef(Text, &part, TRUE) != SIZE_MAX)
-                return TRUE;
-        }
-    }
-
-    return FALSE;
-}
-
 BOOLEAN PvCertificateTreeFilterCallback(
     _In_ PPH_TREENEW_NODE Node,
     _In_opt_ PVOID Context
@@ -151,30 +127,30 @@ BOOLEAN PvCertificateTreeFilterCallback(
 
     if (!context)
         return TRUE;
-    if (PhIsNullOrEmptyString(context->SearchText))
+    if (!context->SearchMatchHandle)
         return TRUE;
 
     if (!PhIsNullOrEmptyString(certificateNode->Name))
     {
-        if (WordMatchStringRef(context, &certificateNode->Name->sr))
+        if (PvSearchControlMatch(context->SearchMatchHandle, &certificateNode->Name->sr))
             return TRUE;
     }
 
     if (!PhIsNullOrEmptyString(certificateNode->Issuer))
     {
-        if (WordMatchStringRef(context, &certificateNode->Issuer->sr))
+        if (PvSearchControlMatch(context->SearchMatchHandle, &certificateNode->Issuer->sr))
             return TRUE;
     }
 
     if (!PhIsNullOrEmptyString(certificateNode->DateFrom))
     {
-        if (WordMatchStringRef(context, &certificateNode->DateFrom->sr))
+        if (PvSearchControlMatch(context->SearchMatchHandle, &certificateNode->DateFrom->sr))
             return TRUE;
     }
 
     if (!PhIsNullOrEmptyString(certificateNode->DateTo))
     {
-        if (WordMatchStringRef(context, &certificateNode->DateTo->sr))
+        if (PvSearchControlMatch(context->SearchMatchHandle, &certificateNode->DateTo->sr))
             return TRUE;
     }
 
@@ -198,6 +174,7 @@ VOID PvInitializeCertificateTree(
 
     PhSetControlTheme(Context->TreeNewHandle, L"explorer");
     TreeNew_SetCallback(Context->TreeNewHandle, PvCertificateTreeNewCallback, Context);
+    TreeNew_SetRedraw(Context->TreeNewHandle, FALSE);
 
     PhAddTreeNewColumn(Context->TreeNewHandle, PV_CERTIFICATE_TREE_COLUMN_NAME_NAME, TRUE, L"Name", 200, PH_ALIGN_LEFT, 0, 0);
     PhAddTreeNewColumn(Context->TreeNewHandle, PV_CERTIFICATE_TREE_COLUMN_NAME_INDEX, TRUE, L"#", 25, PH_ALIGN_LEFT, 1, 0);
@@ -209,6 +186,7 @@ VOID PvInitializeCertificateTree(
     PhAddTreeNewColumn(Context->TreeNewHandle, PV_CERTIFICATE_TREE_COLUMN_NAME_SIZE, TRUE, L"Size", 50, PH_ALIGN_LEFT, 7, 0);
     PhAddTreeNewColumn(Context->TreeNewHandle, PV_CERTIFICATE_TREE_COLUMN_NAME_ALG, TRUE, L"Algorithm", 50, PH_ALIGN_LEFT, 8, 0);
 
+    TreeNew_SetRedraw(Context->TreeNewHandle, TRUE);
     TreeNew_SetTriState(Context->TreeNewHandle, TRUE);
     TreeNew_SetSort(Context->TreeNewHandle, PV_CERTIFICATE_TREE_COLUMN_NAME_INDEX, NoSortOrder);
     TreeNew_SetRowHeight(Context->TreeNewHandle, 22);
@@ -217,7 +195,6 @@ VOID PvInitializeCertificateTree(
     PhCmLoadSettings(Context->TreeNewHandle, &settings->sr);
     PhDereferenceObject(settings);
 
-    Context->SearchText = PhReferenceEmptyString();
     PhInitializeTreeNewFilterSupport(&Context->FilterSupport, Context->TreeNewHandle, Context->NodeList);
     Context->TreeFilterEntry = PhAddTreeNewFilter(&Context->FilterSupport, PvCertificateTreeFilterCallback, Context);
 }
@@ -230,7 +207,6 @@ VOID PvDeleteCertificateTree(
     ULONG i;
 
     PhRemoveTreeNewFilter(&Context->FilterSupport, Context->TreeFilterEntry);
-    if (Context->SearchText) PhDereferenceObject(Context->SearchText);
 
     PhDeleteTreeNewFilterSupport(&Context->FilterSupport);
 
@@ -460,26 +436,19 @@ END_SORT_FUNCTION
 BOOLEAN NTAPI PvCertificateTreeNewCallback(
     _In_ HWND hwnd,
     _In_ PH_TREENEW_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2,
+    _In_ PVOID Context
     )
 {
     PPV_PE_CERTIFICATE_CONTEXT context = Context;
     PPV_CERTIFICATE_NODE node;
-
-    if (!context)
-        return FALSE;
 
     switch (Message)
     {
     case TreeNewGetChildren:
         {
             PPH_TREENEW_GET_CHILDREN getChildren = Parameter1;
-
-            if (!getChildren)
-                break;
-
             node = (PPV_CERTIFICATE_NODE)getChildren->Node;
 
             if (context->TreeNewSortOrder == NoSortOrder)
@@ -513,6 +482,8 @@ BOOLEAN NTAPI PvCertificateTreeNewCallback(
                     };
                     int (__cdecl *sortFunction)(void *, const void *, const void *);
 
+                    static_assert(RTL_NUMBER_OF(sortFunctions) == PV_CERTIFICATE_TREE_COLUMN_NAME_MAXIMUM, "SortFunctions must equal maximum.");
+
                     if (context->TreeNewSortColumn < PV_CERTIFICATE_TREE_COLUMN_NAME_MAXIMUM)
                         sortFunction = sortFunctions[context->TreeNewSortColumn];
                     else
@@ -532,10 +503,6 @@ BOOLEAN NTAPI PvCertificateTreeNewCallback(
     case TreeNewIsLeaf:
         {
             PPH_TREENEW_IS_LEAF isLeaf = Parameter1;
-
-            if (!isLeaf)
-                break;
-
             node = (PPV_CERTIFICATE_NODE)isLeaf->Node;
 
             if (context->TreeNewSortOrder == NoSortOrder)
@@ -547,10 +514,6 @@ BOOLEAN NTAPI PvCertificateTreeNewCallback(
     case TreeNewGetCellText:
         {
             PPH_TREENEW_GET_CELL_TEXT getCellText = Parameter1;
-
-            if (!getCellText)
-                break;
-
             node = (PPV_CERTIFICATE_NODE)getCellText->Node;
 
             switch (getCellText->Id)
@@ -628,10 +591,6 @@ BOOLEAN NTAPI PvCertificateTreeNewCallback(
     case TreeNewGetNodeColor:
         {
             PPH_TREENEW_GET_NODE_COLOR getNodeColor = Parameter1;
-
-            if (!getNodeColor)
-                break;
-
             node = (PPV_CERTIFICATE_NODE)getNodeColor->Node;
 
             //if (!node->WindowVisible)
@@ -650,9 +609,6 @@ BOOLEAN NTAPI PvCertificateTreeNewCallback(
     case TreeNewKeyDown:
         {
             PPH_TREENEW_KEY_EVENT keyEvent = Parameter1;
-
-            if (!keyEvent)
-                break;
 
             switch (keyEvent->VirtualKey)
             {
@@ -683,7 +639,7 @@ BOOLEAN NTAPI PvCertificateTreeNewCallback(
             data.MouseEvent = Parameter1;
             data.DefaultSortColumn = 0;
             data.DefaultSortOrder = AscendingSortOrder;
-            PhInitializeTreeNewColumnMenu(&data);
+            PhInitializeTreeNewColumnMenuEx(&data, PH_TN_COLUMN_MENU_SHOW_RESET_SORT);
 
             data.Selection = PhShowEMenu(data.Menu, hwnd, PH_EMENU_SHOW_LEFTRIGHT,
                 PH_ALIGN_LEFT | PH_ALIGN_TOP, data.MouseEvent->ScreenLocation.x, data.MouseEvent->ScreenLocation.y);
@@ -1043,7 +999,7 @@ BOOLEAN PvpPeFillNodeCertificateInfo(
 
     for (ULONG i = 0; i < CertificateContext->pCertInfo->cExtension; i++)
     {
-        dprintf("%s\n", CertificateContext->pCertInfo->rgExtension[i].pszObjId);
+        //dprintf("%s\n", CertificateContext->pCertInfo->rgExtension[i].pszObjId);
     }
 
     //if (CertificateContext->pCertInfo && CertificateContext->pCertInfo->SignatureAlgorithm.pszObjId)
@@ -1114,108 +1070,6 @@ PCMSG_SIGNER_INFO PvpPeGetSignerInfoIndex(
 
     return signerInfo;
 }
-
-DWORD SOFTPUB_DecodeInnerContent(_In_ HCRYPTMSG CryptMessageHandle)
-{
-    BOOL ret;
-    DWORD size, err = ERROR_SUCCESS;
-    LPSTR oid = NULL;
-    LPBYTE buf = NULL;
-    PWSTR algID;
-
-    ret = CryptMsgGetParam(CryptMessageHandle, CMSG_INNER_CONTENT_TYPE_PARAM, 0, NULL, &size);
-    if (!ret)
-    {
-        err = GetLastError();
-        goto error;
-    }
-
-    oid = PhAllocateSafe(size);
-    if (!oid)
-    {
-        err = ERROR_OUTOFMEMORY;
-        goto error;
-    }
-
-    ret = CryptMsgGetParam(CryptMessageHandle, CMSG_INNER_CONTENT_TYPE_PARAM, 0, oid, &size);
-    if (!ret)
-    {
-        err = GetLastError();
-        goto error;
-    }
-
-    ret = CryptMsgGetParam(CryptMessageHandle, CMSG_CONTENT_PARAM, 0, NULL, &size);
-    if (!ret)
-    {
-        err = GetLastError();
-        goto error;
-    }
-
-    buf = PhAllocateSafe(size);
-    if (!buf)
-    {
-        err = ERROR_OUTOFMEMORY;
-        goto error;
-    }
-
-    ret = CryptMsgGetParam(CryptMessageHandle, CMSG_CONTENT_PARAM, 0, buf, &size);
-    if (!ret)
-    {
-        err = GetLastError();
-        goto error;
-    }
-
-    ret = CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, oid, buf, size, 0, NULL, NULL, &size);
-    if (!ret)
-    {
-        err = GetLastError();
-        goto error;
-    }
-
-    PVOID psIndirectData = PhAllocateSafe(size);
-    if (!psIndirectData)
-    {
-        err = ERROR_OUTOFMEMORY;
-        goto error;
-    }
-
-    ret = CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, oid, buf, size, 0, NULL, psIndirectData, &size);
-    if (!ret)
-        err = GetLastError();
-
-
-
-    SPC_INDIRECT_DATA_CONTENT* indirect = (SPC_INDIRECT_DATA_CONTENT*)psIndirectData;
-
-    if (
-        ((ULONG_PTR)indirect->Data.pszObjId >> 16) == 0 ||
-        !RtlEqualMemory(indirect->Data.pszObjId, SPC_PE_IMAGE_DATA_OBJID, sizeof(SPC_PE_IMAGE_DATA_OBJID)) &&
-        !RtlEqualMemory(indirect->Data.pszObjId, SPC_CAB_DATA_OBJID, sizeof(SPC_CAB_DATA_OBJID))
-        )
-    {
-        return TRUST_E_NOSIGNATURE;
-    }
-
-    if (RtlEqualMemory(indirect->DigestAlgorithm.pszObjId, szOID_OIWSEC_sha1, sizeof(szOID_OIWSEC_sha1)))
-        algID = BCRYPT_SHA1_ALGORITHM;
-    else if (RtlEqualMemory(indirect->DigestAlgorithm.pszObjId, szOID_NIST_sha256, sizeof(szOID_NIST_sha256)))
-        algID = BCRYPT_SHA256_ALGORITHM;
-    else
-    {
-        //algID = CertOIDToAlgId(indirect->DigestAlgorithm.pszObjId);
-        algID = BCRYPT_SHA1_ALGORITHM;
-    }
-
-
-    PPH_STRING authentiHash = PhBufferToHexString(indirect->Digest.pbData, indirect->Digest.cbData);
-
-error:
-    PhFree(oid);
-    PhFree(buf);
-
-    return err;
-}
-
 
 typedef struct _PV_CERT_ENUM_CONTEXT
 {
@@ -1407,7 +1261,7 @@ VOID PvpPeEnumerateFileCertificates(
     ULONG certificateContentType;
     ULONG certificateFormatType;
 
-    if (NT_SUCCESS(PhGetMappedImageDataEntry(&PvMappedImage, IMAGE_DIRECTORY_ENTRY_SECURITY, &dataDirectory)))
+    if (NT_SUCCESS(PhGetMappedImageDataDirectory(&PvMappedImage, IMAGE_DIRECTORY_ENTRY_SECURITY, &dataDirectory)))
     {
         LPWIN_CERTIFICATE certificateDirectory = PTR_ADD_OFFSET(PvMappedImage.ViewBase, dataDirectory->VirtualAddress);
         CERT_BLOB certificateBlob = { certificateDirectory->dwLength, certificateDirectory->bCertificate };
@@ -1557,6 +1411,26 @@ VOID PvpPeSaveCertificateContext(
     }
 }
 
+VOID NTAPI PhpPeSecuritySearchControlCallback(
+    _In_ ULONG_PTR MatchHandle,
+    _In_opt_ PVOID Context
+    )
+{
+    PPV_PE_CERTIFICATE_CONTEXT context = Context;
+
+    assert(context);
+
+    context->SearchMatchHandle = MatchHandle;
+
+    if (!context->SearchMatchHandle)
+    {
+        PvExpandAllCertificateNodes(context, TRUE);
+        PvDeselectAllCertificateNodes(context);
+    }
+
+    PhApplyTreeNewFilters(&context->FilterSupport);
+}
+
 INT_PTR CALLBACK PvpPeSecurityDlgProc(
     _In_ HWND hwndDlg,
     _In_ UINT uMsg,
@@ -1593,9 +1467,14 @@ INT_PTR CALLBACK PvpPeSecurityDlgProc(
             context->LabelHandle = GetDlgItem(hwndDlg, IDC_NAME);
             context->TreeNewHandle = GetDlgItem(hwndDlg, IDC_TREELIST);
             context->SearchHandle = GetDlgItem(hwndDlg, IDC_TREESEARCH);
-            context->SearchText = PhReferenceEmptyString();
 
-            PvCreateSearchControl(context->SearchHandle, L"Search Certificates (Ctrl+K)");
+            PvCreateSearchControl(
+                context->SearchHandle,
+                L"Search Certificates (Ctrl+K)",
+                PhpPeSecuritySearchControlCallback,
+                context
+                );
+
             PvInitializeCertificateTree(context);
             PvConfigTreeBorders(context->TreeNewHandle);
 
@@ -1606,7 +1485,7 @@ INT_PTR CALLBACK PvpPeSecurityDlgProc(
 
             PvpPeEnumerateFileCertificates(context);
 
-            PhInitializeWindowTheme(hwndDlg, PeEnableThemeSupport);
+            PhInitializeWindowTheme(hwndDlg, PhEnableThemeSupport);
         }
         break;
     case WM_DESTROY:
@@ -1615,6 +1494,7 @@ INT_PTR CALLBACK PvpPeSecurityDlgProc(
 
             PhDeleteLayoutManager(&context->LayoutManager);
 
+            PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
             PhFree(context);
         }
         break;
@@ -1636,30 +1516,6 @@ INT_PTR CALLBACK PvpPeSecurityDlgProc(
         break;
     case WM_COMMAND:
         {
-            switch (GET_WM_COMMAND_CMD(wParam, lParam))
-            {
-            case EN_CHANGE:
-                {
-                    PPH_STRING newSearchboxText;
-
-                    newSearchboxText = PH_AUTO(PhGetWindowText(context->SearchHandle));
-
-                    if (!PhEqualString(context->SearchText, newSearchboxText, FALSE))
-                    {
-                        PhSwapReference(&context->SearchText, newSearchboxText);
-
-                        if (!PhIsNullOrEmptyString(context->SearchText))
-                        {
-                            PvExpandAllCertificateNodes(context, TRUE);
-                            PvDeselectAllCertificateNodes(context);
-                        }
-
-                        PhApplyTreeNewFilters(&context->FilterSupport);
-                    }
-                }
-                break;
-            }
-
             switch (GET_WM_COMMAND_ID(wParam, lParam))
             {
             case WM_PV_CERTIFICATE_PROPERTIES:

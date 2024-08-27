@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2009-2016
- *     dmex    2019-2022
+ *     dmex    2019-2023
  *
  */
 
@@ -56,6 +56,7 @@ INT_PTR CALLBACK PhpProcessPerformanceDlgProc(
             performanceContext = propPageContext->Context = PhAllocateZero(sizeof(PH_PERFORMANCE_CONTEXT));
             performanceContext->WindowHandle = hwndDlg;
             performanceContext->Enabled = TRUE;
+            performanceContext->WindowDpi = PhGetWindowDpi(hwndDlg);
 
             PhRegisterCallback(
                 PhGetGeneralCallback(GeneralCallbackProcessProviderUpdatedEvent),
@@ -154,8 +155,8 @@ INT_PTR CALLBACK PhpProcessPerformanceDlgProc(
 
                     if (header->hwndFrom == performanceContext->CpuGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | PH_GRAPH_USE_LINE_2 | (PhCsEnableScaleCpuGraph ? PH_GRAPH_LABEL_MAX_Y : 0);
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhCsColorCpuKernel, PhCsColorCpuUser);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | PH_GRAPH_USE_LINE_2 | (PhCsEnableGraphMaxText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhCsColorCpuKernel, PhCsColorCpuUser, performanceContext->WindowDpi);
 
                         PhGraphStateGetDrawInfo(
                             &performanceContext->CpuGraphState,
@@ -170,17 +171,28 @@ INT_PTR CALLBACK PhpProcessPerformanceDlgProc(
                             PhCopyCircularBuffer_FLOAT(&processItem->CpuUserHistory,
                                 performanceContext->CpuGraphState.Data2, drawInfo->LineDataCount);
 
-                            if (PhCsEnableScaleCpuGraph)
+                            if (PhCsEnableGraphMaxScale)
                             {
                                 FLOAT max = 0;
 
-                                for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                if (PhCsEnableAvxSupport && drawInfo->LineDataCount > 128)
                                 {
-                                    FLOAT data = performanceContext->CpuGraphState.Data1[i] +
-                                        performanceContext->CpuGraphState.Data2[i]; // HACK
+                                    max = PhAddPlusMaxMemorySingles(
+                                        performanceContext->CpuGraphState.Data1,
+                                        performanceContext->CpuGraphState.Data2,
+                                        drawInfo->LineDataCount
+                                        );
+                                }
+                                else
+                                {
+                                    for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                    {
+                                        FLOAT data = performanceContext->CpuGraphState.Data1[i] +
+                                            performanceContext->CpuGraphState.Data2[i];
 
-                                    if (max < data)
-                                        max = data;
+                                        if (max < data)
+                                            max = data;
+                                    }
                                 }
 
                                 if (max != 0)
@@ -200,6 +212,11 @@ INT_PTR CALLBACK PhpProcessPerformanceDlgProc(
                                 drawInfo->LabelYFunction = PhSiDoubleLabelYFunction;
                                 drawInfo->LabelYFunctionParameter = max;
                             }
+                            else
+                            {
+                                drawInfo->LabelYFunction = PhSiDoubleLabelYFunction;
+                                drawInfo->LabelYFunctionParameter = 1.0f;
+                            }
 
                             performanceContext->CpuGraphState.Valid = TRUE;
                         }
@@ -210,11 +227,11 @@ INT_PTR CALLBACK PhpProcessPerformanceDlgProc(
                             PH_FORMAT format[6];
 
                             // %.2f%% (K: %.2f%%, U: %.2f%%)
-                            PhInitFormatF(&format[0], ((DOUBLE)processItem->CpuKernelUsage + processItem->CpuUserUsage) * 100, PhMaxPrecisionUnit);
+                            PhInitFormatF(&format[0], ((FLOAT)processItem->CpuKernelUsage + processItem->CpuUserUsage) * 100, PhMaxPrecisionUnit);
                             PhInitFormatS(&format[1], L"% (K: ");
-                            PhInitFormatF(&format[2], (DOUBLE)processItem->CpuKernelUsage * 100, PhMaxPrecisionUnit);
+                            PhInitFormatF(&format[2], (FLOAT)processItem->CpuKernelUsage * 100, PhMaxPrecisionUnit);
                             PhInitFormatS(&format[3], L"%, U: ");
-                            PhInitFormatF(&format[4], (DOUBLE)processItem->CpuUserUsage * 100, PhMaxPrecisionUnit);
+                            PhInitFormatF(&format[4], (FLOAT)processItem->CpuUserUsage * 100, PhMaxPrecisionUnit);
                             PhInitFormatS(&format[5], L"%)");
 
                             PhMoveReference(&performanceContext->CpuGraphState.Text, PhFormat(format, RTL_NUMBER_OF(format), 16));
@@ -230,8 +247,8 @@ INT_PTR CALLBACK PhpProcessPerformanceDlgProc(
                     }
                     else if (header->hwndFrom == performanceContext->PrivateGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y;
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhCsColorPrivate, 0);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (PhCsEnableGraphMaxText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhCsColorPrivate, 0, performanceContext->WindowDpi);
 
                         PhGraphStateGetDrawInfo(
                             &performanceContext->PrivateGraphState,
@@ -241,21 +258,29 @@ INT_PTR CALLBACK PhpProcessPerformanceDlgProc(
 
                         if (!performanceContext->PrivateGraphState.Valid)
                         {
+                            FLOAT max = PhCsEnableGraphMaxScale ? 0.f : (FLOAT)processItem->VmCounters.PeakPagefileUsage;
+
                             for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
                             {
-                                performanceContext->PrivateGraphState.Data1[i] =
+                                FLOAT data = performanceContext->PrivateGraphState.Data1[i] =
                                     (FLOAT)PhGetItemCircularBuffer_SIZE_T(&processItem->PrivateBytesHistory, i);
+
+                                if (max < data)
+                                    max = data;
                             }
 
-                            if (processItem->VmCounters.PeakPagefileUsage != 0)
+                            if (max != 0)
                             {
                                 // Scale the data.
                                 PhDivideSinglesBySingle(
                                     performanceContext->PrivateGraphState.Data1,
-                                    (FLOAT)processItem->VmCounters.PeakPagefileUsage,
+                                    max,
                                     drawInfo->LineDataCount
                                     );
                             }
+
+                            drawInfo->LabelYFunction = PhSiSizeLabelYFunction;
+                            drawInfo->LabelYFunctionParameter = max;
 
                             performanceContext->PrivateGraphState.Valid = TRUE;
                         }
@@ -282,7 +307,7 @@ INT_PTR CALLBACK PhpProcessPerformanceDlgProc(
                     else if (header->hwndFrom == performanceContext->IoGraphHandle)
                     {
                         drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | PH_GRAPH_LABEL_MAX_Y | PH_GRAPH_USE_LINE_2;
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhCsColorIoReadOther, PhCsColorIoWrite);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhCsColorIoReadOther, PhCsColorIoWrite, performanceContext->WindowDpi);
 
                         PhGraphStateGetDrawInfo(
                             &performanceContext->IoGraphState,
@@ -376,11 +401,11 @@ INT_PTR CALLBACK PhpProcessPerformanceDlgProc(
                             cpuUser = PhGetItemCircularBuffer_FLOAT(&processItem->CpuUserHistory, getTooltipText->Index);
 
                             // %.2f%% (K: %.2f%%, U: %.2f%%)%s\n%s
-                            PhInitFormatF(&format[0], ((DOUBLE)cpuKernel + cpuUser) * 100, PhMaxPrecisionUnit);
+                            PhInitFormatF(&format[0], ((FLOAT)cpuKernel + cpuUser) * 100, PhMaxPrecisionUnit);
                             PhInitFormatS(&format[1], L"% (K: ");
-                            PhInitFormatF(&format[2], (DOUBLE)cpuKernel * 100, PhMaxPrecisionUnit);
+                            PhInitFormatF(&format[2], (FLOAT)cpuKernel * 100, PhMaxPrecisionUnit);
                             PhInitFormatS(&format[3], L"%, U: ");
-                            PhInitFormatF(&format[4], (DOUBLE)cpuUser * 100, PhMaxPrecisionUnit);
+                            PhInitFormatF(&format[4], (FLOAT)cpuUser * 100, PhMaxPrecisionUnit);
                             PhInitFormatS(&format[5], L"%)\n");
                             PhInitFormatSR(&format[6], PH_AUTO_T(PH_STRING, PhGetStatisticsTimeString(processItem, getTooltipText->Index))->sr);
 
@@ -453,11 +478,18 @@ INT_PTR CALLBACK PhpProcessPerformanceDlgProc(
         {
             HDWP deferHandle;
             RECT clientRect;
-            RECT margin = { PH_SCALE_DPI(13), PH_SCALE_DPI(13), PH_SCALE_DPI(13), PH_SCALE_DPI(13) };
-            RECT innerMargin = { PH_SCALE_DPI(10), PH_SCALE_DPI(20), PH_SCALE_DPI(10), PH_SCALE_DPI(10) };
-            LONG between = PH_SCALE_DPI(3);
+            RECT margin;
+            RECT innerMargin;
+            LONG between;
             LONG width;
             LONG height;
+
+            margin.left = margin.top = margin.right = margin.bottom = PhGetDpi(13, performanceContext->WindowDpi);
+
+            innerMargin.top = PhGetDpi(20, performanceContext->WindowDpi);
+            innerMargin.left = innerMargin.right = innerMargin.bottom = PhGetDpi(10, performanceContext->WindowDpi);
+
+            between = PhGetDpi(3, performanceContext->WindowDpi);
 
             performanceContext->CpuGraphState.Valid = FALSE;
             performanceContext->CpuGraphState.TooltipIndex = ULONG_MAX;
@@ -536,6 +568,11 @@ INT_PTR CALLBACK PhpProcessPerformanceDlgProc(
                 Graph_UpdateTooltip(performanceContext->IoGraphHandle);
                 InvalidateRect(performanceContext->IoGraphHandle, NULL, FALSE);
             }
+        }
+        break;
+    case WM_DPICHANGED_BEFOREPARENT:
+        {
+            performanceContext->WindowDpi = PhGetWindowDpi(hwndDlg);
         }
         break;
     }

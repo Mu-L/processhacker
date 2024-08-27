@@ -1,3 +1,15 @@
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     wj32    2010-2016
+ *     dmex    2017-2024
+ *
+ */
+
 #ifndef PH_SRVLIST_H
 #define PH_SRVLIST_H
 
@@ -6,11 +18,11 @@
 // Columns
 
 #define PHSVTLC_NAME 0
-#define PHSVTLC_DISPLAYNAME 1
-#define PHSVTLC_TYPE 2
-#define PHSVTLC_STATUS 3
-#define PHSVTLC_STARTTYPE 4
-#define PHSVTLC_PID 5
+#define PHSVTLC_PID 1
+#define PHSVTLC_DISPLAYNAME 2
+#define PHSVTLC_TYPE 3
+#define PHSVTLC_STATUS 4
+#define PHSVTLC_STARTTYPE 5
 
 #define PHSVTLC_BINARYPATH 6
 #define PHSVTLC_ERRORCONTROL 7
@@ -21,8 +33,9 @@
 #define PHSVTLC_VERIFIEDSIGNER 12
 #define PHSVTLC_FILENAME 13
 #define PHSVTLC_TIMELINE 14
+#define PHSVTLC_EXITCODE 15
 
-#define PHSVTLC_MAXIMUM 15
+#define PHSVTLC_MAXIMUM 16
 
 #define PHSN_CONFIG 0x1
 #define PHSN_DESCRIPTION 0x2
@@ -46,6 +59,8 @@ typedef struct _PH_SERVICE_NODE
     // Key
     LARGE_INTEGER KeyLastWriteTime;
     PPH_STRING KeyModifiedTimeText;
+    // Exitcode
+    PPH_STRING ExitCodeText;
 // end_phapppub
     PPH_STRING TooltipText;
     ULONG ValidMask;
@@ -72,7 +87,7 @@ VOID PhSaveSettingsServiceTreeList(
 
 // begin_phapppub
 PHAPPAPI
-struct _PH_TN_FILTER_SUPPORT *
+PPH_TN_FILTER_SUPPORT
 NTAPI
 PhGetFilterSupportServiceTreeList(
     VOID

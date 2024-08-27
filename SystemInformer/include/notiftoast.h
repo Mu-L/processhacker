@@ -12,10 +12,7 @@
 #pragma once
 #include <phapp.h>
 
-#ifdef __cplusplus
-extern "C"
-{
-#endif
+EXTERN_C_START
 
 typedef enum _PH_TOAST_REASON
 {
@@ -24,11 +21,10 @@ typedef enum _PH_TOAST_REASON
     PhToastReasonTimedOut,
     PhToastReasonActivated,
     PhToastReasonError,
-    PhToastReasonUnknown 
-
+    PhToastReasonUnknown
 } PH_TOAST_REASON;
 
-typedef VOID(NTAPI* PPH_TOAST_CALLBACK)(
+typedef VOID (NTAPI* PPH_TOAST_CALLBACK)(
     _In_ HRESULT Result,
     _In_ PH_TOAST_REASON Reason,
     _In_ PVOID Context
@@ -36,20 +32,33 @@ typedef VOID(NTAPI* PPH_TOAST_CALLBACK)(
 
 _Must_inspect_result_
 HRESULT
+NTAPI
 PhInitializeToastRuntime();
 
 VOID
+NTAPI
 PhUninitializeToastRuntime();
 
 _Must_inspect_result_
-HRESULT PhShowToast(
+HRESULT
+NTAPI
+PhShowToast(
     _In_ PCWSTR ApplicationId,
     _In_ PCWSTR ToastXml,
     _In_opt_ ULONG TimeoutMilliseconds,
     _In_opt_ PPH_TOAST_CALLBACK ToastCallback,
-    _In_opt_ PVOID Context 
+    _In_opt_ PVOID Context
     );
 
-#ifdef __cplusplus
-}
-#endif
+_Must_inspect_result_
+HRESULT
+NTAPI
+PhShowToastStringRef(
+    _In_ PPH_STRINGREF ApplicationId,
+    _In_ PPH_STRINGREF ToastXml,
+    _In_opt_ ULONG TimeoutMilliseconds,
+    _In_opt_ PPH_TOAST_CALLBACK ToastCallback,
+    _In_opt_ PVOID Context
+    );
+
+EXTERN_C_END

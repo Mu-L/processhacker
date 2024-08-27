@@ -65,6 +65,8 @@ typedef struct _PH_OBJECT_HEADER
     QUAD_PTR Body;
 } PH_OBJECT_HEADER, *PPH_OBJECT_HEADER;
 
+C_ASSERT((FIELD_OFFSET(PH_OBJECT_HEADER, Body) % MEMORY_ALLOCATION_ALIGNMENT) == 0);
+
 #ifndef DEBUG
 #ifdef _WIN64
 C_ASSERT(FIELD_OFFSET(PH_OBJECT_HEADER, TypeIndex) == 0x0);
@@ -92,7 +94,7 @@ C_ASSERT(FIELD_OFFSET(PH_OBJECT_HEADER, Body) == 0x8);
  *
  * \return A pointer to the object header of the object.
  */
-#define PhObjectToObjectHeader(Object) ((PPH_OBJECT_HEADER)CONTAINING_RECORD((PCHAR)(Object), PH_OBJECT_HEADER, Body))
+#define PhObjectToObjectHeader(Object) ((PPH_OBJECT_HEADER)CONTAINING_RECORD((Object), PH_OBJECT_HEADER, Body))
 
 /**
  * Gets a pointer to an object from an object header.

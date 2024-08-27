@@ -5,16 +5,15 @@
  *
  * Authors:
  *
- *     dmex    2017-2022
+ *     dmex    2017-2023
  *
  */
 
 #include <peview.h>
 
-static PPH_STRING PeSettingsFileName = NULL;
-BOOLEAN PeEnableThemeSupport = FALSE;
+static PPH_STRING PvSettingsFileName = NULL;
 
-VOID PhAddDefaultSettings(
+VOID PvAddDefaultSettings(
     VOID
     )
 {
@@ -24,9 +23,14 @@ VOID PhAddDefaultSettings(
     PhpAddIntegerSetting(L"DbgHelpUndecorate", L"1");
     PhpAddIntegerSetting(L"EnableLegacyPropertiesDialog", L"0");
     PhpAddIntegerSetting(L"EnableSecurityAdvancedDialog", L"1");
+    PhpAddIntegerSetting(L"EnableStreamerMode", L"0");
     PhpAddIntegerSetting(L"EnableThemeSupport", L"0");
+    PhpAddIntegerSetting(L"EnableThemeAcrylicSupport", L"1");
+    PhpAddIntegerSetting(L"EnableThemeAcrylicWindowSupport", L"0");
     PhpAddIntegerSetting(L"EnableTreeListBorder", L"1");
     PhpAddIntegerSetting(L"EnableVersionSupport", L"0");
+    PhpAddIntegerSetting(L"SearchControlRegex", L"0");
+    PhpAddIntegerSetting(L"SearchControlCaseSensitive", L"0");
     PhpAddIntegerSetting(L"GraphColorMode", L"1");
     PhpAddIntegerSetting(L"HashAlgorithm", L"0");
     PhpAddIntegerSetting(L"MaxSizeUnit", L"6");
@@ -40,10 +44,10 @@ VOID PhAddDefaultSettings(
     PhpAddStringSetting(L"ImageGeneralPropertiesListViewGroupStates", L"");
     PhpAddStringSetting(L"ImageDirectoryTreeListColumns", L"");
     PhpAddStringSetting(L"ImageDirectoryTreeListSort", L"0,1"); // 0, AscendingSortOrder
-    PhpAddStringSetting(L"ImageExportsTreeListColumns", L"");
-    PhpAddStringSetting(L"ImageExportsTreeListSort", L"0,1"); // 0, AscendingSortOrder
-    PhpAddStringSetting(L"ImageImportsTreeListColumns", L"");
-    PhpAddStringSetting(L"ImageImportsTreeListSort", L"0,1"); // 0, AscendingSortOrder
+    PhpAddStringSetting(L"ImageExportTreeListColumns", L"");
+    PhpAddStringSetting(L"ImageExportTreeListSort", L"0,1"); // 0, AscendingSortOrder
+    PhpAddStringSetting(L"ImageImportTreeListColumns", L"");
+    PhpAddStringSetting(L"ImageImportTreeListSort", L"0,1"); // 0, AscendingSortOrder
     PhpAddStringSetting(L"ImageSectionsTreeListColumns", L"");
     PhpAddStringSetting(L"ImageSectionsTreeListSort", L"0,1"); // 0, AscendingSortOrder
     PhpAddIntegerSetting(L"ImageSectionsTreeListFlags", L"0");
@@ -52,15 +56,19 @@ VOID PhAddDefaultSettings(
     PhpAddStringSetting(L"ImageLoadCfgListViewColumns", L"");
     PhpAddStringSetting(L"ImageExceptionsIa32ListViewColumns", L"");
     PhpAddStringSetting(L"ImageExceptionsAmd64ListViewColumns", L"");
+    PhpAddStringSetting(L"ImageExceptionsArm64ListViewColumns", L"");
     PhpAddStringSetting(L"ImageHeadersListViewColumns", L"");
     PhpAddStringSetting(L"ImageHeadersListViewGroupStates", L"");
     PhpAddStringSetting(L"ImageLayoutTreeColumns", L"");
     PhpAddStringSetting(L"ImageCfgListViewColumns", L"");
     PhpAddStringSetting(L"ImageClrListViewColumns", L"");
     PhpAddStringSetting(L"ImageClrImportsListViewColumns", L"");
+    PhpAddStringSetting(L"ImageClrTablesListViewColumns", L"");
     PhpAddStringSetting(L"ImageAttributesListViewColumns", L"");
     PhpAddStringSetting(L"ImagePropertiesListViewColumns", L"");
     PhpAddStringSetting(L"ImageRelocationsListViewColumns", L"");
+    PhpAddStringSetting(L"ImageDynamicRelocationsListViewColumns", L"");
+    PhpAddStringSetting(L"ImageMuiListViewColumns", L"");
     PhpAddStringSetting(L"ImageSecurityListViewColumns", L"");
     PhpAddStringSetting(L"ImageSecurityListViewSort", L"");
     PhpAddStringSetting(L"ImageSecurityTreeColumns", L"");
@@ -76,10 +84,22 @@ VOID PhAddDefaultSettings(
     PhpAddStringSetting(L"ImageDebugListViewColumns", L"");
     PhpAddStringSetting(L"ImageDebugCrtListViewColumns", L"");
     PhpAddStringSetting(L"ImageDebugPogoListViewColumns", L"");
+    PhpAddStringSetting(L"ImageDisasmTreeColumns", L"");
+    PhpAddIntegerPairSetting(L"ImageDisasmWindowPosition", L"0,0");
+    PhpAddScalableIntegerPairSetting(L"ImageDisasmWindowSize", L"@96|0,0");
     PhpAddStringSetting(L"ImageEhContListViewColumns", L"");
+    PhpAddStringSetting(L"ImageVolatileListViewColumns", L"");
+    PhpAddStringSetting(L"ImageVersionInfoListViewColumns", L"");
     PhpAddStringSetting(L"LibListViewColumns", L"");
-    PhpAddStringSetting(L"PdbTreeListColumns", L"");
+    PhpAddStringSetting(L"SymbolsTreeListColumns", L"");
+    PhpAddStringSetting(L"SymbolsTreeListSort", L"0,1"); // 0, AscendingSortOrder
+    PhpAddIntegerSetting(L"SymbolsTreeListFlags", L"0");
+    PhpAddStringSetting(L"StringsTreeListColumns", L"");
+    PhpAddStringSetting(L"StringsTreeListSort", L"0,1"); // 0, AscendingSortOrder
+    PhpAddIntegerSetting(L"StringsTreeListFlags", L"3");
+    PhpAddIntegerSetting(L"StringsMinimumLength", L"4");
     PhpAddIntegerSetting(L"TreeListBorderEnable", L"0");
+    PhpAddStringSetting(L"CHPEListViewColumns", L"");
     // Wsl properties
     PhpAddStringSetting(L"GeneralWslTreeListColumns", L"");
     PhpAddStringSetting(L"DynamicWslListViewColumns", L"");
@@ -87,23 +107,25 @@ VOID PhAddDefaultSettings(
     PhpAddStringSetting(L"ExportsWslListViewColumns", L"");
 }
 
-VOID PhUpdateCachedSettings(
+VOID PvUpdateCachedSettings(
     VOID
     )
 {
-    //PhMaxSizeUnit = PhGetIntegerSetting(L"MaxSizeUnit");
-    PeEnableThemeSupport = !!PhGetIntegerSetting(L"EnableThemeSupport");
+    PhMaxSizeUnit = PhGetIntegerSetting(L"MaxSizeUnit");
+    PhEnableSecurityAdvancedDialog = !!PhGetIntegerSetting(L"EnableSecurityAdvancedDialog");
+    PhEnableThemeSupport = !!PhGetIntegerSetting(L"EnableThemeSupport");
+    PhEnableThemeListviewBorder = !!PhGetIntegerSetting(L"TreeListBorderEnable");
 }
 
-VOID PeInitializeSettings(
+VOID PvInitializeSettings(
     VOID
     )
 {
-    static PH_STRINGREF settingsPath = PH_STRINGREF_INIT(L"%APPDATA%\\SystemInformer\\peview.xml");
-    static PH_STRINGREF settingsSuffix = PH_STRINGREF_INIT(L".settings.xml");
     NTSTATUS status;
     PPH_STRING appFileName;
-    PPH_STRING tempFileName;  
+    PPH_STRING tempFileName;
+
+    PvAddDefaultSettings();
 
     // There are three possible locations for the settings file:
     // 1. A file named peview.exe.settings.xml in the program directory. (This changes
@@ -112,28 +134,31 @@ VOID PeInitializeSettings(
 
     // 1. File in program directory
 
-    appFileName = PhGetApplicationFileName();
-    tempFileName = PhConcatStringRef2(&appFileName->sr, &settingsSuffix);
-    PhDereferenceObject(appFileName);
+    if (appFileName = PhGetApplicationFileName())
+    {
+        tempFileName = PhConcatStringRefZ(&appFileName->sr, L".settings.xml");
 
-    if (PhDoesFileExistsWin32(tempFileName->Buffer))
-    {
-        PeSettingsFileName = tempFileName;
-    }
-    else
-    {
-        PhDereferenceObject(tempFileName);
+        if (PhDoesFileExist(&tempFileName->sr))
+        {
+            PvSettingsFileName = tempFileName;
+        }
+        else
+        {
+            PhDereferenceObject(tempFileName);
+        }
+
+        PhDereferenceObject(appFileName);
     }
 
     // 2. Default location
-    if (!PeSettingsFileName)
+    if (PhIsNullOrEmptyString(PvSettingsFileName))
     {
-        PeSettingsFileName = PhExpandEnvironmentStrings(&settingsPath);
+        PvSettingsFileName = PhGetRoamingAppDataDirectoryZ(L"peview.xml", TRUE);
     }
 
-    if (PeSettingsFileName)
+    if (!PhIsNullOrEmptyString(PvSettingsFileName))
     {
-        status = PhLoadSettings(PeSettingsFileName->Buffer);
+        status = PhLoadSettings(&PvSettingsFileName->sr);
 
         // If we didn't find the file, it will be created. Otherwise,
         // there was probably a parsing error and we don't want to
@@ -154,9 +179,9 @@ VOID PeInitializeSettings(
 
                 // This used to delete the file. But it's better to keep the file there
                 // and overwrite it with some valid XML, especially with case (2) above.
-                if (NT_SUCCESS(PhCreateFileWin32(
+                if (NT_SUCCESS(PhCreateFile(
                     &fileHandle,
-                    PeSettingsFileName->Buffer,
+                    &PvSettingsFileName->sr,
                     FILE_GENERIC_WRITE,
                     FILE_ATTRIBUTE_NORMAL,
                     FILE_SHARE_READ | FILE_SHARE_DELETE,
@@ -171,20 +196,19 @@ VOID PeInitializeSettings(
             else
             {
                 // Pretend we don't have a settings store so bad things don't happen.
-                PhDereferenceObject(PeSettingsFileName);
-                PeSettingsFileName = NULL;
+                PhDereferenceObject(PvSettingsFileName);
+                PvSettingsFileName = NULL;
             }
         }
     }
 
-    // Apply basic global settings.
-    PhMaxSizeUnit = PhGetIntegerSetting(L"MaxSizeUnit");
+    PvUpdateCachedSettings();
 }
 
-VOID PeSaveSettings(
+VOID PvSaveSettings(
     VOID
     )
 {
-    if (PeSettingsFileName)
-        PhSaveSettings(PeSettingsFileName->Buffer);
+    if (!PhIsNullOrEmptyString(PvSettingsFileName))
+        PhSaveSettings(&PvSettingsFileName->sr);
 }

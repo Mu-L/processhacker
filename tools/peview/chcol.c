@@ -33,8 +33,6 @@ typedef struct _COLUMNS_DIALOG_CONTEXT
     HWND SearchActiveHandle;
     PPH_LIST InactiveListArray;
     PPH_LIST ActiveListArray;
-    PPH_STRING InactiveSearchboxText;
-    PPH_STRING ActiveSearchboxText;
 } COLUMNS_DIALOG_CONTEXT, *PCOLUMNS_DIALOG_CONTEXT;
 
 INT_PTR CALLBACK PvColumnsDlgProc(
@@ -61,12 +59,12 @@ VOID PvShowChooseColumnsDialog(
     else
         return;
 
-    DialogBoxParam(
+    PhDialogBox(
         PhInstanceHandle,
         MAKEINTRESOURCE(IDD_CHOOSECOLUMNS),
         ParentWindowHandle,
         PvColumnsDlgProc,
-        (LPARAM)&context
+        &context
         );
 
     PhDereferenceObject(context.Columns);
@@ -112,13 +110,16 @@ static ULONG IndexOfStringInList(
 }
 
 static HFONT PvColumnsGetCurrentFont(
-    VOID
+    _In_ HWND hwnd
     )
 {
     NONCLIENTMETRICS metrics = { sizeof(NONCLIENTMETRICS) };
     HFONT font;
+    LONG dpiValue;
 
-    if (SystemParametersInfo(SPI_GETNONCLIENTMETRICS, 0, &metrics, 0))
+    dpiValue = PhGetWindowDpi(hwnd);
+
+    if (PhGetSystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, dpiValue))
         font = CreateFontIndirect(&metrics.lfMessageFont);
     else
         font = NULL;
@@ -152,7 +153,7 @@ BOOLEAN PvColumnsWordMatchStringRef(
 
 VOID PvColumnsResetListBox(
     _In_ HWND ListBoxHandle,
-    _In_ PPH_STRING SearchboxText,
+    _In_ ULONG_PTR SearchMatchHandle,
     _In_ PPH_LIST Array,
     _In_ PVOID CompareFunction
     )
@@ -164,7 +165,7 @@ VOID PvColumnsResetListBox(
     if (CompareFunction)
         qsort_s(Array->Items, Array->Count, sizeof(ULONG_PTR), CompareFunction, NULL);
 
-    if (PhIsNullOrEmptyString(SearchboxText))
+    if (!SearchMatchHandle)
     {
         for (ULONG i = 0; i < Array->Count; i++)
         {
@@ -181,7 +182,7 @@ VOID PvColumnsResetListBox(
 
             PhInitializeStringRefLongHint(&text, Array->Items[i]);
 
-            if (PvColumnsWordMatchStringRef(SearchboxText, &text))
+            if (PvSearchControlMatch(SearchMatchHandle, &text))
             {
                 ListBox_InsertString(ListBoxHandle, index, Array->Items[i]);
                 index++;
@@ -190,6 +191,53 @@ VOID PvColumnsResetListBox(
     }
 
     SendMessage(ListBoxHandle, WM_SETREDRAW, TRUE, 0);
+}
+
+VOID PvSetListHeight(
+    _In_ PCOLUMNS_DIALOG_CONTEXT context,
+    _In_ HWND hwndDlg
+)
+{
+    LONG dpiValue;
+
+    dpiValue = PhGetWindowDpi(hwndDlg);
+
+    ListBox_SetItemHeight(context->InactiveWindowHandle, 0, PhGetDpi(16, dpiValue));
+    ListBox_SetItemHeight(context->ActiveWindowHandle, 0, PhGetDpi(16, dpiValue));
+}
+
+VOID NTAPI PvpInactiveColumnsSearchControlCallback(
+    _In_ ULONG_PTR MatchHandle,
+    _In_opt_ PVOID Context
+    )
+{
+    PCOLUMNS_DIALOG_CONTEXT context = Context;
+
+    assert(context);
+
+    PvColumnsResetListBox(
+        context->InactiveWindowHandle,
+        MatchHandle,
+        context->InactiveListArray,
+        PvInactiveColumnsCompareNameTn
+        );
+}
+
+VOID NTAPI PvpActiveColumnsSearchControlCallback(
+    _In_ ULONG_PTR MatchHandle,
+    _In_opt_ PVOID Context
+    )
+{
+    PCOLUMNS_DIALOG_CONTEXT context = Context;
+
+    assert(context);
+
+    PvColumnsResetListBox(
+        context->ActiveWindowHandle,
+        MatchHandle,
+        context->ActiveListArray,
+        NULL
+        );
 }
 
 INT_PTR CALLBACK PvColumnsDlgProc(
@@ -233,15 +281,23 @@ INT_PTR CALLBACK PvColumnsDlgProc(
             context->SearchActiveHandle = GetDlgItem(hwndDlg, IDC_FILTER);
             context->InactiveListArray = PhCreateList(1);
             context->ActiveListArray = PhCreateList(1);
-            context->ControlFont = PvColumnsGetCurrentFont();
-            context->InactiveSearchboxText = PhReferenceEmptyString();
-            context->ActiveSearchboxText = PhReferenceEmptyString();
+            context->ControlFont = PvColumnsGetCurrentFont(hwndDlg);
 
-            PvCreateSearchControl(context->SearchInactiveHandle, L"Inactive columns...");
-            PvCreateSearchControl(context->SearchActiveHandle, L"Active columns...");
+            PvCreateSearchControl(
+                context->SearchInactiveHandle,
+                L"Inactive columns...",
+                PvpInactiveColumnsSearchControlCallback,
+                context
+                );
 
-            ListBox_SetItemHeight(context->InactiveWindowHandle, 0, PV_SCALE_DPI(16));
-            ListBox_SetItemHeight(context->ActiveWindowHandle, 0, PV_SCALE_DPI(16));
+            PvCreateSearchControl(
+                context->SearchActiveHandle,
+                L"Active columns...",
+                PvpActiveColumnsSearchControlCallback,
+                context
+                );
+
+            PvSetListHeight(context, hwndDlg);
 
             Button_Enable(GetDlgItem(hwndDlg, IDC_HIDE), FALSE);
             Button_Enable(GetDlgItem(hwndDlg, IDC_SHOW), FALSE);
@@ -308,7 +364,7 @@ INT_PTR CALLBACK PvColumnsDlgProc(
 
             PvColumnsResetListBox(
                 context->InactiveWindowHandle,
-                NULL,
+                0,
                 context->InactiveListArray,
                 PvInactiveColumnsCompareNameTn
                 );
@@ -332,7 +388,7 @@ INT_PTR CALLBACK PvColumnsDlgProc(
             SendMessage(hwndDlg, WM_COMMAND, MAKEWPARAM(IDC_INACTIVE, LBN_SELCHANGE), (LPARAM)context->InactiveWindowHandle);
             SendMessage(hwndDlg, WM_COMMAND, MAKEWPARAM(IDC_ACTIVE, LBN_SELCHANGE), (LPARAM)context->ActiveWindowHandle);
 
-            PhInitializeWindowTheme(hwndDlg, PeEnableThemeSupport);
+            PhInitializeWindowTheme(hwndDlg, PhEnableThemeSupport);
 
             PhSetDialogFocus(hwndDlg, GetDlgItem(hwndDlg, IDCANCEL));
         }
@@ -352,50 +408,17 @@ INT_PTR CALLBACK PvColumnsDlgProc(
                 PhDereferenceObject(context->InactiveListArray);
             if (context->ActiveListArray)
                 PhDereferenceObject(context->ActiveListArray);
-            if (context->InactiveSearchboxText)
-                PhDereferenceObject(context->InactiveSearchboxText);
-            if (context->ActiveSearchboxText)
-                PhDereferenceObject(context->ActiveSearchboxText);
 
             PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
         }
         break;
+    case WM_DPICHANGED:
+        {
+            PvSetListHeight (context, hwndDlg);
+        }
+        break;
     case WM_COMMAND:
         {
-            switch (GET_WM_COMMAND_CMD(wParam, lParam))
-            {
-            case EN_CHANGE:
-                {
-                    if (GET_WM_COMMAND_HWND(wParam, lParam) == context->SearchInactiveHandle)
-                    {
-                        PPH_STRING newSearchboxText = PH_AUTO(PhGetWindowText(context->SearchInactiveHandle));
-
-                        if (!PhEqualString(context->InactiveSearchboxText, newSearchboxText, FALSE))
-                        {
-                            PhSwapReference(&context->InactiveSearchboxText, newSearchboxText);
-
-                            PvColumnsResetListBox(
-                                context->InactiveWindowHandle, context->InactiveSearchboxText,
-                                context->InactiveListArray, PvInactiveColumnsCompareNameTn);
-                        }
-                    }
-                    else if (GET_WM_COMMAND_HWND(wParam, lParam) == context->SearchActiveHandle)
-                    {
-                        PPH_STRING newSearchboxText = PH_AUTO(PhGetWindowText(context->SearchActiveHandle));
-
-                        if (!PhEqualString(context->ActiveSearchboxText, newSearchboxText, FALSE))
-                        {
-                            PhSwapReference(&context->ActiveSearchboxText, newSearchboxText);
-
-                            PvColumnsResetListBox(
-                                context->ActiveWindowHandle, context->ActiveSearchboxText,
-                                context->ActiveListArray, NULL);
-                        }
-                    }
-                }
-                break;
-            }
-
             switch (GET_WM_COMMAND_ID(wParam, lParam))
             {
             case IDCANCEL:
@@ -566,7 +589,7 @@ INT_PTR CALLBACK PvColumnsDlgProc(
                                 // Add to list in the same position as the inactive list
                                 ListBox_InsertString(context->InactiveWindowHandle, lb_index, item);
 
-                                PvColumnsResetListBox(context->InactiveWindowHandle, context->InactiveSearchboxText, context->InactiveListArray, PvInactiveColumnsCompareNameTn);
+                                PvColumnsResetListBox(context->InactiveWindowHandle, 0, context->InactiveListArray, PvInactiveColumnsCompareNameTn);
                             }
 
                             count--;

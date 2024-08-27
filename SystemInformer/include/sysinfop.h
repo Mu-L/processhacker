@@ -1,3 +1,15 @@
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     wj32    2011-2016
+ *     dmex    2016-2023
+ *
+ */
+
 #ifndef PH_SYSINFOP_H
 #define PH_SYSINFOP_H
 
@@ -63,7 +75,10 @@ BOOLEAN PhSipOnSysCommand(
     );
 
 VOID PhSipOnSize(
-    VOID
+    _In_ HWND WindowHandle,
+    _In_ UINT State,
+    _In_ LONG Width,
+    _In_ LONG Height
     );
 
 VOID PhSipOnSizing(
@@ -223,8 +238,8 @@ VOID NTAPI PhSipSysInfoUpdateHandler(
 BOOLEAN PhSipCpuSectionCallback(
     _In_ PPH_SYSINFO_SECTION Section,
     _In_ PH_SYSINFO_SECTION_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2
     );
 
 VOID PhSipInitializeCpuDialog(
@@ -303,13 +318,17 @@ PPH_STRINGREF PhGetHybridProcessorType(
     _In_ ULONG ProcessorIndex
     );
 
+BOOLEAN PhIsCoreParked(
+    _In_ ULONG ProcessorIndex
+    );
+
 // Memory section
 
 BOOLEAN PhSipMemorySectionCallback(
     _In_ PPH_SYSINFO_SECTION Section,
     _In_ PH_SYSINFO_SECTION_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2
     );
 
 VOID PhSipInitializeMemoryDialog(
@@ -343,7 +362,7 @@ VOID PhSipCreateMemoryGraphs(
     );
 
 VOID PhSipLayoutMemoryGraphs(
-    VOID
+    _In_ HWND hwnd
     );
 
 VOID PhSipNotifyCommitGraph(
@@ -372,12 +391,6 @@ VOID PhSipGetPoolLimits(
     );
 
 _Success_(return)
-BOOLEAN PhSipGetMemoryLimits(
-    _Out_ PULONGLONG TotalMemory,
-    _Out_ PULONGLONG ReservedMemory
-    );
-
-_Success_(return)
 BOOLEAN PhSipGetMemoryCompressionLimits(
     _Out_ DOUBLE *CurrentCompressedMemory,
     _Out_ DOUBLE *TotalCompressedMemory,
@@ -389,8 +402,8 @@ BOOLEAN PhSipGetMemoryCompressionLimits(
 BOOLEAN PhSipIoSectionCallback(
     _In_ PPH_SYSINFO_SECTION Section,
     _In_ PH_SYSINFO_SECTION_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2
     );
 
 VOID PhSipInitializeIoDialog(
@@ -423,7 +436,17 @@ VOID PhSipCreateIoGraph(
     VOID
     );
 
-VOID PhSipNotifyIoGraph(
+VOID PhSipLayoutIoGraphs(
+    _In_ HWND WindowHandle
+    );
+
+VOID PhSipNotifyIoReadGraph(
+    _In_ NMHDR *Header
+    );
+VOID PhSipNotifyIoWriteGraph(
+    _In_ NMHDR *Header
+    );
+VOID PhSipNotifyIoOtherGraph(
     _In_ NMHDR *Header
     );
 

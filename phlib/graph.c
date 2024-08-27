@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010-2016
- *     dmex    2017-2021
+ *     dmex    2017-2023
  *
  */
 
@@ -15,7 +15,6 @@
 
 #include <graph.h>
 #include <guisup.h>
-#include <settings.h>
 
 #define COLORREF_TO_BITS(Color) (_byteswap_ulong(Color) >> 8)
 
@@ -79,7 +78,7 @@ BOOLEAN PhGraphControlInitialization(
     c.cbWndExtra = sizeof(PVOID);
     c.hInstance = PhInstanceHandle;
     c.hIcon = NULL;
-    c.hCursor = LoadCursor(NULL, IDC_ARROW);
+    c.hCursor = PhLoadCursor(NULL, IDC_ARROW);
     c.hbrBackground = NULL;
     c.lpszMenuName = NULL;
     c.lpszClassName = PH_GRAPH_CLASSNAME;
@@ -207,7 +206,7 @@ VOID PhDrawGraphDirect(
 
     if (DrawInfo->BackColor == 0)
     {
-        memset(bits, 0, (size_t)numberOfPixels * 4);
+        memset(bits, 0, numberOfPixels * sizeof(RGBQUAD));
     }
     else
     {
@@ -633,36 +632,7 @@ VOID PhSetGraphText(
     DrawInfo->TextBoxRect = PhRectangleToRect(boxRectangle);
 }
 
-static HFONT PhpTrayIconFont( // dmex
-    VOID
-    )
-{
-    static HFONT iconTextFont = NULL;
-
-    if (!iconTextFont)
-    {
-        iconTextFont = CreateFont(
-            PhMultiplyDivideSigned(-11, PhGlobalDpi, 96),
-            0,
-            0,
-            0,
-            FW_NORMAL,
-            FALSE,
-            FALSE,
-            FALSE,
-            ANSI_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY,
-            DEFAULT_PITCH,
-            L"Tahoma"
-            );
-    }
-
-    return iconTextFont;
-}
-
-VOID PhDrawTrayIconText( // dmex
+VOID PhDrawTrayIconText(
     _In_ HDC hdc,
     _In_ PVOID Bits,
     _Inout_ PPH_GRAPH_DRAW_INFO DrawInfo,
@@ -681,15 +651,12 @@ VOID PhDrawTrayIconText( // dmex
 
     if (DrawInfo->BackColor == 0)
     {
-        memset(bits, 0, (size_t)numberOfPixels * 4);
+        memset(bits, 0, numberOfPixels * sizeof(RGBQUAD));
     }
     else
     {
         PhFillMemoryUlong(bits, COLORREF_TO_BITS(DrawInfo->BackColor), numberOfPixels);
     }
-
-    if (!DrawInfo->TextFont) // HACK: default font for plugins.
-        DrawInfo->TextFont = PhpTrayIconFont();
 
     if (DrawInfo->TextFont)
         oldFont = SelectFont(hdc, DrawInfo->TextFont);
@@ -798,26 +765,28 @@ static VOID PhpCreateBufferedContext(
     )
 {
     HDC hdc;
-    BITMAPINFOHEADER header;
+    BITMAPINFO bitmapInfo;
 
     PhpDeleteBufferedContext(Context);
 
-    GetClientRect(Context->Handle, &Context->BufferedContextRect);
+    if (!GetClientRect(Context->Handle, &Context->BufferedContextRect))
+        return;
+    if (!(Context->BufferedContextRect.right && Context->BufferedContextRect.bottom))
+        return;
+
+    memset(&bitmapInfo, 0, sizeof(BITMAPINFO));
+    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    bitmapInfo.bmiHeader.biWidth = Context->BufferedContextRect.right;
+    bitmapInfo.bmiHeader.biHeight = Context->BufferedContextRect.bottom;
+    bitmapInfo.bmiHeader.biBitCount = 32;
 
     hdc = GetDC(Context->Handle);
     Context->BufferedContext = CreateCompatibleDC(hdc);
-
-    memset(&header, 0, sizeof(BITMAPINFOHEADER));
-    header.biSize = sizeof(BITMAPINFOHEADER);
-    header.biWidth = Context->BufferedContextRect.right;
-    header.biHeight = Context->BufferedContextRect.bottom;
-    header.biPlanes = 1;
-    header.biBitCount = 32;
-
-    Context->BufferedBitmap = CreateDIBSection(hdc, (BITMAPINFO *)&header, DIB_RGB_COLORS, &Context->BufferedBits, NULL, 0);
-
-    ReleaseDC(Context->Handle, hdc);
+    Context->BufferedBitmap = CreateDIBSection(hdc, &bitmapInfo, DIB_RGB_COLORS, &Context->BufferedBits, NULL, 0);
     Context->BufferedOldBitmap = SelectBitmap(Context->BufferedContext, Context->BufferedBitmap);
+    ReleaseDC(Context->Handle, hdc);
 }
 
 static VOID PhpDeleteFadeOutContext(
@@ -841,7 +810,7 @@ static VOID PhpCreateFadeOutContext(
     )
 {
     HDC hdc;
-    BITMAPINFOHEADER header;
+    BITMAPINFO bitmapInfo;
     ULONG i;
     ULONG j;
     ULONG height;
@@ -856,20 +825,19 @@ static VOID PhpCreateFadeOutContext(
     GetClientRect(Context->Handle, &Context->FadeOutContextRect);
     Context->FadeOutContextRect.right = Context->Options.FadeOutWidth;
 
+    memset(&bitmapInfo, 0, sizeof(BITMAPINFO));
+    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    bitmapInfo.bmiHeader.biWidth = Context->FadeOutContextRect.right;
+    bitmapInfo.bmiHeader.biHeight = Context->FadeOutContextRect.bottom;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+
     hdc = GetDC(Context->Handle);
     Context->FadeOutContext = CreateCompatibleDC(hdc);
-
-    memset(&header, 0, sizeof(BITMAPINFOHEADER));
-    header.biSize = sizeof(BITMAPINFOHEADER);
-    header.biWidth = Context->FadeOutContextRect.right;
-    header.biHeight = Context->FadeOutContextRect.bottom;
-    header.biPlanes = 1;
-    header.biBitCount = 32;
-
-    Context->FadeOutBitmap = CreateDIBSection(hdc, (BITMAPINFO *)&header, DIB_RGB_COLORS, &Context->FadeOutBits, NULL, 0);
-
-    ReleaseDC(Context->Handle, hdc);
+    Context->FadeOutBitmap = CreateDIBSection(hdc, &bitmapInfo, DIB_RGB_COLORS, &Context->FadeOutBits, NULL, 0);
     Context->FadeOutOldBitmap = SelectBitmap(Context->FadeOutContext, Context->FadeOutBitmap);
+    ReleaseDC(Context->Handle, hdc);
 
     if (!Context->FadeOutBits)
         return;
@@ -901,6 +869,9 @@ VOID PhpUpdateDrawInfo(
     )
 {
     PH_GRAPH_GETDRAWINFO getDrawInfo;
+
+    if (!(Context->BufferedContextRect.right && Context->BufferedContextRect.bottom))
+        return;
 
     Context->DrawInfo.Width = Context->BufferedContextRect.right;
     Context->DrawInfo.Height = Context->BufferedContextRect.bottom;
@@ -974,12 +945,12 @@ LRESULT CALLBACK PhpGraphWndProc(
 {
     PPHP_GRAPH_CONTEXT context;
 
-    context = PhGetWindowContext(hwnd, MAXCHAR);
+    context = PhGetWindowContextEx(hwnd);
 
     if (uMsg == WM_CREATE)
     {
         PhpCreateGraphContext(&context);
-        PhSetWindowContext(hwnd, MAXCHAR, context);
+        PhSetWindowContextEx(hwnd, context);
     }
 
     if (!context)
@@ -1016,14 +987,14 @@ LRESULT CALLBACK PhpGraphWndProc(
             CREATESTRUCT *createStruct = (CREATESTRUCT *)lParam;
 
             context->Handle = hwnd;
-            context->ParentHandle = GetParent(hwnd);
+            context->ParentHandle = createStruct->hwndParent;
             context->Style = createStruct->style;
             context->Id = (ULONG_PTR)createStruct->hMenu;
         }
         break;
     case WM_DESTROY:
         {
-            PhRemoveWindowContext(hwnd, MAXCHAR);
+            PhRemoveWindowContextEx(hwnd);
 
             if (context->TooltipHandle)
                 DestroyWindow(context->TooltipHandle);
@@ -1113,7 +1084,7 @@ LRESULT CALLBACK PhpGraphWndProc(
 
             updateRegion = (HRGN)wParam;
 
-            if (updateRegion == (HRGN)1) // HRGN_FULL
+            if (updateRegion == HRGN_FULL)
                 updateRegion = NULL;
 
             // Themed border
@@ -1187,7 +1158,7 @@ LRESULT CALLBACK PhpGraphWndProc(
         {
             if (context->Options.DefaultCursor)
             {
-                SetCursor(context->Options.DefaultCursor);
+                PhSetCursor(context->Options.DefaultCursor);
                 return TRUE;
             }
         }
@@ -1327,7 +1298,7 @@ LRESULT CALLBACK PhpGraphWndProc(
                 // Allow newlines (-1 doesn't work)
                 SendMessage(context->TooltipHandle, TTM_SETMAXTIPWIDTH, 0, MAXSHORT);
 
-                if (PhGetIntegerSetting(L"EnableThemeSupport")) // HACK (dmex)
+                if (PhEnableThemeSupport)
                 {
                     PhSetControlTheme(context->TooltipHandle, L"DarkMode_Explorer");
                     //SendMessage(context->TooltipHandle, TTM_SETWINDOWTHEME, 0, (LPARAM)L"DarkMode_Explorer");

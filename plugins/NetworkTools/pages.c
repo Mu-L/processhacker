@@ -5,12 +5,11 @@
  *
  * Authors:
  *
- *     dmex    2016
+ *     dmex    2016-2022
  *
  */
 
 #include "nettools.h"
-#include <shellapi.h>
 
 TASKDIALOG_BUTTON RestartButtonArray[] =
 {
@@ -30,7 +29,7 @@ HRESULT CALLBACK CheckForUpdatesDbCallbackProc(
     _In_ LONG_PTR dwRefData
     )
 {
-    PPH_UPDATER_CONTEXT context = (PPH_UPDATER_CONTEXT)dwRefData;
+    PNETWORK_GEODB_UPDATE_CONTEXT context = (PNETWORK_GEODB_UPDATE_CONTEXT)dwRefData;
 
     switch (uMsg)
     {
@@ -41,6 +40,32 @@ HRESULT CALLBACK CheckForUpdatesDbCallbackProc(
         {
             if ((INT)wParam == IDOK)
             {
+                {
+                    PPH_STRING key;
+                    PPH_STRING id;
+
+                    key = PhGetStringSetting(SETTING_NAME_GEOLITE_API_KEY);
+
+                    if (PhIsNullOrEmptyString(key))
+                    {
+                        PhClearReference(&key);
+                        ShowDbInvalidSettingsDialog(context);
+                        return S_FALSE;
+                    }
+
+                    PhClearReference(&key);
+                    id = PhGetStringSetting(SETTING_NAME_GEOLITE_API_ID);
+
+                    if (PhIsNullOrEmptyString(id))
+                    {
+                        PhClearReference(&key);
+                        ShowDbInvalidSettingsDialog(context);
+                        return S_FALSE;
+                    }
+
+                    PhClearReference(&id);
+                }
+
                 ShowDbCheckingForUpdatesDialog(context);
                 return S_FALSE;
             }
@@ -48,7 +73,7 @@ HRESULT CALLBACK CheckForUpdatesDbCallbackProc(
         break;
     case TDN_HYPERLINK_CLICKED:
         {
-            TaskDialogLinkClicked(context);
+            PhShellExecute(hwndDlg, L"https://www.maxmind.com", NULL);
         }
         break;
     }
@@ -64,7 +89,7 @@ HRESULT CALLBACK CheckingForUpdatesDbCallbackProc(
     _In_ LONG_PTR dwRefData
     )
 {
-    PPH_UPDATER_CONTEXT context = (PPH_UPDATER_CONTEXT)dwRefData;
+    PNETWORK_GEODB_UPDATE_CONTEXT context = (PNETWORK_GEODB_UPDATE_CONTEXT)dwRefData;
 
     switch (uMsg)
     {
@@ -74,7 +99,7 @@ HRESULT CALLBACK CheckingForUpdatesDbCallbackProc(
             SendMessage(hwndDlg, TDM_SET_PROGRESS_BAR_MARQUEE, TRUE, 1);
 
             PhReferenceObject(context);
-            PhQueueItemWorkQueue(PhGetGlobalWorkQueue(), GeoIPUpdateThread, context);
+            PhCreateThread2(GeoLiteUpdateThread, context);
         }
         break;
     }
@@ -90,7 +115,7 @@ HRESULT CALLBACK RestartDbTaskDialogCallbackProc(
     _In_ LONG_PTR dwRefData
     )
 {
-    PPH_UPDATER_CONTEXT context = (PPH_UPDATER_CONTEXT)dwRefData;
+    PNETWORK_GEODB_UPDATE_CONTEXT context = (PNETWORK_GEODB_UPDATE_CONTEXT)dwRefData;
 
     switch (uMsg)
     {
@@ -99,16 +124,23 @@ HRESULT CALLBACK RestartDbTaskDialogCallbackProc(
             if ((INT)wParam == IDYES)
             {
                 ProcessHacker_PrepareForEarlyShutdown();
-                PhShellProcessHacker(
-                    PhMainWndHandle,
+
+                if (NT_SUCCESS(PhShellProcessHacker(
+                    context->ParentWindowHandle,
                     NULL,
-                    SW_SHOW,
-                    0,
+                    SW_SHOWNORMAL,
+                    PH_SHELL_EXECUTE_DEFAULT,
                     PH_SHELL_APP_PROPAGATE_PARAMETERS | PH_SHELL_APP_PROPAGATE_PARAMETERS_IGNORE_VISIBILITY,
                     0,
                     NULL
-                    );
-                ProcessHacker_Destroy();
+                    )))
+                {
+                    ProcessHacker_Destroy();
+                }
+                else
+                {
+                    ProcessHacker_CancelEarlyShutdown();
+                }
             }
         }
         break;
@@ -125,7 +157,7 @@ HRESULT CALLBACK FinalDbTaskDialogCallbackProc(
     _In_ LONG_PTR dwRefData
     )
 {
-    PPH_UPDATER_CONTEXT context = (PPH_UPDATER_CONTEXT)dwRefData;
+    PNETWORK_GEODB_UPDATE_CONTEXT context = (PNETWORK_GEODB_UPDATE_CONTEXT)dwRefData;
 
     switch (uMsg)
     {
@@ -152,7 +184,7 @@ HRESULT CALLBACK FinalDbTaskDialogCallbackProc(
 }
 
 VOID ShowDbCheckForUpdatesDialog(
-    _In_ PPH_UPDATER_CONTEXT Context
+    _In_ PNETWORK_GEODB_UPDATE_CONTEXT Context
     )
 {
     TASKDIALOGCONFIG config;
@@ -168,15 +200,15 @@ VOID ShowDbCheckForUpdatesDialog(
     config.pfCallback = CheckForUpdatesDbCallbackProc;
     config.lpCallbackData = (LONG_PTR)Context;
 
-    config.pszWindowTitle = L"Network Tools - GeoIP Updater";
-    config.pszMainInstruction = L"Download the latest GeoIP database?";
+    config.pszWindowTitle = L"Network Tools - GeoLite Updater";
+    config.pszMainInstruction = L"Download the latest GeoLite database?";
     config.pszContent = L"This product includes GeoLite2 data created by MaxMind, available from <a href=\"http://www.maxmind.com\">http://www.maxmind.com</a>\r\n\r\nSelect download to continue.";
 
     TaskDialogNavigatePage(Context->DialogHandle, &config);
 }
 
 VOID ShowDbCheckingForUpdatesDialog(
-    _In_ PPH_UPDATER_CONTEXT Context
+    _In_ PNETWORK_GEODB_UPDATE_CONTEXT Context
     )
 {
     TASKDIALOGCONFIG config;
@@ -190,7 +222,7 @@ VOID ShowDbCheckingForUpdatesDialog(
     config.pfCallback = CheckingForUpdatesDbCallbackProc;
     config.lpCallbackData = (LONG_PTR)Context;
 
-    config.pszWindowTitle = L"Network Tools - GeoIP Updater";
+    config.pszWindowTitle = L"Network Tools - GeoLite Updater";
     config.pszMainInstruction = L"Downloading";
     config.pszContent = L"Downloaded: ~ of ~ (~%%)\r\nSpeed: ~/s";
 
@@ -198,7 +230,7 @@ VOID ShowDbCheckingForUpdatesDialog(
 }
 
 VOID ShowDbInstallRestartDialog(
-    _In_ PPH_UPDATER_CONTEXT Context
+    _In_ PNETWORK_GEODB_UPDATE_CONTEXT Context
     )
 {
     TASKDIALOGCONFIG config;
@@ -214,15 +246,15 @@ VOID ShowDbInstallRestartDialog(
     config.pButtons = RestartButtonArray;
     config.cButtons = ARRAYSIZE(RestartButtonArray);
 
-    config.pszWindowTitle = L"Network Tools - GeoIP Updater";
-    config.pszMainInstruction = L"The GeoIP database has been installed";
-    config.pszContent = L"You need to restart System Informer for the changes to take effect...";
+    config.pszWindowTitle = L"Network Tools - GeoLite Updater";
+    config.pszMainInstruction = L"The GeoLite database has been updated.";
+    config.pszContent = L"Please restart System Informer for the changes to take effect...";
 
     TaskDialogNavigatePage(Context->DialogHandle, &config);
 }
 
 VOID ShowDbUpdateFailedDialog(
-    _In_ PPH_UPDATER_CONTEXT Context
+    _In_ PNETWORK_GEODB_UPDATE_CONTEXT Context
     )
 {
     TASKDIALOGCONFIG config;
@@ -237,9 +269,51 @@ VOID ShowDbUpdateFailedDialog(
     config.pfCallback = FinalDbTaskDialogCallbackProc;
     config.lpCallbackData = (LONG_PTR)Context;
 
-    config.pszWindowTitle = L"Network Tools - GeoIP Updater";
-    config.pszMainInstruction = L"Error downloading GeoIP database.";
-    config.pszContent = L"Click Retry to download the database again.";
+    config.pszWindowTitle = L"Network Tools - GeoLite Updater";
+    config.pszMainInstruction = L"Error downloading GeoLite database.";
+
+    if (Context->ErrorCode)
+    {
+        PPH_STRING errorMessage;
+
+        if (Context->ErrorCode == ERROR_ACCESS_DENIED)
+        {
+            config.pszContent = PhaFormatString(L"[%lu] Access denied (invalid license key)", Context->ErrorCode)->Buffer;
+        }
+        else if (errorMessage = PhHttpSocketGetErrorMessage(Context->ErrorCode))
+        {
+            config.pszContent = PhaFormatString(L"[%lu] %s", Context->ErrorCode, errorMessage->Buffer)->Buffer;
+            PhDereferenceObject(errorMessage);
+        }
+        else if (errorMessage = PhGetStatusMessage(0, Context->ErrorCode))
+        {
+            config.pszContent = PhaFormatString(L"[%lu] %s", Context->ErrorCode, errorMessage->Buffer)->Buffer;
+            PhDereferenceObject(errorMessage);
+        }
+    }
+    else
+    {
+        config.pszContent = L"Click Retry to download the update again.";
+    }
+
+    TaskDialogNavigatePage(Context->DialogHandle, &config);
+}
+
+VOID ShowDbInvalidSettingsDialog(
+    _In_ PNETWORK_GEODB_UPDATE_CONTEXT Context
+    )
+{
+    TASKDIALOGCONFIG config;
+
+    memset(&config, 0, sizeof(TASKDIALOGCONFIG));
+    config.cbSize = sizeof(TASKDIALOGCONFIG);
+    config.dwFlags = TDF_USE_HICON_MAIN | TDF_ALLOW_DIALOG_CANCELLATION;
+    config.dwCommonButtons = TDCBF_CLOSE_BUTTON;
+    config.hMainIcon = PhGetApplicationIcon(FALSE);
+    config.pszWindowTitle = L"Network Tools - GeoLite Updater";
+    config.pszMainInstruction = L"Unable to download GeoLite update.";
+    config.pszContent = L"Please check the Options > Network Tools > GeoLite ID or Key are configured before downloading geoLite updates.";
+    config.cxWidth = 200;
 
     TaskDialogNavigatePage(Context->DialogHandle, &config);
 }

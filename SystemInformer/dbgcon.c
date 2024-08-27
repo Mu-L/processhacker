@@ -21,6 +21,7 @@
 #include <refp.h>
 #include <settings.h>
 #include <symprv.h>
+#include <mapldr.h>
 #include <workqueue.h>
 #include <workqueuep.h>
 
@@ -83,6 +84,9 @@ VOID PhShowDebugConsole(
         _wfreopen(L"CONOUT$", L"w", stderr);
         _wfreopen(L"CONIN$", L"r", stdin);
 
+        SetConsoleCP(CP_UTF8);
+        SetConsoleOutputCP(CP_UTF8);
+
         PhCreateThreadEx(&DebugConsoleThreadHandle, PhpDebugConsoleThreadStart, NULL);
     }
     else
@@ -130,12 +134,9 @@ static BOOL ConsoleHandlerRoutine(
 
 static BOOLEAN NTAPI PhpLoadCurrentProcessSymbolsCallback(
     _In_ PPH_MODULE_INFO Module,
-    _In_opt_ PVOID Context
+    _In_ PVOID Context
     )
 {
-    if (!Context)
-        return TRUE;
-
     if (!PhLoadModuleSymbolProvider(
         (PPH_SYMBOL_PROVIDER)Context,
         Module->FileName,
@@ -143,7 +144,7 @@ static BOOLEAN NTAPI PhpLoadCurrentProcessSymbolsCallback(
         Module->Size
         ))
     {
-        wprintf(L"Unable to load symbols: %s\n", PhGetStringOrEmpty(Module->FileNameWin32));
+        wprintf(L"Unable to load symbols: %s\n", PhGetStringOrEmpty(Module->FileName));
     }
 
     return TRUE;
@@ -469,14 +470,15 @@ static VOID PhStartStopwatch(
     _Inout_ PSTOPWATCH Stopwatch
     )
 {
-    NtQueryPerformanceCounter(&Stopwatch->StartCounter, &Stopwatch->Frequency);
+    PhQueryPerformanceCounter(&Stopwatch->StartCounter);
+    PhQueryPerformanceFrequency(&Stopwatch->Frequency);
 }
 
 static VOID PhStopStopwatch(
     _Inout_ PSTOPWATCH Stopwatch
     )
 {
-    NtQueryPerformanceCounter(&Stopwatch->EndCounter, NULL);
+    PhQueryPerformanceCounter(&Stopwatch->EndCounter);
 }
 
 static ULONG PhGetMillisecondsStopwatch(
@@ -673,7 +675,7 @@ NTSTATUS PhpDebugConsoleThreadStart(
 
         if (NT_SUCCESS(PhQueryEnvironmentVariable(NULL, &variableNameSr, &variableValue)))
         {
-            PPH_STRING currentDirectory = PhGetApplicationDirectory();
+            PPH_STRING currentDirectory = PhGetApplicationDirectoryWin32();
             PPH_STRING currentSearchPath = PhGetStringSetting(L"DbgHelpSearchPath");
 
             if (currentSearchPath->Length != 0)

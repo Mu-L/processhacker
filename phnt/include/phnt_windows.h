@@ -19,6 +19,30 @@
 #endif
 #endif
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#ifndef INT_ERROR
+#define INT_ERROR (-1)
+#endif
+
+#ifndef ULONG64_MAX
+#define ULONG64_MAX 0xffffffffffffffffui64
+#endif
+
+#ifndef SIZE_T_MAX
+#ifdef _WIN64
+#define SIZE_T_MAX 0xffffffffffffffffui64
+#else
+#define SIZE_T_MAX 0xffffffffUL
+#endif
+#endif
+
+#ifndef ENABLE_RTL_NUMBER_OF_V2
+#define ENABLE_RTL_NUMBER_OF_V2
+#endif
+
 #ifndef INITGUID
 #define INITGUID
 #endif
@@ -29,6 +53,10 @@
 
 #ifndef WIN32_NO_STATUS
 #define WIN32_NO_STATUS
+#endif
+
+#ifndef COM_NO_WINDOWS_H
+#define COM_NO_WINDOWS_H
 #endif
 
 #ifndef __cplusplus
@@ -43,6 +71,11 @@
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
 #include <winioctl.h>
+#include <evntrace.h>
+
+#ifdef COM_NO_WINDOWS_H
+#include <ole2.h>
+#endif
 
 typedef double DOUBLE;
 typedef GUID *PGUID;
@@ -83,5 +116,23 @@ typedef GUID *PGUID;
     (WMIGUID_EXECUTE | TRACELOG_GUID_ENABLE | TRACELOG_LOG_EVENT | \
     TRACELOG_ACCESS_REALTIME | TRACELOG_REGISTER_GUIDS | \
     STANDARD_RIGHTS_EXECUTE)
+
+// Note: Some parts of the Windows Runtime, COM or third party hooks are returning
+// S_FALSE and null pointers on errors when S_FALSE is a success code. (dmex)
+#define HR_SUCCESS(hr) (((HRESULT)(hr)) == S_OK)
+#define HR_FAILED(hr) (((HRESULT)(hr)) != S_OK)
+
+// Note: The CONTAINING_RECORD macro doesn't support UBSan and generates false positives,
+// we redefine the macro with FIELD_OFFSET as a workaround until the WinSDK is fixed (dmex)
+#undef CONTAINING_RECORD
+#define CONTAINING_RECORD(address, type, field) \
+    ((type *)((ULONG_PTR)(address) - UFIELD_OFFSET(type, field)))
+
+#ifndef __PCGUID_DEFINED__
+#define __PCGUID_DEFINED__
+typedef const GUID* PCGUID;
+#endif
+
+DEFINE_GUID(GUID_NULL, 0x00000000L, 0x0000, 0x0000, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00);
 
 #endif

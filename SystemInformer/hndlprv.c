@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010-2015
- *     dmex    2017-2021
+ *     dmex    2017-2023
  *
  */
 
@@ -76,6 +76,14 @@ PPH_HANDLE_PROVIDER PhCreateHandleProvider(
         PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE,
         ProcessId
         );
+    if (!NT_SUCCESS(handleProvider->RunStatus))
+    {
+        handleProvider->RunStatus = PhOpenProcess(
+            &handleProvider->ProcessHandle,
+            PROCESS_QUERY_INFORMATION,
+            ProcessId
+            );
+    }
 
     handleProvider->TempListHashtable = PhCreateSimpleHashtable(512);
 
@@ -133,6 +141,12 @@ PPH_HANDLE_ITEM PhCreateHandleItem(
         handleItem->Attributes = Handle->HandleAttributes;
         handleItem->GrantedAccess = (ACCESS_MASK)Handle->GrantedAccess;
         handleItem->TypeIndex = Handle->ObjectTypeIndex;
+
+        PhPrintPointer(handleItem->HandleString, (PVOID)handleItem->Handle);
+        PhPrintPointer(handleItem->GrantedAccessString, UlongToPtr(handleItem->GrantedAccess));
+
+        if (handleItem->Object)
+            PhPrintPointer(handleItem->ObjectString, handleItem->Object);
     }
 
     PhEmCallObjectOperation(EmHandleItemType, handleItem, EmObjectCreate);
@@ -273,105 +287,6 @@ VOID PhpRemoveHandleItem(
     PhDereferenceObject(HandleItem);
 }
 
-/**
- * Enumerates all handles in a process.
- *
- * \param ProcessId The ID of the process.
- * \param ProcessHandle A handle to the process.
- * \param Handles A variable which receives a pointer to a buffer containing
- * information about the handles.
- * \param FilterNeeded A variable which receives a boolean indicating
- * whether the handle information needs to be filtered by process ID.
- */
-NTSTATUS PhEnumHandlesGeneric(
-    _In_ HANDLE ProcessId,
-    _In_ HANDLE ProcessHandle,
-    _Out_ PSYSTEM_HANDLE_INFORMATION_EX *Handles,
-    _Out_ PBOOLEAN FilterNeeded
-    )
-{
-    NTSTATUS status = STATUS_UNSUCCESSFUL;
-
-    // There are three ways of enumerating handles:
-    // * On Windows 8 and later, NtQueryInformationProcess with ProcessHandleInformation is the most efficient method.
-    // * On Windows XP and later, NtQuerySystemInformation with SystemExtendedHandleInformation.
-    // * Otherwise, NtQuerySystemInformation with SystemHandleInformation can be used.
-
-    if (KphIsConnected() && ProcessHandle)
-    {
-        PKPH_PROCESS_HANDLE_INFORMATION handles;
-        PSYSTEM_HANDLE_INFORMATION_EX convertedHandles;
-        ULONG i;
-
-        // Enumerate handles using KProcessHacker. Unlike with NtQuerySystemInformation,
-        // this only enumerates handles for a single process and saves a lot of processing.
-
-        if (NT_SUCCESS(status = KphEnumerateProcessHandles2(ProcessHandle, &handles)))
-        {
-            convertedHandles = PhAllocate(UFIELD_OFFSET(SYSTEM_HANDLE_INFORMATION_EX, Handles[handles->HandleCount]));
-            convertedHandles->NumberOfHandles = handles->HandleCount;
-
-            for (i = 0; i < handles->HandleCount; i++)
-            {
-                convertedHandles->Handles[i].Object = handles->Handles[i].Object;
-                convertedHandles->Handles[i].UniqueProcessId = (ULONG_PTR)ProcessId;
-                convertedHandles->Handles[i].HandleValue = (ULONG_PTR)handles->Handles[i].Handle;
-                convertedHandles->Handles[i].GrantedAccess = (ULONG)handles->Handles[i].GrantedAccess;
-                convertedHandles->Handles[i].CreatorBackTraceIndex = 0;
-                convertedHandles->Handles[i].ObjectTypeIndex = handles->Handles[i].ObjectTypeIndex;
-                convertedHandles->Handles[i].HandleAttributes = handles->Handles[i].HandleAttributes;
-            }
-
-            PhFree(handles);
-
-            *Handles = convertedHandles;
-            *FilterNeeded = FALSE;
-        }
-    }
-
-    if (!NT_SUCCESS(status) && WindowsVersion >= WINDOWS_8 && ProcessHandle && PhGetIntegerSetting(L"EnableHandleSnapshot"))
-    {
-        PPROCESS_HANDLE_SNAPSHOT_INFORMATION handles;
-        PSYSTEM_HANDLE_INFORMATION_EX convertedHandles;
-        ULONG i;
-
-        if (NT_SUCCESS(status = PhEnumHandlesEx2(ProcessHandle, &handles)))
-        {
-            convertedHandles = PhAllocate(UFIELD_OFFSET(SYSTEM_HANDLE_INFORMATION_EX, Handles[handles->NumberOfHandles]));
-            convertedHandles->NumberOfHandles = handles->NumberOfHandles;
-
-            for (i = 0; i < handles->NumberOfHandles; i++)
-            {
-                convertedHandles->Handles[i].Object = 0;
-                convertedHandles->Handles[i].UniqueProcessId = (ULONG_PTR)ProcessId;
-                convertedHandles->Handles[i].HandleValue = (ULONG_PTR)handles->Handles[i].HandleValue;
-                convertedHandles->Handles[i].GrantedAccess = handles->Handles[i].GrantedAccess;
-                convertedHandles->Handles[i].CreatorBackTraceIndex = 0;
-                convertedHandles->Handles[i].ObjectTypeIndex = (USHORT)handles->Handles[i].ObjectTypeIndex;
-                convertedHandles->Handles[i].HandleAttributes = handles->Handles[i].HandleAttributes;
-            }
-
-            PhFree(handles);
-
-            *Handles = convertedHandles;
-            *FilterNeeded = FALSE;
-        }
-    }
-
-    if (!NT_SUCCESS(status))
-    {
-        PSYSTEM_HANDLE_INFORMATION_EX handles;
-
-        if (!NT_SUCCESS(status = PhEnumHandlesEx(&handles)))
-            return status;
-
-        *Handles = handles;
-        *FilterNeeded = TRUE;
-    }
-
-    return status;
-}
-
 NTSTATUS PhpCreateHandleItemFunction(
     _In_ PVOID Parameter
     )
@@ -428,8 +343,8 @@ VOID PhHandleProviderUpdate(
 {
     static PH_INITONCE initOnce = PH_INITONCE_INIT;
     static ULONG fileObjectTypeIndex = ULONG_MAX;
-
     PPH_HANDLE_PROVIDER handleProvider = (PPH_HANDLE_PROVIDER)Object;
+    BOOLEAN enableHandleSnapshot = !!PhGetIntegerSetting(L"EnableHandleSnapshot");
     PSYSTEM_HANDLE_INFORMATION_EX handleInfo;
     BOOLEAN filterNeeded;
     PSYSTEM_HANDLE_TABLE_ENTRY_INFO_EX handles;
@@ -439,26 +354,27 @@ VOID PhHandleProviderUpdate(
     PPH_KEY_VALUE_PAIR handlePair;
     BOOLEAN useWorkQueue = FALSE;
     PH_WORK_QUEUE workQueue;
+    KPH_LEVEL level;
 
     if (!NT_SUCCESS(handleProvider->RunStatus = PhEnumHandlesGeneric(
         handleProvider->ProcessId,
         handleProvider->ProcessHandle,
+        enableHandleSnapshot,
         &handleInfo,
         &filterNeeded
         )))
         goto UpdateExit;
 
-    if (!KphIsConnected())
+    level = KsiLevel();
+
+    if ((level >= KphLevelMed))
     {
         useWorkQueue = TRUE;
         PhInitializeWorkQueue(&workQueue, 1, 20, 1000);
 
         if (PhBeginInitOnce(&initOnce))
         {
-            static PH_STRINGREF fileTypeName = PH_STRINGREF_INIT(L"File");
-
-            fileObjectTypeIndex = PhGetObjectTypeNumber(&fileTypeName);
-
+            fileObjectTypeIndex = PhGetObjectTypeNumberZ(L"File");
             PhEndInitOnce(&initOnce);
         }
     }
@@ -521,11 +437,23 @@ VOID PhHandleProviderUpdate(
 
                 if (tempHashtableValue)
                 {
+#if 0 // TODO(jxy-s) enable this on the next driver release
                     // Also compare the object pointers to make sure a
                     // different object wasn't re-opened with the same
-                    // handle value. This isn't 100% accurate as pool
-                    // addresses may be re-used, but it works well.
+                    // handle value.
+                    if (KsiLevel() >= KphLevelMed)
+                    {
+                        found = NT_SUCCESS(KphCompareObjects(
+                            handleProvider->ProcessHandle,
+                            handleItem->Handle,
+                            (HANDLE)(*tempHashtableValue)->HandleValue
+                            ));
+                    }
+                    // This isn't 100% accurate as pool addresses may be re-used, but it works well.
+                    else if (handleItem->Object && handleItem->Object == (*tempHashtableValue)->Object)
+#else
                     if (handleItem->Object && handleItem->Object == (*tempHashtableValue)->Object)
+#endif
                     {
                         found = TRUE;
                     }
@@ -534,7 +462,8 @@ VOID PhHandleProviderUpdate(
                         if (
                             handleItem->Handle == (HANDLE)(*tempHashtableValue)->HandleValue &&
                             handleItem->GrantedAccess == (*tempHashtableValue)->GrantedAccess &&
-                            handleItem->TypeIndex == (*tempHashtableValue)->ObjectTypeIndex
+                            handleItem->TypeIndex == (*tempHashtableValue)->ObjectTypeIndex &&
+                            handleItem->Attributes == (*tempHashtableValue)->HandleAttributes
                             )
                         {
                             found = TRUE;
@@ -626,7 +555,7 @@ VOID PhHandleProviderUpdate(
                 }
             }
 
-            if (handleItem->TypeName && PhEqualString2(handleItem->TypeName, L"File", TRUE) && KphIsConnected())
+            if (handleItem->TypeName && PhEqualString2(handleItem->TypeName, L"File", TRUE) && (level >= KphLevelMed))
             {
                 KPH_FILE_OBJECT_INFORMATION objectInfo;
 
@@ -645,6 +574,12 @@ VOID PhHandleProviderUpdate(
                         handleItem->FileFlags |= PH_HANDLE_FILE_SHARED_WRITE;
                     if (objectInfo.SharedDelete)
                         handleItem->FileFlags |= PH_HANDLE_FILE_SHARED_DELETE;
+
+                    // TODO add extra info from file objects here (jxy-s)
+                    // objectInfo.HasActiveTransaction;
+                    // objectInfo.UserWritableReferences;
+                    // objectInfo.IsIgnoringSharing;
+                    // ... more
                 }
             }
 

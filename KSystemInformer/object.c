@@ -6,172 +6,380 @@
  * Authors:
  *
  *     wj32    2010-2016
+ *     jxy-s   2021-2024
  *
  */
 
 #include <kph.h>
-#include <dyndata.h>
 
-#ifdef _X86_
-#define KERNEL_HANDLE_BIT (0x80000000)
-#else
-#define KERNEL_HANDLE_BIT (0xffffffff80000000)
-#endif
+#include <trace.h>
 
-#define IsKernelHandle(Handle) ((LONG_PTR)(Handle) < 0)
-#define MakeKernelHandle(Handle) ((HANDLE)((ULONG_PTR)(Handle) | KERNEL_HANDLE_BIT))
-
-typedef struct _KPHP_ENUMERATE_PROCESS_HANDLES_CONTEXT
+typedef struct _KPH_ENUMERATE_PROCESS_HANDLES_CONTEXT
 {
+    PKPH_DYN Dyn;
     PVOID Buffer;
     PVOID BufferLimit;
     PVOID CurrentEntry;
     ULONG Count;
     NTSTATUS Status;
-} KPHP_ENUMERATE_PROCESS_HANDLES_CONTEXT, *PKPHP_ENUMERATE_PROCESS_HANDLES_CONTEXT;
+} KPH_ENUMERATE_PROCESS_HANDLES_CONTEXT, *PKPH_ENUMERATE_PROCESS_HANDLES_CONTEXT;
 
-BOOLEAN KphpEnumerateProcessHandlesEnumCallback61(
-    _Inout_ PHANDLE_TABLE_ENTRY HandleTableEntry,
-    _In_ HANDLE Handle,
-    _In_ PVOID Context
-    );
+KPH_PROTECTED_DATA_SECTION_RO_PUSH();
+static const UNICODE_STRING KphpEtwRegistrationName = RTL_CONSTANT_STRING(L"EtwRegistration");
+KPH_PROTECTED_DATA_SECTION_RO_POP();
 
-BOOLEAN KphpEnumerateProcessHandlesEnumCallback(
-    _In_ PHANDLE_TABLE HandleTable,
-    _Inout_ PHANDLE_TABLE_ENTRY HandleTableEntry,
-    _In_ HANDLE Handle,
-    _In_ PVOID Context
-    );
-
-#ifdef ALLOC_PRAGMA
-#pragma alloc_text(PAGE, KphReferenceProcessHandleTable)
-#pragma alloc_text(PAGE, KphDereferenceProcessHandleTable)
-#pragma alloc_text(PAGE, KphUnlockHandleTableEntry)
-#pragma alloc_text(PAGE, KphpEnumerateProcessHandlesEnumCallback61)
-#pragma alloc_text(PAGE, KphpEnumerateProcessHandlesEnumCallback)
-#pragma alloc_text(PAGE, KpiEnumerateProcessHandles)
-#pragma alloc_text(PAGE, KphQueryNameObject)
-#pragma alloc_text(PAGE, KphQueryNameFileObject)
-#pragma alloc_text(PAGE, KpiQueryInformationObject)
-#pragma alloc_text(PAGE, KpiSetInformationObject)
-#pragma alloc_text(PAGE, KphOpenNamedObject)
-#endif
-
-/**
- * Gets a pointer to the handle table of a process.
- *
- * \param Process A process object.
- *
- * \return A pointer to the handle table, or NULL if the process is terminating or the request is
- * not supported. You must call KphDereferenceProcessHandleTable() when the handle table is no
- * longer needed.
- */
-PHANDLE_TABLE KphReferenceProcessHandleTable(
-    _In_ PEPROCESS Process
+_Must_inspect_result_
+PVOID KphObpDecodeObject(
+    _In_ PKPH_DYN Dyn,
+    _In_ PHANDLE_TABLE_ENTRY HandleTableEntry
     )
 {
-    PHANDLE_TABLE handleTable = NULL;
-
-    PAGED_CODE();
-
-    // Fail if we don't have an offset.
-    if (KphDynEpObjectTable == ULONG_MAX)
-        return NULL;
-
-    // Prevent the process from terminating and get its handle table.
-    if (NT_SUCCESS(PsAcquireProcessExitSynchronization(Process)))
+#if (defined _M_X64) || (defined _M_ARM64)
+    if (Dyn->ObDecodeShift != ULONG_MAX)
     {
-        handleTable = *(PHANDLE_TABLE *)PTR_ADD_OFFSET(Process, KphDynEpObjectTable);
+        LONG_PTR object;
 
-        if (!handleTable)
-            PsReleaseProcessExitSynchronization(Process);
+        object = (LONG_PTR)(HandleTableEntry->Object);
+
+        //
+        // Decode the object pointer, shift back up the lower nibble to zeros.
+        // N.B. LA57 is special but the way we define HANDLE_TABLE_ENTRY and
+        // use dynamic data supports it.
+        //
+        object >>= Dyn->ObDecodeShift;
+        object <<= 4;
+
+        return (PVOID)object;
+    }
+    else
+    {
+        return NULL;
+    }
+#else
+    return (PVOID)((ULONG_PTR)(HandleTableEntry->Object) & ~OBJ_HANDLE_ATTRIBUTES);
+#endif
+}
+
+_Must_inspect_result_
+ULONG KphObpGetHandleAttributes(
+    _In_ PKPH_DYN Dyn,
+    _In_ PHANDLE_TABLE_ENTRY HandleTableEntry
+    )
+{
+#if (defined _M_X64) || (defined _M_ARM64)
+    if (Dyn->ObAttributesShift != ULONG_MAX)
+    {
+        return (ULONG)(HandleTableEntry->Value >> Dyn->ObAttributesShift) & 0x3;
+    }
+    else
+    {
+        return 0;
+    }
+#else
+    return (HandleTableEntry->ObAttributes & (OBJ_INHERIT | OBJ_AUDIT_OBJECT_CLOSE)) |
+        ((HandleTableEntry->GrantedAccess & ObpAccessProtectCloseBit) ? OBJ_PROTECT_CLOSE : 0);
+#endif
+}
+
+PAGED_FILE();
+
+/**
+ * \brief Gets a pointer to the handle table of a process. On success, acquires
+ * process exit synchronization, the process should be released by calling
+ * KphDereferenceProcessHandleTable.
+ *
+ * \param[in] Dyn Dynamic configuration.
+ * \param[in] Process A process object.
+ * \param[out] HandleTable On success set to the process handle table.
+ *
+ * \return Successful or errant status.
+ */
+_Acquires_lock_(Process)
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphReferenceProcessHandleTable(
+    _In_ PKPH_DYN Dyn,
+    _In_ PEPROCESS Process,
+    _Outptr_result_nullonfailure_ PHANDLE_TABLE* HandleTable
+    )
+{
+    PHANDLE_TABLE handleTable;
+    NTSTATUS status;
+
+    PAGED_CODE_PASSIVE();
+
+    *HandleTable = NULL;
+
+    //
+    // Fail if we don't have an offset.
+    //
+    if (Dyn->EpObjectTable == ULONG_MAX)
+    {
+        return STATUS_NOINTERFACE;
     }
 
-    return handleTable;
+    //
+    // Prevent the process from terminating and get its handle table.
+    //
+    status = PsAcquireProcessExitSynchronization(Process);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "PsAcquireProcessExitSynchronization failed: %!STATUS!",
+                      status);
+
+        return STATUS_TOO_LATE;
+    }
+
+    handleTable = *(PHANDLE_TABLE*)Add2Ptr(Process, Dyn->EpObjectTable);
+
+    if (!handleTable)
+    {
+        PsReleaseProcessExitSynchronization(Process);
+
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "Process has no handle table.");
+
+        return STATUS_NOT_FOUND;
+    }
+
+    *HandleTable = handleTable;
+
+    return STATUS_SUCCESS;
 }
 
 /**
- * Dereferences the handle table of a process.
+ * \brief Releases process after acquiring the process handle table.
  *
- * \param Process A process object.
+ * \param[in] Process A process object.
  */
+_Releases_lock_(Process)
+_IRQL_requires_max_(PASSIVE_LEVEL)
 VOID KphDereferenceProcessHandleTable(
     _In_ PEPROCESS Process
     )
 {
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
 
     PsReleaseProcessExitSynchronization(Process);
 }
 
-VOID KphUnlockHandleTableEntry(
+/**
+ * \brief Unlocks a handle table entry.
+ *
+ * \param[in] Dyn Dynamic configuration.
+ * \param[in] HandleTable Handle table to unlock.
+ * \param[in] HandleTableEntry Handle table entry to unlock.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+VOID KphpUnlockHandleTableEntry(
+    _In_ PKPH_DYN Dyn,
     _In_ PHANDLE_TABLE HandleTable,
     _In_ PHANDLE_TABLE_ENTRY HandleTableEntry
     )
 {
     PEX_PUSH_LOCK handleContentionEvent;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
 
+    NT_ASSERT(Dyn->HtHandleContentionEvent != ULONG_MAX);
+
+    //
     // Set the unlocked bit.
+    //
+    InterlockedExchangeAddULongPtr(&HandleTableEntry->Value, 1);
 
-#if (defined _M_X64) || (defined _M_ARM64)
-    InterlockedExchangeAdd64(&HandleTableEntry->Value, 1);
-#else
-    InterlockedExchangeAdd(&HandleTableEntry->Value, 1);
-#endif
-
+    //
     // Allow waiters to wake up.
-
-    handleContentionEvent = (PEX_PUSH_LOCK)PTR_ADD_OFFSET(HandleTable, KphDynHtHandleContentionEvent);
-
+    //
+    handleContentionEvent = (PEX_PUSH_LOCK)Add2Ptr(HandleTable,
+                                                   Dyn->HtHandleContentionEvent);
     if (*(PULONG_PTR)handleContentionEvent != 0)
+    {
         ExfUnblockPushLock(handleContentionEvent, NULL);
+    }
 }
 
-BOOLEAN KphpEnumerateProcessHandlesEnumCallback61(
+typedef struct _KPH_ENUM_PROC_HANDLE_EX_CONTEXT
+{
+    PKPH_DYN Dyn;
+    PKPH_ENUM_PROCESS_HANDLES_CALLBACK Callback;
+    PVOID Parameter;
+} KPH_ENUM_PROC_HANDLE_EX_CONTEXT, *PKPH_ENUM_PROC_HANDLE_EX_CONTEXT;
+
+/**
+ * \brief Pass-through callback for handle table enumeration.
+ *
+ * \param[in,out] HandleTableEntry Related handle table entry.
+ * \param[in] Handle The handle for this entry.
+ * \param[in] Context Enumeration context.
+ *
+ * \return Result from wrapped callback.
+ */
+_Function_class_(EX_ENUM_HANDLE_CALLBACK)
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+BOOLEAN NTAPI KphEnumerateProcessHandlesExCallback(
+    _In_ PHANDLE_TABLE HandleTable,
+    _Inout_ PHANDLE_TABLE_ENTRY HandleTableEntry,
+    _In_ HANDLE Handle,
+    _In_opt_ PVOID Context
+    )
+{
+    PKPH_ENUM_PROC_HANDLE_EX_CONTEXT context;
+    BOOLEAN result;
+
+    PAGED_CODE_PASSIVE();
+
+    NT_ASSERT(Context);
+
+    context = Context;
+
+    result = context->Callback(HandleTableEntry, Handle, context->Parameter);
+
+    KphpUnlockHandleTableEntry(context->Dyn, HandleTable, HandleTableEntry);
+
+    return result;
+}
+
+/**
+ * \brief Enumerates the handles of a process.
+ *
+ * \param[in] Process The process to enumerate handles of.
+ * \param[in] Callback The callback to invoke for each handle table entry.
+ * \param[in] Parameter Optional parameter to pass to the callback.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSTATUS KphEnumerateProcessHandlesEx(
+    _In_ PEPROCESS Process,
+    _In_ PKPH_ENUM_PROCESS_HANDLES_CALLBACK Callback,
+    _In_opt_ PVOID Parameter
+    )
+{
+    NTSTATUS status;
+    PKPH_DYN dyn;
+    KPH_ENUM_PROC_HANDLE_EX_CONTEXT context;
+    PHANDLE_TABLE handleTable;
+
+    PAGED_CODE_PASSIVE();
+
+    dyn = KphReferenceDynData();
+    if (!dyn ||
+        (dyn->HtHandleContentionEvent == ULONG_MAX) ||
+        (dyn->EpObjectTable == ULONG_MAX))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "KphEnumerateProcessHandlesEx not supported");
+
+        status = STATUS_NOINTERFACE;
+        goto Exit;
+    }
+
+    status = KphReferenceProcessHandleTable(dyn, Process, &handleTable);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "KphReferenceProcessHandleTable failed: %!STATUS!",
+                      status);
+
+        goto Exit;
+    }
+
+    context.Dyn = dyn;
+    context.Callback = Callback;
+    context.Parameter = Parameter;
+
+    ExEnumHandleTable(handleTable,
+                      KphEnumerateProcessHandlesExCallback,
+                      &context,
+                      NULL);
+
+    KphDereferenceProcessHandleTable(Process);
+
+Exit:
+
+    if (dyn)
+    {
+        KphDereferenceObject(dyn);
+    }
+
+    return status;
+}
+
+/**
+ * \brief Enumeration callback for handle enumeration.
+ *
+ * \param[in,out] HandleTableEntry Related handle table entry.
+ * \param[in] Handle The handle for this entry.
+ * \param[in] Context Enumeration context.
+ *
+ * \return FALSE
+ */
+_Function_class_(PKPH_ENUM_PROCESS_HANDLES_CALLBACK)
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+BOOLEAN KphpEnumerateProcessHandlesCallbck(
     _Inout_ PHANDLE_TABLE_ENTRY HandleTableEntry,
     _In_ HANDLE Handle,
     _In_ PVOID Context
     )
 {
-    PKPHP_ENUMERATE_PROCESS_HANDLES_CONTEXT context = Context;
+    PKPH_ENUMERATE_PROCESS_HANDLES_CONTEXT context;
     KPH_PROCESS_HANDLE handleInfo;
     POBJECT_HEADER objectHeader;
     POBJECT_TYPE objectType;
     PKPH_PROCESS_HANDLE entryInBuffer;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
 
-    objectHeader = ObpDecodeObject(HandleTableEntry->Object);
+    context = Context;
+
+    objectHeader = KphObpDecodeObject(context->Dyn, HandleTableEntry);
     handleInfo.Handle = Handle;
     handleInfo.Object = objectHeader ? &objectHeader->Body : NULL;
     handleInfo.GrantedAccess = ObpDecodeGrantedAccess(HandleTableEntry->GrantedAccess);
     handleInfo.ObjectTypeIndex = USHORT_MAX;
     handleInfo.Reserved1 = 0;
-    handleInfo.HandleAttributes = ObpGetHandleAttributes(HandleTableEntry);
+    handleInfo.HandleAttributes = KphObpGetHandleAttributes(context->Dyn,
+                                                            HandleTableEntry);
     handleInfo.Reserved2 = 0;
 
     if (handleInfo.Object)
     {
         objectType = ObGetObjectType(handleInfo.Object);
 
-        if (objectType && KphDynOtIndex != ULONG_MAX)
-            handleInfo.ObjectTypeIndex = (USHORT)*(PUCHAR)PTR_ADD_OFFSET(objectType, KphDynOtIndex);
+        if (objectType && (context->Dyn->OtIndex != ULONG_MAX))
+        {
+            UCHAR typeIndex;
+
+            typeIndex = *(PUCHAR)Add2Ptr(objectType, context->Dyn->OtIndex);
+
+            handleInfo.ObjectTypeIndex = (USHORT)typeIndex;
+        }
     }
 
-    // Advance the current entry pointer regardless of whether the information will be written; this
-    // will allow the parent function to report the correct return length.
+    //
+    // Advance the current entry pointer regardless of whether the information
+    // will be written. This will allow the parent function to report the
+    // correct return length.
+    //
     entryInBuffer = context->CurrentEntry;
-    context->CurrentEntry = PTR_ADD_OFFSET(context->CurrentEntry, sizeof(KPH_PROCESS_HANDLE));
+    context->CurrentEntry = Add2Ptr(context->CurrentEntry, sizeof(KPH_PROCESS_HANDLE));
     context->Count++;
 
-    // Only write if we have not exceeded the buffer length. Also check for a potential overflow (if
-    // the process has an extremely large number of handles, the buffer pointer may wrap).
-    if (
-        (ULONG_PTR)entryInBuffer >= (ULONG_PTR)context->Buffer &&
-        (ULONG_PTR)entryInBuffer + sizeof(KPH_PROCESS_HANDLE) <= (ULONG_PTR)context->BufferLimit
-        )
+    //
+    // Only write if we have not exceeded the buffer length. Also check for a
+    // potential overflow (if the process has an extremely large number of
+    // handles, the buffer pointer may wrap).
+    //
+    if ((ULONG_PTR)entryInBuffer >= (ULONG_PTR)context->Buffer &&
+        (ULONG_PTR)entryInBuffer + sizeof(KPH_PROCESS_HANDLE) <= (ULONG_PTR)context->BufferLimit)
     {
         __try
         {
@@ -179,49 +387,44 @@ BOOLEAN KphpEnumerateProcessHandlesEnumCallback61(
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
+            //
             // Report an error.
+            //
             if (context->Status == STATUS_SUCCESS)
+            {
                 context->Status = GetExceptionCode();
+            }
         }
     }
     else
     {
+        //
         // Report that the buffer is too small.
+        //
         if (context->Status == STATUS_SUCCESS)
+        {
             context->Status = STATUS_BUFFER_TOO_SMALL;
+        }
     }
 
     return FALSE;
 }
 
-BOOLEAN KphpEnumerateProcessHandlesEnumCallback(
-    _In_ PHANDLE_TABLE HandleTable,
-    _Inout_ PHANDLE_TABLE_ENTRY HandleTableEntry,
-    _In_ HANDLE Handle,
-    _In_ PVOID Context
-    )
-{
-    BOOLEAN result;
-
-    PAGED_CODE();
-
-    result = KphpEnumerateProcessHandlesEnumCallback61(HandleTableEntry, Handle, Context);
-    KphUnlockHandleTableEntry(HandleTable, HandleTableEntry);
-
-    return result;
-}
-
 /**
- * Enumerates the handles of a process.
+ * \brief Enumerates the handles of a process.
  *
- * \param ProcessHandle A handle to a process.
- * \param Buffer The buffer in which the handle information will be stored.
- * \param BufferLength The number of bytes available in \a Buffer.
- * \param ReturnLength A variable which receives the number of bytes required to be available in
- * \a Buffer.
- * \param AccessMode The mode in which to perform access checks.
+ * \param[in] ProcessHandle A handle to a process.
+ * \param[out] Buffer The buffer in which the handle information will be stored.
+ * \param[in] BufferLength The number of bytes available in \a Buffer.
+ * \param[out] ReturnLength A variable which receives the number of bytes
+ * required to be available in \a Buffer.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
  */
-NTSTATUS KpiEnumerateProcessHandles(
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphEnumerateProcessHandles(
     _In_ HANDLE ProcessHandle,
     _Out_writes_bytes_(BufferLength) PVOID Buffer,
     _In_opt_ ULONG BufferLength,
@@ -230,87 +433,82 @@ NTSTATUS KpiEnumerateProcessHandles(
     )
 {
     NTSTATUS status;
-    BOOLEAN result;
+    PKPH_DYN dyn;
     PEPROCESS process;
-    PHANDLE_TABLE handleTable;
-    KPHP_ENUMERATE_PROCESS_HANDLES_CONTEXT context;
+    KPH_ENUMERATE_PROCESS_HANDLES_CONTEXT context;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
 
-    if (KphDynNtVersion >= PHNT_WIN8 && KphDynHtHandleContentionEvent == ULONG_MAX)
+    dyn = NULL;
+    process = NULL;
+
+    if (!Buffer)
     {
-        return STATUS_NOT_SUPPORTED;
+        status = STATUS_INVALID_PARAMETER_2;
+        goto Exit;
     }
 
     if (AccessMode != KernelMode)
     {
         __try
         {
-            ProbeForWrite(Buffer, BufferLength, sizeof(ULONG));
+            ProbeOutputBytes(Buffer, BufferLength);
 
             if (ReturnLength)
-                ProbeForWrite(ReturnLength, sizeof(ULONG), sizeof(ULONG));
+            {
+                ProbeOutputType(ReturnLength, ULONG);
+            }
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            return GetExceptionCode();
+            status = GetExceptionCode();
+            goto Exit;
         }
     }
 
-    // Reference the process object.
-    status = ObReferenceObjectByHandle(
-        ProcessHandle,
-        0,
-        *PsProcessType,
-        AccessMode,
-        &process,
-        NULL
-        );
-
-    if (!NT_SUCCESS(status))
-        return status;
-
-    // Get its handle table.
-    handleTable = KphReferenceProcessHandleTable(process);
-
-    if (!handleTable)
+    dyn = KphReferenceDynData();
+    if (!dyn)
     {
-        ObDereferenceObject(process);
-        return STATUS_UNSUCCESSFUL;
+        status = STATUS_NOINTERFACE;
+        goto Exit;
     }
 
-    // Initialize the enumeration context.
+    status = ObReferenceObjectByHandle(ProcessHandle,
+                                       0,
+                                       *PsProcessType,
+                                       AccessMode,
+                                       &process,
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed: %!STATUS!",
+                      status);
+
+        goto Exit;
+    }
+
+    context.Dyn = dyn;
     context.Buffer = Buffer;
-    context.BufferLimit = PTR_ADD_OFFSET(Buffer, BufferLength);
+    context.BufferLimit = Add2Ptr(Buffer, BufferLength);
     context.CurrentEntry = ((PKPH_PROCESS_HANDLE_INFORMATION)Buffer)->Handles;
     context.Count = 0;
     context.Status = STATUS_SUCCESS;
 
-    // Enumerate the handles.
+    status = KphEnumerateProcessHandlesEx(process,
+                                          KphpEnumerateProcessHandlesCallbck,
+                                          &context);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "KphEnumerateProcessHandlesEx failed: %!STATUS!",
+                      status);
 
-    if (KphDynNtVersion >= PHNT_WIN8)
-    {
-        result = ExEnumHandleTable(
-            handleTable,
-            KphpEnumerateProcessHandlesEnumCallback,
-            &context,
-            NULL
-            );
-    }
-    else
-    {
-        result = ExEnumHandleTable(
-            handleTable,
-            (PEX_ENUM_HANDLE_CALLBACK)KphpEnumerateProcessHandlesEnumCallback61,
-            &context,
-            NULL
-            );
+        goto Exit;
     }
 
-    KphDereferenceProcessHandleTable(process);
-    ObDereferenceObject(process);
-
-    // Write the number of handles if we can.
     if (BufferLength >= UFIELD_OFFSET(KPH_PROCESS_HANDLE_INFORMATION, Handles))
     {
         if (AccessMode != KernelMode)
@@ -321,7 +519,8 @@ NTSTATUS KpiEnumerateProcessHandles(
             }
             __except (EXCEPTION_EXECUTE_HANDLER)
             {
-                return GetExceptionCode();
+                status = GetExceptionCode();
+                goto Exit;
             }
         }
         else
@@ -330,46 +529,70 @@ NTSTATUS KpiEnumerateProcessHandles(
         }
     }
 
-    // Supply the return length if the caller wanted it.
     if (ReturnLength)
     {
-        ULONG returnLength;
+        ULONG_PTR returnLength;
 
-        // Note: if the CurrentEntry pointer wrapped, this will give the wrong return length.
-        returnLength = (ULONG)((ULONG_PTR)context.CurrentEntry - (ULONG_PTR)Buffer);
+        status = RtlULongPtrSub((ULONG_PTR)context.CurrentEntry,
+                                (ULONG_PTR)Buffer,
+                                &returnLength);
+        if (!NT_SUCCESS(status) || (returnLength > ULONG_MAX))
+        {
+            status = STATUS_INTEGER_OVERFLOW;
+            goto Exit;
+        }
 
         if (AccessMode != KernelMode)
         {
             __try
             {
-                *ReturnLength = returnLength;
+                *ReturnLength = (ULONG)returnLength;
             }
             __except (EXCEPTION_EXECUTE_HANDLER)
             {
-                return GetExceptionCode();
+                status = GetExceptionCode();
+                goto Exit;
             }
         }
         else
         {
-            *ReturnLength = returnLength;
+            *ReturnLength = (ULONG)returnLength;
         }
     }
 
-    return context.Status;
+    status = context.Status;
+
+Exit:
+
+    if (process)
+    {
+        ObDereferenceObject(process);
+    }
+
+    if (dyn)
+    {
+        KphDereferenceObject(dyn);
+    }
+
+    return status;
 }
 
 /**
- * Queries the name of an object.
+ * \brief Queries the name of an object.
  *
- * \param Object A pointer to an object.
- * \param Buffer The buffer in which the object name will be stored.
- * \param BufferLength The number of bytes available in \a Buffer.
- * \param ReturnLength A variable which receives the number of bytes required to be available in
- * \a Buffer.
+ * \param[in] Object A pointer to an object.
+ * \param[out] Buffer The buffer in which the object name will be stored.
+ * \param[in] BufferLength The number of bytes available in \a Buffer.
+ * \param[out] ReturnLength A variable which receives the number of bytes
+ * required to be available in \a Buffer.
+ *
+ * \return Successful or errant status.
  */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
 NTSTATUS KphQueryNameObject(
     _In_ PVOID Object,
-    _Out_writes_bytes_(BufferLength) POBJECT_NAME_INFORMATION Buffer,
+    _Out_writes_bytes_opt_(BufferLength) POBJECT_NAME_INFORMATION Buffer,
     _In_ ULONG BufferLength,
     _Out_ PULONG ReturnLength
     )
@@ -377,728 +600,1525 @@ NTSTATUS KphQueryNameObject(
     NTSTATUS status;
     POBJECT_TYPE objectType;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
 
     objectType = ObGetObjectType(Object);
 
-    // Check if we are going to hang when querying the object, and use
-    // the special file object query function if needed.
-    if (objectType == *IoFileObjectType &&
-        (((PFILE_OBJECT)Object)->Busy || ((PFILE_OBJECT)Object)->Waiters))
+    if (objectType == *IoFileObjectType)
     {
-        status = KphQueryNameFileObject(Object, Buffer, BufferLength, ReturnLength);
-        dprintf("KphQueryNameFileObject: status 0x%x\n", status);
+        status = KphQueryNameFileObject(Object,
+                                        Buffer,
+                                        BufferLength,
+                                        ReturnLength);
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "KphQueryNameFileObject: %!STATUS!",
+                      status);
     }
     else
     {
         status = ObQueryNameString(Object, Buffer, BufferLength, ReturnLength);
-        dprintf("ObQueryNameString: status 0x%x\n", status);
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObQueryNameString: %!STATUS!",
+                      status);
     }
 
+    //
     // Make the error returns consistent.
-    if (status == STATUS_BUFFER_OVERFLOW) // returned by I/O subsystem
+    //
+    if ((status == STATUS_BUFFER_OVERFLOW) ||    // returned by I/O subsystem
+        (status == STATUS_INFO_LENGTH_MISMATCH)) // returned by ObQueryNameString
+    {
         status = STATUS_BUFFER_TOO_SMALL;
-    if (status == STATUS_INFO_LENGTH_MISMATCH) // returned by ObQueryNameString
-        status = STATUS_BUFFER_TOO_SMALL;
+    }
 
     if (NT_SUCCESS(status))
-        dprintf("KphQueryNameObject: %.*S\n", Buffer->Name.Length / (USHORT)sizeof(WCHAR), Buffer->Name.Buffer);
+    {
+        NT_ASSERT(Buffer);
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "KphQueryNameObject: %wZ",
+                      &Buffer->Name);
+    }
     else
-        dprintf("KphQueryNameObject: status 0x%x\n", status);
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "KphQueryNameObject: %!STATUS!",
+                      status);
+    }
 
     return status;
 }
 
 /**
- * Queries the name of a file object.
+ * \brief Extracts the name of a file object by retrieving the device name,
+ * walking the related file objects, and the target file object.
  *
- * \param FileObject A pointer to a file object.
- * \param Buffer The buffer in which the object name will be stored.
- * \param BufferLength The number of bytes available in \a Buffer.
- * \param ReturnLength A variable which receives the number of bytes required to be available in
- * \a Buffer.
+ * \param[in] FileObject A pointer to a file object.
+ * \param[out] Buffer The buffer in which the object name will be stored.
+ * \param[in] BufferLength The number of bytes available in \a Buffer.
+ * \param[out] ReturnLength A variable which receives the number of bytes
+ * required to be available in \a Buffer.
+ *
+ * \return Successful or errant status.
  */
-NTSTATUS KphQueryNameFileObject(
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphpExtractNameFileObject(
     _In_ PFILE_OBJECT FileObject,
-    _Out_writes_bytes_(BufferLength) POBJECT_NAME_INFORMATION Buffer,
+    _Out_writes_bytes_opt_(BufferLength) POBJECT_NAME_INFORMATION Buffer,
     _In_ ULONG BufferLength,
     _Out_ PULONG ReturnLength
     )
 {
-    NTSTATUS status = STATUS_SUCCESS;
-    ULONG returnLength;
+    NTSTATUS status;
     PCHAR objectName;
     ULONG usedLength;
     ULONG subNameLength;
     PFILE_OBJECT relatedFileObject;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
 
-    // We need at least the size of OBJECT_NAME_INFORMATION to continue.
-    if (BufferLength < sizeof(OBJECT_NAME_INFORMATION))
+    if (FlagOn(FileObject->Flags, FO_CLEANUP_COMPLETE))
     {
-        *ReturnLength = sizeof(OBJECT_NAME_INFORMATION);
+        *ReturnLength = 0;
 
-        return STATUS_BUFFER_TOO_SMALL;
+        return STATUS_FILE_CLOSED;
     }
 
-    // Assume failure.
-    Buffer->Name.Length = 0;
-    // We will place the object name directly after the UNICODE_STRING structure in the buffer.
-    Buffer->Name.Buffer = (PWSTR)PTR_ADD_OFFSET(Buffer, sizeof(OBJECT_NAME_INFORMATION));
-    // Retain a local pointer to the object name so we can manipulate the pointer.
-    objectName = (PCHAR)Buffer->Name.Buffer;
-    // A variable that keeps track of how much space we have used.
-    usedLength = sizeof(OBJECT_NAME_INFORMATION);
-
-    // Check if the file object has an associated device (e.g. "\Device\NamedPipe", "\Device\Mup").
-    // We can use the user-supplied buffer for this since if the buffer isn't big enough, we can't
-    // proceed anyway (we are going to use the name).
-    if (FileObject->DeviceObject)
+    if (Buffer)
     {
-        status = ObQueryNameString(
-            FileObject->DeviceObject,
-            Buffer,
-            BufferLength,
-            &returnLength
-            );
-
-        if (!NT_SUCCESS(status))
+        if (BufferLength < sizeof(OBJECT_NAME_INFORMATION))
         {
-            if (status == STATUS_INFO_LENGTH_MISMATCH)
-                status = STATUS_BUFFER_TOO_SMALL;
+            *ReturnLength = sizeof(OBJECT_NAME_INFORMATION);
 
-            *ReturnLength = returnLength;
-
-            return status;
+            return STATUS_BUFFER_TOO_SMALL;
         }
 
-        // The UNICODE_STRING in the buffer is now filled in. We will append to the object name
-        // later, so we need to fix the object name pointer by adding the length, in bytes, of the
-        // device name string we just got.
-        objectName += Buffer->Name.Length;
-        usedLength += Buffer->Name.Length;
+        //
+        // We will place the object name directly after the UNICODE_STRING
+        // structure in the buffer.
+        //
+        Buffer->Name.Length = 0;
+        Buffer->Name.MaximumLength = (USHORT)(BufferLength - sizeof(OBJECT_NAME_INFORMATION));
+        Buffer->Name.Buffer = (PWSTR)Add2Ptr(Buffer, sizeof(OBJECT_NAME_INFORMATION));
+
+        //
+        // Retain a local pointer to the object name so we can manipulate the
+        // pointer.
+        //
+        objectName = (PCHAR)Buffer->Name.Buffer;
+        usedLength = sizeof(OBJECT_NAME_INFORMATION);
+    }
+    else
+    {
+        objectName = NULL;
+        usedLength = sizeof(OBJECT_NAME_INFORMATION);
     }
 
-    // Check if the file object has a file name component. If not, we can't do anything else, so we
-    // just return the name we have already.
+    //
+    // Check if the file object has an associated device (e.g.
+    // "\Device\NamedPipe", "\Device\Mup"). We can use the user-supplied buffer
+    // for this since if the buffer isn't big enough, we can't proceed anyway
+    // (we are going to use the name).
+    //
+    if (FileObject->DeviceObject)
+    {
+        ULONG returnLength;
+
+        status = ObQueryNameString(FileObject->DeviceObject,
+                                   Buffer,
+                                   BufferLength,
+                                   &returnLength);
+
+        usedLength = returnLength;
+
+        if (NT_SUCCESS(status))
+        {
+            NT_ASSERT(objectName && Buffer);
+            //
+            // The UNICODE_STRING in the buffer is now filled in. We will
+            // append to the object name later, so we need to fix the
+            // object name pointer // by adding the length, in bytes, of
+            // the device name string we just got.
+            //
+            objectName += Buffer->Name.Length;
+        }
+        else
+        {
+            if (status == STATUS_INFO_LENGTH_MISMATCH)
+            {
+                status = STATUS_BUFFER_TOO_SMALL;
+            }
+        }
+    }
+    else
+    {
+        status = STATUS_SUCCESS;
+    }
+
+    //
+    // Check if the file object has a file name component. If not, we can't do
+    // anything else, so we just return the name we have already.
+    //
     if (!FileObject->FileName.Buffer)
     {
+        if (!objectName || (usedLength > BufferLength))
+        {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+
         *ReturnLength = usedLength;
 
-        return STATUS_SUCCESS;
+        return status;
     }
 
-    // The file object has a name. We need to walk up the file object chain and append the names of
-    // the related file objects in reverse order. This means we need to calculate the total length
-    // first.
+    //
+    // The file object has a name. We need to walk up the file object chain
+    // and append the names of the related file objects in reverse order. This
+    // means we need to calculate the total length first.
+    //
 
     relatedFileObject = FileObject;
     subNameLength = 0;
 
     do
     {
+        if (FlagOn(relatedFileObject->Flags, FO_CLEANUP_COMPLETE))
+        {
+            break;
+        }
+
         subNameLength += relatedFileObject->FileName.Length;
 
-        // Avoid infinite loops.
-        if (relatedFileObject == relatedFileObject->RelatedFileObject)
-            break;
-
         relatedFileObject = relatedFileObject->RelatedFileObject;
+
     } while (relatedFileObject);
 
     usedLength += subNameLength;
 
+    //
     // Check if we have enough space to write the whole thing.
-    if (usedLength > BufferLength)
+    //
+    if (!objectName || (usedLength > BufferLength))
     {
         *ReturnLength = usedLength;
 
         return STATUS_BUFFER_TOO_SMALL;
     }
 
+    //
     // We're ready to begin copying the names.
-
     // Add the name length because we're copying in reverse order.
+    //
+
     objectName += subNameLength;
 
     relatedFileObject = FileObject;
 
     do
     {
-        objectName -= relatedFileObject->FileName.Length;
-        memcpy(objectName, relatedFileObject->FileName.Buffer, relatedFileObject->FileName.Length);
-
-        // Avoid infinite loops.
-        if (relatedFileObject == relatedFileObject->RelatedFileObject)
+        if (FlagOn(relatedFileObject->Flags, FO_CLEANUP_COMPLETE))
+        {
             break;
+        }
+
+        objectName -= relatedFileObject->FileName.Length;
+        RtlCopyMemory(objectName,
+                      relatedFileObject->FileName.Buffer,
+                      relatedFileObject->FileName.Length);
 
         relatedFileObject = relatedFileObject->RelatedFileObject;
+
     } while (relatedFileObject);
 
-    // Update the length.
     Buffer->Name.Length += (USHORT)subNameLength;
-
-    // Pass the return length back.
+    Buffer->Name.MaximumLength = (USHORT)(BufferLength - sizeof(OBJECT_NAME_INFORMATION));
     *ReturnLength = usedLength;
 
     return STATUS_SUCCESS;
 }
 
 /**
- * Queries object information.
+ * \brief Queries the name of a file object.
  *
- * \param ProcessHandle A handle to a process.
- * \param Handle A handle which is present in the process referenced by \a ProcessHandle.
- * \param ObjectInformationClass The type of information to retrieve.
- * \param ObjectInformation The buffer in which the information will be stored.
- * \param ObjectInformationLength The number of bytes available in \a ObjectInformation.
- * \param ReturnLength A variable which receives the number of bytes required to be available in
- * \a ObjectInformation.
- * \param AccessMode The mode in which to perform access checks.
+ * \param[in] FileObject A pointer to a file object.
+ * \param[out] Buffer The buffer in which the object name will be stored.
+ * \param[in] BufferLength The number of bytes available in \a Buffer.
+ * \param[out] ReturnLength A variable which receives the number of bytes
+ * required to be available in \a Buffer.
+ *
+ * \return Successful or errant status.
  */
-NTSTATUS KpiQueryInformationObject(
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphQueryNameFileObject(
+    _In_ PFILE_OBJECT FileObject,
+    _Out_writes_bytes_opt_(BufferLength) POBJECT_NAME_INFORMATION Buffer,
+    _In_ ULONG BufferLength,
+    _Out_ PULONG ReturnLength
+    )
+{
+    NTSTATUS status;
+    PFLT_FILE_NAME_INFORMATION fileNameInfo;
+    FLT_FILE_NAME_OPTIONS nameOptions;
+
+    PAGED_CODE_PASSIVE();
+
+    nameOptions = FLT_FILE_NAME_NORMALIZED;
+
+    if (IoGetTopLevelIrp() || KeAreAllApcsDisabled())
+    {
+        nameOptions |= FLT_FILE_NAME_QUERY_CACHE_ONLY;
+    }
+    else
+    {
+        nameOptions |= FLT_FILE_NAME_QUERY_ALWAYS_ALLOW_CACHE_LOOKUP;
+    }
+
+    status = FltGetFileNameInformationUnsafe(FileObject,
+                                             NULL,
+                                             nameOptions,
+                                             &fileNameInfo);
+    if (!NT_SUCCESS(status))
+    {
+        fileNameInfo = NULL;
+
+        status = KphpExtractNameFileObject(FileObject,
+                                           Buffer,
+                                           BufferLength,
+                                           ReturnLength);
+        goto Exit;
+    }
+
+    *ReturnLength = sizeof(OBJECT_NAME_INFORMATION);
+    *ReturnLength += fileNameInfo->Name.Length;
+    if (!Buffer || (BufferLength < *ReturnLength))
+    {
+        status = STATUS_BUFFER_TOO_SMALL;
+        goto Exit;
+    }
+
+    Buffer->Name.Length = 0;
+    Buffer->Name.MaximumLength = (USHORT)(BufferLength - sizeof(OBJECT_NAME_INFORMATION));
+    Buffer->Name.Buffer = (PWSTR)Add2Ptr(Buffer, sizeof(OBJECT_NAME_INFORMATION));
+
+    RtlCopyUnicodeString(&Buffer->Name, &fileNameInfo->Name);
+
+Exit:
+
+    if (fileNameInfo)
+    {
+        FltReleaseFileNameInformation(fileNameInfo);
+    }
+
+    return status;
+}
+
+/**
+ * \brief Queries object information.
+ *
+ * \param[in] ProcessHandle A handle to a process.
+ * \param[in] Handle A handle which is present in the process referenced by
+ * \a ProcessHandle.
+ * \param[in] ObjectInformationClass The type of information to retrieve.
+ * \param[out] ObjectInformation The buffer in which the information will be
+ * stored.
+ * \param[in] ObjectInformationLength The number of bytes available in \a
+ * ObjectInformation.
+ * \param[out] ReturnLength A variable which receives the number of bytes
+ * required to be available in \a ObjectInformation.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphQueryInformationObject(
     _In_ HANDLE ProcessHandle,
     _In_ HANDLE Handle,
     _In_ KPH_OBJECT_INFORMATION_CLASS ObjectInformationClass,
-    _Out_writes_bytes_(ObjectInformationLength) PVOID ObjectInformation,
+    _Out_writes_bytes_opt_(ObjectInformationLength) PVOID ObjectInformation,
     _In_ ULONG ObjectInformationLength,
     _Out_opt_ PULONG ReturnLength,
     _In_ KPROCESSOR_MODE AccessMode
     )
 {
     NTSTATUS status;
+    PKPH_DYN dyn;
     PEPROCESS process;
-    KPROCESSOR_MODE referenceMode;
     KAPC_STATE apcState;
+    PVOID object;
     ULONG returnLength;
+    PVOID buffer;
+    BYTE stackBuffer[64];
+    KPROCESSOR_MODE accessMode;
+    PKPH_PROCESS_CONTEXT processContext;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
+
+    dyn = NULL;
+    process = NULL;
+    returnLength = 0;
+    object = NULL;
+    buffer = NULL;
+    processContext = NULL;
 
     if (AccessMode != KernelMode)
     {
         __try
         {
-            ProbeForWrite(ObjectInformation, ObjectInformationLength, sizeof(ULONG));
+            if (ObjectInformation)
+            {
+                ProbeOutputBytes(ObjectInformation, ObjectInformationLength);
+            }
 
             if (ReturnLength)
-                ProbeForWrite(ReturnLength, sizeof(ULONG), sizeof(ULONG));
+            {
+                ProbeOutputType(ReturnLength, ULONG);
+            }
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            return GetExceptionCode();
+            status = GetExceptionCode();
+            goto Exit;
         }
     }
 
-    status = ObReferenceObjectByHandle(
-        ProcessHandle,
-        0,
-        *PsProcessType,
-        AccessMode,
-        &process,
-        NULL
-        );
-
+    status = ObReferenceObjectByHandle(ProcessHandle,
+                                       0,
+                                       *PsProcessType,
+                                       AccessMode,
+                                       &process,
+                                       NULL);
     if (!NT_SUCCESS(status))
-        return status;
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed %!STATUS!",
+                      status);
+
+        goto Exit;
+    }
 
     if (process == PsInitialSystemProcess)
     {
-        // A check was added in Windows 7 - if we're attached to the System process, the handle must
-        // be a kernel handle.
         Handle = MakeKernelHandle(Handle);
-        referenceMode = KernelMode;
+        accessMode = KernelMode;
     }
     else
     {
-        // Make sure the handle isn't a kernel handle if we're not attached to the System process.
-        // This means we can avoid referencing then opening the objects later when calling
-        // ZwQueryObject, etc.
-        if (IsKernelHandle(Handle))
+        if (IsKernelHandle(Handle) && !IsPseudoHandle(Handle))
         {
-            ObDereferenceObject(process);
-            return STATUS_INVALID_HANDLE;
+            status = STATUS_INVALID_HANDLE;
+            goto Exit;
         }
-
-        referenceMode = AccessMode;
+        accessMode = AccessMode;
     }
 
     switch (ObjectInformationClass)
     {
-    case KphObjectBasicInformation:
+        case KphObjectBasicInformation:
         {
             OBJECT_BASIC_INFORMATION basicInfo;
 
-            KeStackAttachProcess(process, &apcState);
-            status = ZwQueryObject(
-                Handle,
-                ObjectBasicInformation,
-                &basicInfo,
-                sizeof(OBJECT_BASIC_INFORMATION),
-                NULL
-                );
-            KeUnstackDetachProcess(&apcState);
+            if (!ObjectInformation ||
+                (ObjectInformationLength < sizeof(basicInfo)))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(basicInfo);
+                goto Exit;
+            }
 
+            KeStackAttachProcess(process, &apcState);
+            status = ZwQueryObject(Handle,
+                                   ObjectBasicInformation,
+                                   &basicInfo,
+                                   sizeof(basicInfo),
+                                   NULL);
+            KeUnstackDetachProcess(&apcState);
             if (NT_SUCCESS(status))
             {
-                if (ObjectInformationLength == sizeof(OBJECT_BASIC_INFORMATION))
+                __try
                 {
-                    __try
-                    {
-                        *(POBJECT_BASIC_INFORMATION)ObjectInformation = basicInfo;
-                    }
-                    __except (EXCEPTION_EXECUTE_HANDLER)
-                    {
-                        status = GetExceptionCode();
-                    }
+                    RtlCopyMemory(ObjectInformation,
+                                  &basicInfo,
+                                  sizeof(basicInfo));
+                    returnLength = sizeof(basicInfo);
                 }
-                else
+                __except (EXCEPTION_EXECUTE_HANDLER)
                 {
-                    status = STATUS_INFO_LENGTH_MISMATCH;
+                    status = GetExceptionCode();
                 }
             }
 
-            returnLength = sizeof(OBJECT_BASIC_INFORMATION);
+            break;
         }
-        break;
-    case KphObjectNameInformation:
+        case KphObjectNameInformation:
         {
-            PVOID object;
             ULONG allocateSize;
             POBJECT_NAME_INFORMATION nameInfo;
 
-            returnLength = sizeof(OBJECT_NAME_INFORMATION);
-
-            // Attach to the process a get a pointer to the object.
             KeStackAttachProcess(process, &apcState);
-            status = ObReferenceObjectByHandle(
-                Handle,
-                0,
-                NULL,
-                referenceMode,
-                &object,
-                NULL
-                );
+            status = ObReferenceObjectByHandle(Handle,
+                                               0,
+                                               NULL,
+                                               accessMode,
+                                               &object,
+                                               NULL);
             KeUnstackDetachProcess(&apcState);
-
-            if (NT_SUCCESS(status))
+            if (!NT_SUCCESS(status))
             {
-                allocateSize = ObjectInformationLength;
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "ObReferenceObjectByHandle failed: %!STATUS!",
+                              status);
 
-                if (allocateSize < sizeof(OBJECT_NAME_INFORMATION)) // make sure we never try to allocate 0 bytes
-                    allocateSize = sizeof(OBJECT_NAME_INFORMATION);
+                object = NULL;
+                goto Exit;
+            }
 
-                nameInfo = ExAllocatePoolQuotaZero(PagedPool, allocateSize, 'QhpK');
+            allocateSize = ObjectInformationLength;
 
-                if (nameInfo)
-                {
-                    status = KphQueryNameObject(
-                        object,
-                        nameInfo,
-                        ObjectInformationLength,
-                        &returnLength
-                        );
+            if (allocateSize < sizeof(OBJECT_NAME_INFORMATION))
+            {
+                allocateSize = sizeof(OBJECT_NAME_INFORMATION);
+            }
 
-                    dprintf("KpiQueryInformationObject: called KphQueryNameObject: Handle: 0x%Ix, ObjectInformationLength: %u, returnLength: %u\n",
-                        (ULONG_PTR)Handle, ObjectInformationLength, returnLength);
-
-                    if (NT_SUCCESS(status))
-                    {
-                        // Fix up the buffer pointer.
-                        if (nameInfo->Name.Buffer)
-                            nameInfo->Name.Buffer = (PVOID)((ULONG_PTR)nameInfo->Name.Buffer - (ULONG_PTR)nameInfo + (ULONG_PTR)ObjectInformation);
-
-                        __try
-                        {
-                            memcpy(ObjectInformation, nameInfo, ObjectInformationLength);
-                        }
-                        __except (EXCEPTION_EXECUTE_HANDLER)
-                        {
-                            status = GetExceptionCode();
-                        }
-                    }
-
-                    ExFreePoolWithTag(nameInfo, 'QhpK');
-                }
-                else
+            if (allocateSize <= ARRAYSIZE(stackBuffer))
+            {
+                RtlZeroMemory(stackBuffer, ARRAYSIZE(stackBuffer));
+                buffer = stackBuffer;
+            }
+            else
+            {
+                buffer = KphAllocatePaged(allocateSize, KPH_TAG_OBJECT_QUERY);
+                if (!buffer)
                 {
                     status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto Exit;
+                }
+            }
+
+            nameInfo = (POBJECT_NAME_INFORMATION)buffer;
+
+            status = KphQueryNameObject(object,
+                                        nameInfo,
+                                        ObjectInformationLength,
+                                        &returnLength);
+            if (NT_SUCCESS(status))
+            {
+                if (!ObjectInformation)
+                {
+                    status = STATUS_BUFFER_TOO_SMALL;
+                    goto Exit;
                 }
 
-                ObDereferenceObject(object);
+                RebaseUnicodeString(&nameInfo->Name,
+                                    nameInfo,
+                                    ObjectInformation);
+
+                __try
+                {
+                    RtlCopyMemory(ObjectInformation,
+                                  nameInfo,
+                                  returnLength);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    status = GetExceptionCode();
+                }
             }
+
+            break;
         }
-        break;
-    case KphObjectTypeInformation:
+        case KphObjectTypeInformation:
         {
             ULONG allocateSize;
             POBJECT_TYPE_INFORMATION typeInfo;
 
             returnLength = sizeof(OBJECT_TYPE_INFORMATION);
             allocateSize = ObjectInformationLength;
-
             if (allocateSize < sizeof(OBJECT_TYPE_INFORMATION))
+            {
                 allocateSize = sizeof(OBJECT_TYPE_INFORMATION);
+            }
 
+            //
             // ObQueryTypeInfo uses ObjectType->Name.MaximumLength instead of
-            // ObjectType->Name.Length + sizeof(WCHAR) to calculate the required buffer size. In
-            // Windows 8, certain object types (e.g. TmTx) do NOT include the null terminator in
-            // MaximumLength, which causes ObQueryTypeInfo to overrun the given buffer. To work
-            // around this bug, we add some (generous) padding to our allocation.
+            // ObjectType->Name.Length + sizeof(WCHAR) to calculate the
+            // required buffer size. In Windows 8, certain object types
+            // (e.g. TmTx) do NOT include the null terminator in MaximumLength,
+            // which causes ObQueryTypeInfo to overrun the given buffer. To
+            // work around this bug, we add some (generous) padding to our
+            // allocation.
+            //
             allocateSize += sizeof(ULONGLONG);
 
-            typeInfo = ExAllocatePoolQuotaZero(PagedPool, allocateSize, 'QhpK');
-
-            if (typeInfo)
+            if (allocateSize <= ARRAYSIZE(stackBuffer))
             {
-                KeStackAttachProcess(process, &apcState);
-                status = ZwQueryObject(
-                    Handle,
-                    ObjectTypeInformation,
-                    typeInfo,
-                    ObjectInformationLength,
-                    &returnLength
-                    );
-                KeUnstackDetachProcess(&apcState);
-
-                if (NT_SUCCESS(status))
-                {
-                    // Fix up the buffer pointer.
-                    if (typeInfo->TypeName.Buffer)
-                        typeInfo->TypeName.Buffer = (PVOID)((ULONG_PTR)typeInfo->TypeName.Buffer - (ULONG_PTR)typeInfo + (ULONG_PTR)ObjectInformation);
-
-                    __try
-                    {
-                        memcpy(ObjectInformation, typeInfo, ObjectInformationLength);
-                    }
-                    __except (EXCEPTION_EXECUTE_HANDLER)
-                    {
-                        status = GetExceptionCode();
-                    }
-                }
-
-                ExFreePoolWithTag(typeInfo, 'QhpK');
+                RtlZeroMemory(stackBuffer, ARRAYSIZE(stackBuffer));
+                buffer = stackBuffer;
             }
             else
             {
-                status = STATUS_INSUFFICIENT_RESOURCES;
+                buffer = KphAllocatePaged(allocateSize, KPH_TAG_OBJECT_QUERY);
+                if (!buffer)
+                {
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto Exit;
+                }
             }
+
+            typeInfo = (POBJECT_TYPE_INFORMATION)buffer;
+
+            KeStackAttachProcess(process, &apcState);
+            status = ZwQueryObject(Handle,
+                                   ObjectTypeInformation,
+                                   typeInfo,
+                                   ObjectInformationLength,
+                                   &returnLength);
+            KeUnstackDetachProcess(&apcState);
+            if (NT_SUCCESS(status))
+            {
+                if (!ObjectInformation)
+                {
+                    status = STATUS_BUFFER_TOO_SMALL;
+                    goto Exit;
+                }
+
+                RebaseUnicodeString(&typeInfo->TypeName,
+                                    typeInfo,
+                                    ObjectInformation);
+
+                __try
+                {
+                    RtlCopyMemory(ObjectInformation,
+                                  typeInfo,
+                                  returnLength);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    status = GetExceptionCode();
+                }
+            }
+
+            break;
         }
-        break;
-    case KphObjectHandleFlagInformation:
+        case KphObjectHandleFlagInformation:
         {
             OBJECT_HANDLE_FLAG_INFORMATION handleFlagInfo;
 
-            KeStackAttachProcess(process, &apcState);
-            status = ZwQueryObject(
-                Handle,
-                ObjectHandleFlagInformation,
-                &handleFlagInfo,
-                sizeof(OBJECT_HANDLE_FLAG_INFORMATION),
-                NULL
-                );
-            KeUnstackDetachProcess(&apcState);
+            if (!ObjectInformation ||
+                (ObjectInformationLength < sizeof(handleFlagInfo)))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(handleFlagInfo);
+                goto Exit;
+            }
 
+            KeStackAttachProcess(process, &apcState);
+            status = ZwQueryObject(Handle,
+                                   ObjectHandleFlagInformation,
+                                   &handleFlagInfo,
+                                   sizeof(handleFlagInfo),
+                                   NULL);
+            KeUnstackDetachProcess(&apcState);
             if (NT_SUCCESS(status))
             {
-                if (ObjectInformationLength == sizeof(OBJECT_HANDLE_FLAG_INFORMATION))
+                __try
                 {
-                    __try
-                    {
-                        *(POBJECT_HANDLE_FLAG_INFORMATION)ObjectInformation = handleFlagInfo;
-                    }
-                    __except (EXCEPTION_EXECUTE_HANDLER)
-                    {
-                        status = GetExceptionCode();
-                    }
+                    RtlCopyMemory(ObjectInformation,
+                                  &handleFlagInfo,
+                                  sizeof(handleFlagInfo));
+                    returnLength = sizeof(handleFlagInfo);
                 }
-                else
+                __except (EXCEPTION_EXECUTE_HANDLER)
                 {
-                    status = STATUS_INFO_LENGTH_MISMATCH;
+                    status = GetExceptionCode();
                 }
             }
 
-            returnLength = sizeof(OBJECT_HANDLE_FLAG_INFORMATION);
+            break;
         }
-        break;
-    case KphObjectProcessBasicInformation:
+        case KphObjectProcessBasicInformation:
         {
             PROCESS_BASIC_INFORMATION basicInfo;
 
-            KeStackAttachProcess(process, &apcState);
-            status = ZwQueryInformationProcess(
-                Handle,
-                ProcessBasicInformation,
-                &basicInfo,
-                sizeof(PROCESS_BASIC_INFORMATION),
-                NULL
-                );
-            KeUnstackDetachProcess(&apcState);
+            if (!ObjectInformation ||
+                (ObjectInformationLength < sizeof(basicInfo)))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(basicInfo);
+                goto Exit;
+            }
 
+            KeStackAttachProcess(process, &apcState);
+            status = ZwQueryInformationProcess(Handle,
+                                               ProcessBasicInformation,
+                                               &basicInfo,
+                                               sizeof(basicInfo),
+                                               NULL);
+            KeUnstackDetachProcess(&apcState);
             if (NT_SUCCESS(status))
             {
-                if (ObjectInformationLength == sizeof(PROCESS_BASIC_INFORMATION))
+                __try
                 {
-                    __try
-                    {
-                        *(PPROCESS_BASIC_INFORMATION)ObjectInformation = basicInfo;
-                    }
-                    __except (EXCEPTION_EXECUTE_HANDLER)
-                    {
-                        status = GetExceptionCode();
-                    }
+                    RtlCopyMemory(ObjectInformation,
+                                  &basicInfo,
+                                  sizeof(basicInfo));
+                    returnLength = sizeof(basicInfo);
                 }
-                else
+                __except (EXCEPTION_EXECUTE_HANDLER)
                 {
-                    status = STATUS_INFO_LENGTH_MISMATCH;
+                    status = GetExceptionCode();
                 }
             }
 
-            returnLength = sizeof(PROCESS_BASIC_INFORMATION);
+            break;
         }
-        break;
-    case KphObjectThreadBasicInformation:
+        case KphObjectThreadBasicInformation:
         {
             THREAD_BASIC_INFORMATION basicInfo;
 
-            KeStackAttachProcess(process, &apcState);
-            status = ZwQueryInformationThread(
-                Handle,
-                ThreadBasicInformation,
-                &basicInfo,
-                sizeof(THREAD_BASIC_INFORMATION),
-                NULL
-                );
-            KeUnstackDetachProcess(&apcState);
+            if (!ObjectInformation ||
+                (ObjectInformationLength < sizeof(basicInfo)))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(basicInfo);
+                goto Exit;
+            }
 
+            KeStackAttachProcess(process, &apcState);
+            status = ZwQueryInformationThread(Handle,
+                                              ThreadBasicInformation,
+                                              &basicInfo,
+                                              sizeof(basicInfo),
+                                              NULL);
+            KeUnstackDetachProcess(&apcState);
             if (NT_SUCCESS(status))
             {
-                if (ObjectInformationLength == sizeof(THREAD_BASIC_INFORMATION))
+                __try
                 {
-                    __try
-                    {
-                        *(PTHREAD_BASIC_INFORMATION)ObjectInformation = basicInfo;
-                    }
-                    __except (EXCEPTION_EXECUTE_HANDLER)
-                    {
-                        status = GetExceptionCode();
-                    }
+                    RtlCopyMemory(ObjectInformation,
+                                  &basicInfo,
+                                  sizeof(basicInfo));
+                    returnLength = sizeof(basicInfo);
                 }
-                else
+                __except (EXCEPTION_EXECUTE_HANDLER)
                 {
-                    status = STATUS_INFO_LENGTH_MISMATCH;
+                    status = GetExceptionCode();
                 }
             }
 
-            returnLength = sizeof(THREAD_BASIC_INFORMATION);
+            break;
         }
-        break;
-    case KphObjectEtwRegBasicInformation:
+        case KphObjectEtwRegBasicInformation:
         {
-            PVOID etwReg;
             PVOID objectType;
             PUNICODE_STRING objectTypeName;
-            UNICODE_STRING etwRegistrationName;
             PVOID guidEntry;
-            ETWREG_BASIC_INFORMATION basicInfo;
+            KPH_ETWREG_BASIC_INFORMATION basicInfo;
 
-            // Check dynamic data requirements.
-            if (KphDynEgeGuid != ULONG_MAX &&
-                KphDynEreGuidEntry != ULONG_MAX &&
-                KphDynOtName != ULONG_MAX)
+            dyn = KphReferenceDynData();
+            if (!dyn ||
+                (dyn->EgeGuid == ULONG_MAX) ||
+                (dyn->EreGuidEntry == ULONG_MAX) ||
+                (dyn->OtName == ULONG_MAX))
             {
-                // Attach to the process and get a pointer to the object. We don't have a pointer to
-                // the EtwRegistration object type, so we'll just have to check the type name.
+                status = STATUS_NOINTERFACE;
+                goto Exit;
+            }
 
-                KeStackAttachProcess(process, &apcState);
-                status = ObReferenceObjectByHandle(
-                    Handle,
-                    0,
-                    NULL,
-                    referenceMode,
-                    &etwReg,
-                    NULL
-                    );
-                KeUnstackDetachProcess(&apcState);
+            if (!ObjectInformation ||
+                (ObjectInformationLength < sizeof(basicInfo)))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(basicInfo);
+                goto Exit;
+            }
 
-                if (NT_SUCCESS(status))
-                {
-                    // Check the type name.
+            KeStackAttachProcess(process, &apcState);
+            status = ObReferenceObjectByHandle(Handle,
+                                               0,
+                                               NULL,
+                                               accessMode,
+                                               &object,
+                                               NULL);
+            KeUnstackDetachProcess(&apcState);
+            if (!NT_SUCCESS(status))
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "ObReferenceObjectByHandle failed: %!STATUS!",
+                              status);
 
-                    objectType = ObGetObjectType(etwReg);
+                object = NULL;
+                goto Exit;
+            }
 
-                    if (objectType)
-                    {
-                        objectTypeName = (PUNICODE_STRING)PTR_ADD_OFFSET(objectType, KphDynOtName);
-                        RtlInitUnicodeString(&etwRegistrationName, L"EtwRegistration");
+            objectType = ObGetObjectType(object);
+            if (!objectType)
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "ObGetObjectType returned null");
 
-                        if (!RtlEqualUnicodeString(objectTypeName, &etwRegistrationName, FALSE))
-                        {
-                            status = STATUS_OBJECT_TYPE_MISMATCH;
-                        }
-                    }
-                    else
-                    {
-                        status = STATUS_NOT_SUPPORTED;
-                    }
+                status = STATUS_NOT_SUPPORTED;
+                goto Exit;
+            }
 
-                    if (NT_SUCCESS(status))
-                    {
-                        guidEntry = *(PVOID *)PTR_ADD_OFFSET(etwReg, KphDynEreGuidEntry);
+            objectTypeName = (PUNICODE_STRING)Add2Ptr(objectType, dyn->OtName);
+            if (!RtlEqualUnicodeString(objectTypeName,
+                                       &KphpEtwRegistrationName,
+                                       FALSE))
+            {
+                status = STATUS_OBJECT_TYPE_MISMATCH;
+                goto Exit;
+            }
 
-                        if (guidEntry)
-                            basicInfo.Guid = *(GUID *)PTR_ADD_OFFSET(guidEntry, KphDynEgeGuid);
-                        else
-                            memset(&basicInfo.Guid, 0, sizeof(GUID));
-
-                        basicInfo.SessionId = 0; // not implemented
-
-                        if (ObjectInformationLength == sizeof(ETWREG_BASIC_INFORMATION))
-                        {
-                            __try
-                            {
-                                *(PETWREG_BASIC_INFORMATION)ObjectInformation = basicInfo;
-                            }
-                            __except (EXCEPTION_EXECUTE_HANDLER)
-                            {
-                                status = GetExceptionCode();
-                            }
-                        }
-                        else
-                        {
-                            status = STATUS_INFO_LENGTH_MISMATCH;
-                        }
-                    }
-
-                    ObDereferenceObject(etwReg);
-                }
+            guidEntry = *(PVOID*)Add2Ptr(object, dyn->EreGuidEntry);
+            if (guidEntry)
+            {
+                RtlCopyMemory(&basicInfo.Guid,
+                              Add2Ptr(guidEntry, dyn->EgeGuid),
+                              sizeof(GUID));
             }
             else
             {
-                status = STATUS_NOT_SUPPORTED;
+                RtlZeroMemory(&basicInfo.Guid, sizeof(GUID));
             }
 
-            returnLength = sizeof(ETWREG_BASIC_INFORMATION);
+            //
+            // Not implemented.
+            //
+            basicInfo.SessionId = 0;
+
+            __try
+            {
+                RtlCopyMemory(ObjectInformation,
+                              &basicInfo,
+                              sizeof(basicInfo));
+                returnLength = sizeof(basicInfo);
+                status = STATUS_SUCCESS;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                status = GetExceptionCode();
+            }
+
+            break;
         }
-        break;
-    case KphObjectFileObjectInformation:
+        case KphObjectFileObjectInformation:
         {
             PFILE_OBJECT fileObject;
-            KPH_FILE_OBJECT_INFORMATION objectInfo;
+            KPH_FILE_OBJECT_INFORMATION fileInfo;
+            PDEVICE_OBJECT attachedDevice;
+            PDEVICE_OBJECT relatedDevice;
+            PVPB vpb;
+            KIRQL irql;
 
-            KeStackAttachProcess(process, &apcState);
-            status = ObReferenceObjectByHandle(
-                Handle,
-                0,
-                *IoFileObjectType,
-                referenceMode,
-                &fileObject,
-                NULL
-                );
-            KeUnstackDetachProcess(&apcState);
-
-            if (NT_SUCCESS(status))
+            if (!ObjectInformation ||
+                (ObjectInformationLength < sizeof(fileInfo)))
             {
-                objectInfo.LockOperation = fileObject->LockOperation;
-                objectInfo.DeletePending = fileObject->DeletePending;
-                objectInfo.ReadAccess = fileObject->ReadAccess;
-                objectInfo.WriteAccess = fileObject->WriteAccess;
-                objectInfo.DeleteAccess = fileObject->DeleteAccess;
-                objectInfo.SharedRead = fileObject->SharedRead;
-                objectInfo.SharedWrite = fileObject->SharedWrite;
-                objectInfo.SharedDelete = fileObject->SharedDelete;
-                objectInfo.CurrentByteOffset = fileObject->CurrentByteOffset;
-                objectInfo.Flags = fileObject->Flags;
-
-                if (ObjectInformationLength == sizeof(KPH_FILE_OBJECT_INFORMATION))
-                {
-                    __try
-                    {
-                        *(PKPH_FILE_OBJECT_INFORMATION)ObjectInformation = objectInfo;
-                    }
-                    __except (EXCEPTION_EXECUTE_HANDLER)
-                    {
-                        status = GetExceptionCode();
-                    }
-                }
-                else
-                {
-                    status = STATUS_INFO_LENGTH_MISMATCH;
-                }
-
-                ObDereferenceObject(fileObject);
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(fileInfo);
+                goto Exit;
             }
 
-            returnLength = sizeof(KPH_FILE_OBJECT_INFORMATION);
+            KeStackAttachProcess(process, &apcState);
+            status = ObReferenceObjectByHandle(Handle,
+                                               0,
+                                               *IoFileObjectType,
+                                               accessMode,
+                                               &object,
+                                               NULL);
+            KeUnstackDetachProcess(&apcState);
+            if (!NT_SUCCESS(status))
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "ObReferenceObjectByHandle failed: %!STATUS!",
+                              status);
+
+                object = NULL;
+                goto Exit;
+            }
+
+            fileObject = (PFILE_OBJECT)object;
+            attachedDevice = IoGetAttachedDevice(fileObject->DeviceObject);
+            relatedDevice = IoGetRelatedDeviceObject(fileObject);
+
+            RtlZeroMemory(&fileInfo, sizeof(fileInfo));
+
+            fileInfo.LockOperation = fileObject->LockOperation;
+            fileInfo.DeletePending = fileObject->DeletePending;
+            fileInfo.ReadAccess = fileObject->ReadAccess;
+            fileInfo.WriteAccess = fileObject->WriteAccess;
+            fileInfo.DeleteAccess = fileObject->DeleteAccess;
+            fileInfo.SharedRead = fileObject->SharedRead;
+            fileInfo.SharedWrite = fileObject->SharedWrite;
+            fileInfo.SharedDelete = fileObject->SharedDelete;
+            fileInfo.CurrentByteOffset = fileObject->CurrentByteOffset;
+            fileInfo.Flags = fileObject->Flags;
+            if (fileObject->SectionObjectPointer)
+            {
+                fileInfo.UserWritableReferences =
+                    MmDoesFileHaveUserWritableReferences(fileObject->SectionObjectPointer);
+            }
+            fileInfo.HasActiveTransaction =
+                (IoGetTransactionParameterBlock(fileObject) ? TRUE : FALSE);
+            fileInfo.IsIgnoringSharing = IoIsFileObjectIgnoringSharing(fileObject);
+            fileInfo.Waiters = fileObject->Waiters;
+            fileInfo.Busy = fileObject->Busy;
+
+            fileInfo.Device.Type = fileObject->DeviceObject->DeviceType;
+            fileInfo.Device.Characteristics = fileObject->DeviceObject->Characteristics;
+            fileInfo.Device.Flags = fileObject->DeviceObject->Flags;
+
+            fileInfo.AttachedDevice.Type = attachedDevice->DeviceType;
+            fileInfo.AttachedDevice.Characteristics = attachedDevice->Characteristics;
+            fileInfo.AttachedDevice.Flags = attachedDevice->Flags;
+
+            fileInfo.RelatedDevice.Type = attachedDevice->DeviceType;
+            fileInfo.RelatedDevice.Characteristics = attachedDevice->Characteristics;
+            fileInfo.RelatedDevice.Flags = attachedDevice->Flags;
+
+            C_ASSERT(ARRAYSIZE(fileInfo.Vpb.VolumeLabel) == ARRAYSIZE(vpb->VolumeLabel));
+
+            IoAcquireVpbSpinLock(&irql);
+
+            //
+            // Accessing the VPB is reserved for "certain classes of drivers".
+            //
+#pragma prefast(push)
+#pragma prefast(disable : 28175)
+            vpb = fileObject->Vpb;
+            if (vpb)
+            {
+                fileInfo.Vpb.Type = vpb->Type;
+                fileInfo.Vpb.Size = vpb->Size;
+                fileInfo.Vpb.Flags = vpb->Flags;
+                fileInfo.Vpb.VolumeLabelLength = vpb->VolumeLabelLength;
+                fileInfo.Vpb.SerialNumber = vpb->SerialNumber;
+                fileInfo.Vpb.ReferenceCount = vpb->ReferenceCount;
+                RtlCopyMemory(fileInfo.Vpb.VolumeLabel,
+                              vpb->VolumeLabel,
+                              ARRAYSIZE(vpb->VolumeLabel) * sizeof(WCHAR));
+            }
+
+            vpb = fileObject->DeviceObject->Vpb;
+            if (vpb)
+            {
+                fileInfo.Device.Vpb.Type = vpb->Type;
+                fileInfo.Device.Vpb.Size = vpb->Size;
+                fileInfo.Device.Vpb.Flags = vpb->Flags;
+                fileInfo.Device.Vpb.VolumeLabelLength = vpb->VolumeLabelLength;
+                fileInfo.Device.Vpb.SerialNumber = vpb->SerialNumber;
+                fileInfo.Device.Vpb.ReferenceCount = vpb->ReferenceCount;
+                RtlCopyMemory(fileInfo.Device.Vpb.VolumeLabel,
+                              vpb->VolumeLabel,
+                              ARRAYSIZE(vpb->VolumeLabel) * sizeof(WCHAR));
+            }
+
+            vpb = attachedDevice->Vpb;
+            if (vpb)
+            {
+                fileInfo.AttachedDevice.Vpb.Type = vpb->Type;
+                fileInfo.AttachedDevice.Vpb.Size = vpb->Size;
+                fileInfo.AttachedDevice.Vpb.Flags = vpb->Flags;
+                fileInfo.AttachedDevice.Vpb.VolumeLabelLength = vpb->VolumeLabelLength;
+                fileInfo.AttachedDevice.Vpb.SerialNumber = vpb->SerialNumber;
+                fileInfo.AttachedDevice.Vpb.ReferenceCount = vpb->ReferenceCount;
+                RtlCopyMemory(fileInfo.AttachedDevice.Vpb.VolumeLabel,
+                              vpb->VolumeLabel,
+                              ARRAYSIZE(vpb->VolumeLabel) * sizeof(WCHAR));
+            }
+
+            vpb = relatedDevice->Vpb;
+            if (vpb)
+            {
+                fileInfo.RelatedDevice.Vpb.Type = vpb->Type;
+                fileInfo.RelatedDevice.Vpb.Size = vpb->Size;
+                fileInfo.RelatedDevice.Vpb.Flags = vpb->Flags;
+                fileInfo.RelatedDevice.Vpb.VolumeLabelLength = vpb->VolumeLabelLength;
+                fileInfo.RelatedDevice.Vpb.SerialNumber = vpb->SerialNumber;
+                fileInfo.RelatedDevice.Vpb.ReferenceCount = vpb->ReferenceCount;
+                RtlCopyMemory(fileInfo.RelatedDevice.Vpb.VolumeLabel,
+                              vpb->VolumeLabel,
+                              ARRAYSIZE(vpb->VolumeLabel) * sizeof(WCHAR));
+            }
+#pragma prefast(pop)
+
+            IoReleaseVpbSpinLock(irql);
+
+            __try
+            {
+                RtlCopyMemory(ObjectInformation, &fileInfo, sizeof(fileInfo));
+                returnLength = sizeof(fileInfo);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                status = GetExceptionCode();
+            }
+
+            break;
         }
-        break;
-    case KphObjectFileObjectDriver:
+        case KphObjectFileObjectDriver:
         {
             PFILE_OBJECT fileObject;
             HANDLE driverHandle;
 
-            if (ObjectInformationLength == sizeof(KPH_FILE_OBJECT_DRIVER))
+            if (!ObjectInformation ||
+                (ObjectInformationLength < sizeof(KPH_FILE_OBJECT_DRIVER)))
             {
-                KeStackAttachProcess(process, &apcState);
-                status = ObReferenceObjectByHandle(
-                    Handle,
-                    0,
-                    *IoFileObjectType,
-                    referenceMode,
-                    &fileObject,
-                    NULL
-                    );
-                KeUnstackDetachProcess(&apcState);
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(KPH_FILE_OBJECT_DRIVER);
+                goto Exit;
+            }
 
-                if (NT_SUCCESS(status))
+            KeStackAttachProcess(process, &apcState);
+            status = ObReferenceObjectByHandle(Handle,
+                                               0,
+                                               *IoFileObjectType,
+                                               accessMode,
+                                               &object,
+                                               NULL);
+            KeUnstackDetachProcess(&apcState);
+            if (!NT_SUCCESS(status))
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "ObReferenceObjectByHandle failed: %!STATUS!",
+                              status);
+
+                object = NULL;
+                goto Exit;
+            }
+
+            fileObject = (PFILE_OBJECT)object;
+            if (!fileObject->DeviceObject ||
+                !fileObject->DeviceObject->DriverObject)
+            {
+                status = STATUS_INVALID_DEVICE_REQUEST;
+                goto Exit;
+            }
+
+            status = ObOpenObjectByPointer(fileObject->DeviceObject->DriverObject,
+                                           (AccessMode ? 0 : OBJ_KERNEL_HANDLE),
+                                           NULL,
+                                           SYNCHRONIZE,
+                                           *IoDriverObjectType,
+                                           AccessMode,
+                                           &driverHandle);
+            if (NT_SUCCESS(status))
+            {
+                __try
                 {
-                    if (fileObject->DeviceObject && fileObject->DeviceObject->DriverObject)
-                    {
-                        status = ObOpenObjectByPointer(
-                            fileObject->DeviceObject->DriverObject,
-                            0,
-                            NULL,
-                            SYNCHRONIZE,
-                            *IoDriverObjectType,
-                            AccessMode,
-                            &driverHandle
-                            );
-                    }
-                    else
-                    {
-                        driverHandle = NULL;
-                    }
+                    ((PKPH_FILE_OBJECT_DRIVER)ObjectInformation)->DriverHandle = driverHandle;
+                    returnLength = sizeof(KPH_FILE_OBJECT_DRIVER);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    ObCloseHandle(driverHandle, AccessMode);
+                    status = GetExceptionCode();
+                }
+            }
 
-                    if (NT_SUCCESS(status))
-                    {
-                        __try
-                        {
-                            ((PKPH_FILE_OBJECT_DRIVER)ObjectInformation)->DriverHandle = driverHandle;
-                        }
-                        __except (EXCEPTION_EXECUTE_HANDLER)
-                        {
-                            status = GetExceptionCode();
-                        }
-                    }
+            break;
+        }
+        case KphObjectProcessTimes:
+        {
+            KERNEL_USER_TIMES times;
 
-                    ObDereferenceObject(fileObject);
+            if (!ObjectInformation ||
+                (ObjectInformationLength < sizeof(times)))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(times);
+                goto Exit;
+            }
+
+            KeStackAttachProcess(process, &apcState);
+            status = ZwQueryInformationProcess(Handle,
+                                               ProcessTimes,
+                                               &times,
+                                               sizeof(times),
+                                               NULL);
+            KeUnstackDetachProcess(&apcState);
+            if (NT_SUCCESS(status))
+            {
+                __try
+                {
+                    RtlCopyMemory(ObjectInformation, &times, sizeof(times));
+                    returnLength = sizeof(times);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    status = GetExceptionCode();
+                }
+            }
+
+            break;
+        }
+        case KphObjectThreadTimes:
+        {
+            KERNEL_USER_TIMES times;
+
+            if (!ObjectInformation ||
+                (ObjectInformationLength < sizeof(times)))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(times);
+                goto Exit;
+            }
+
+            KeStackAttachProcess(process, &apcState);
+            status = ZwQueryInformationThread(Handle,
+                                              ThreadTimes,
+                                              &times,
+                                              sizeof(times),
+                                              NULL);
+            KeUnstackDetachProcess(&apcState);
+            if (NT_SUCCESS(status))
+            {
+                __try
+                {
+                    RtlCopyMemory(ObjectInformation, &times, sizeof(times));
+                    returnLength = sizeof(times);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    status = GetExceptionCode();
+                }
+            }
+
+            break;
+        }
+        case KphObjectProcessImageFileName:
+        {
+            PEPROCESS targetProcess;
+
+            KeStackAttachProcess(process, &apcState);
+            status = ObReferenceObjectByHandle(Handle,
+                                               0,
+                                               *PsProcessType,
+                                               accessMode,
+                                               &targetProcess,
+                                               NULL);
+            KeUnstackDetachProcess(&apcState);
+            if (!NT_SUCCESS(status))
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "ObReferenceObjectByHandle failed: %!STATUS!",
+                              status);
+
+                goto Exit;
+            }
+
+            processContext = KphGetEProcessContext(targetProcess);
+            if (!processContext || !processContext->ImageFileName)
+            {
+                status = STATUS_INSUFFICIENT_RESOURCES;
+                goto Exit;
+            }
+
+            returnLength = sizeof(UNICODE_STRING);
+            returnLength += processContext->ImageFileName->Length;
+
+            if (ObjectInformationLength < returnLength)
+            {
+                status = STATUS_BUFFER_TOO_SMALL;
+                goto Exit;
+            }
+
+            if (!ObjectInformation)
+            {
+                status = STATUS_BUFFER_TOO_SMALL;
+                goto Exit;
+            }
+
+            __try
+            {
+                PUNICODE_STRING outputString;
+
+                outputString = ObjectInformation;
+                outputString->Length = processContext->ImageFileName->Length;
+                outputString->MaximumLength = processContext->ImageFileName->Length;
+                outputString->Buffer = Add2Ptr(ObjectInformation,
+                                               sizeof(UNICODE_STRING));
+                RtlCopyMemory(outputString->Buffer,
+                              processContext->ImageFileName->Buffer,
+                              processContext->ImageFileName->Length);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                status = GetExceptionCode();
+            }
+
+            break;
+        }
+        case KphObjectThreadNameInformation:
+        {
+            ULONG allocateSize;
+            PTHREAD_NAME_INFORMATION nameInfo;
+
+            returnLength = sizeof(THREAD_NAME_INFORMATION);
+            allocateSize = ObjectInformationLength;
+            if (allocateSize < sizeof(THREAD_NAME_INFORMATION))
+            {
+                allocateSize = sizeof(THREAD_NAME_INFORMATION);
+            }
+            allocateSize += sizeof(ULONGLONG);
+
+            if (allocateSize <= ARRAYSIZE(stackBuffer))
+            {
+                RtlZeroMemory(stackBuffer, ARRAYSIZE(stackBuffer));
+                buffer = stackBuffer;
+            }
+            else
+            {
+                buffer = KphAllocatePaged(allocateSize, KPH_TAG_OBJECT_QUERY);
+                if (!buffer)
+                {
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto Exit;
+                }
+            }
+
+            nameInfo = (PTHREAD_NAME_INFORMATION)buffer;
+
+            KeStackAttachProcess(process, &apcState);
+            status = ZwQueryInformationThread(Handle,
+                                              ThreadNameInformation,
+                                              nameInfo,
+                                              ObjectInformationLength,
+                                              &returnLength);
+            KeUnstackDetachProcess(&apcState);
+            if (NT_SUCCESS(status))
+            {
+                if (!ObjectInformation)
+                {
+                    status = STATUS_BUFFER_TOO_SMALL;
+                    goto Exit;
+                }
+
+                RebaseUnicodeString(&nameInfo->ThreadName,
+                                    nameInfo,
+                                    ObjectInformation);
+
+                __try
+                {
+                    RtlCopyMemory(ObjectInformation, nameInfo, returnLength);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    status = GetExceptionCode();
+                }
+            }
+
+            break;
+        }
+        case KphObjectThreadIsTerminated:
+        {
+            ULONG threadIsTerminated;
+
+            if (!ObjectInformation ||
+                (ObjectInformationLength < sizeof(threadIsTerminated)))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(threadIsTerminated);
+                goto Exit;
+            }
+
+            KeStackAttachProcess(process, &apcState);
+            status = ZwQueryInformationThread(Handle,
+                                              ThreadIsTerminated,
+                                              &threadIsTerminated,
+                                              sizeof(threadIsTerminated),
+                                              NULL);
+            KeUnstackDetachProcess(&apcState);
+            if (NT_SUCCESS(status))
+            {
+                __try
+                {
+                    *(PULONG)ObjectInformation = threadIsTerminated;
+                    returnLength = sizeof(threadIsTerminated);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    status = GetExceptionCode();
+                }
+            }
+
+            break;
+        }
+        case KphObjectSectionBasicInformation:
+        case KphObjectSectionImageInformation:
+        case KphObjectSectionRelocationInformation:
+        case KphObjectSectionOriginalBaseInformation:
+        case KphObjectSectionInternalImageInformation:
+        case KphObjectSectionMappingsInformation:
+        {
+            if (ObjectInformation)
+            {
+                if (ObjectInformationLength <= ARRAYSIZE(stackBuffer))
+                {
+                    RtlZeroMemory(stackBuffer, ARRAYSIZE(stackBuffer));
+                    buffer = stackBuffer;
+                }
+                else
+                {
+                    buffer = KphAllocatePaged(ObjectInformationLength,
+                                              KPH_TAG_OBJECT_QUERY);
+                    if (!buffer)
+                    {
+                        status = STATUS_INSUFFICIENT_RESOURCES;
+                        goto Exit;
+                    }
                 }
             }
             else
             {
-                status = STATUS_INFO_LENGTH_MISMATCH;
+                NT_ASSERT(!buffer);
+                ObjectInformationLength = 0;
             }
 
-            returnLength = sizeof(KPH_FILE_OBJECT_DRIVER);
+            if (ObjectInformationClass == KphObjectSectionMappingsInformation)
+            {
+                KeStackAttachProcess(process, &apcState);
+                status = KphQuerySection(Handle,
+                                         KphSectionMappingsInformation,
+                                         buffer,
+                                         ObjectInformationLength,
+                                         &returnLength,
+                                         KernelMode);
+                KeUnstackDetachProcess(&apcState);
+                if (NT_SUCCESS(status))
+                {
+                    __try
+                    {
+                        RtlCopyMemory(ObjectInformation, buffer, returnLength);
+                    }
+                    __except (EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        status = GetExceptionCode();
+                    }
+                }
+            }
+            else
+            {
+                SIZE_T length;
+                SECTION_INFORMATION_CLASS sectionInfoClass;
+
+                if (ObjectInformationClass == KphObjectSectionBasicInformation)
+                {
+                    sectionInfoClass = SectionBasicInformation;
+                }
+                else if (ObjectInformationClass == KphObjectSectionImageInformation)
+                {
+                    sectionInfoClass = SectionImageInformation;
+                }
+                else if (ObjectInformationClass == KphObjectSectionRelocationInformation)
+                {
+                    sectionInfoClass = SectionRelocationInformation;
+                }
+                else if (ObjectInformationClass == KphObjectSectionOriginalBaseInformation)
+                {
+                    sectionInfoClass = SectionOriginalBaseInformation;
+                }
+                else
+                {
+                    NT_ASSERT(ObjectInformationClass == KphObjectSectionInternalImageInformation);
+                    sectionInfoClass = SectionInternalImageInformation;
+                }
+
+                length = 0;
+                KeStackAttachProcess(process, &apcState);
+                status = ZwQuerySection(Handle,
+                                        sectionInfoClass,
+                                        buffer,
+                                        ObjectInformationLength,
+                                        &length);
+                KeUnstackDetachProcess(&apcState);
+                if (NT_SUCCESS(status))
+                {
+                    if (length > ULONG_MAX)
+                    {
+                        status = STATUS_INTEGER_OVERFLOW;
+                        returnLength = 0;
+                        goto Exit;
+                    }
+
+                    __try
+                    {
+                        RtlCopyMemory(ObjectInformation, buffer, length);
+                        returnLength = (ULONG)length;
+                    }
+                    __except (EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        status = GetExceptionCode();
+                    }
+                }
+            }
+
+            break;
         }
-        break;
-    default:
-        status = STATUS_INVALID_INFO_CLASS;
-        returnLength = 0;
-        break;
+        case KphObjectSectionFileName:
+        {
+            PUNICODE_STRING sectionFileName;
+            ULONG allocateSize;
+            HANDLE sectionHandle;
+            PVOID baseAddress;
+            SIZE_T viewSize;
+
+            returnLength = sizeof(UNICODE_STRING);
+            allocateSize = ObjectInformationLength;
+            if (allocateSize < sizeof(UNICODE_STRING))
+            {
+                allocateSize = sizeof(UNICODE_STRING);
+            }
+            allocateSize += sizeof(ULONGLONG);
+
+            if (allocateSize <= ARRAYSIZE(stackBuffer))
+            {
+                RtlZeroMemory(stackBuffer, ARRAYSIZE(stackBuffer));
+                buffer = stackBuffer;
+            }
+            else
+            {
+                buffer = KphAllocatePaged(allocateSize, KPH_TAG_OBJECT_QUERY);
+                if (!buffer)
+                {
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto Exit;
+                }
+            }
+
+            sectionFileName = (PUNICODE_STRING)buffer;
+
+            status = ObDuplicateObject(process,
+                                       Handle,
+                                       PsInitialSystemProcess,
+                                       &sectionHandle,
+                                       SECTION_QUERY | SECTION_MAP_READ,
+                                       OBJ_KERNEL_HANDLE,
+                                       0,
+                                       KernelMode);
+            if (!NT_SUCCESS(status))
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "ObDuplicateObject failed: %!STATUS!",
+                              status);
+
+                goto Exit;
+            }
+
+            KeStackAttachProcess(PsInitialSystemProcess, &apcState);
+
+            baseAddress = NULL;
+            viewSize = 0;
+            status = ZwMapViewOfSection(sectionHandle,
+                                        ZwCurrentProcess(),
+                                        &baseAddress,
+                                        0,
+                                        0,
+                                        NULL,
+                                        &viewSize,
+                                        ViewUnmap,
+                                        0,
+                                        PAGE_READONLY);
+            if (NT_SUCCESS(status))
+            {
+                SIZE_T length;
+
+                length = 0;
+                status = ZwQueryVirtualMemory(ZwCurrentProcess(),
+                                              baseAddress,
+                                              MemoryMappedFilenameInformation,
+                                              sectionFileName,
+                                              ObjectInformationLength,
+                                              &length);
+                if (length > ULONG_MAX)
+                {
+                    status = STATUS_INTEGER_OVERFLOW;
+                    returnLength = 0;
+                }
+                else
+                {
+                    returnLength = (ULONG)length;
+                }
+
+                ZwUnmapViewOfSection(ZwCurrentProcess(), baseAddress);
+            }
+
+            ObCloseHandle(sectionHandle, KernelMode);
+
+            KeUnstackDetachProcess(&apcState);
+
+            if (NT_SUCCESS(status))
+            {
+                if (!ObjectInformation)
+                {
+                    status = STATUS_BUFFER_TOO_SMALL;
+                    goto Exit;
+                }
+
+                RebaseUnicodeString(sectionFileName,
+                                    sectionFileName,
+                                    ObjectInformation);
+
+                __try
+                {
+                    RtlCopyMemory(ObjectInformation,
+                                  sectionFileName,
+                                  returnLength);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    status = GetExceptionCode();
+                }
+            }
+
+            break;
+        }
+        default:
+        {
+            status = STATUS_INVALID_INFO_CLASS;
+            break;
+        }
     }
 
-    ObDereferenceObject(process);
+Exit:
+
+    if (processContext)
+    {
+        KphDereferenceObject(processContext);
+    }
+
+    if (buffer && (buffer != stackBuffer))
+    {
+        KphFree(buffer, KPH_TAG_OBJECT_QUERY);
+    }
+
+    if (object)
+    {
+        ObDereferenceObject(object);
+    }
+
+    if (process)
+    {
+        ObDereferenceObject(process);
+    }
+
+    if (dyn)
+    {
+        KphDereferenceObject(dyn);
+    }
 
     if (ReturnLength)
     {
@@ -1123,16 +2143,22 @@ NTSTATUS KpiQueryInformationObject(
 }
 
 /**
- * Sets object information.
+ * \brief Sets object information.
  *
- * \param ProcessHandle A handle to a process.
- * \param Handle A handle which is present in the process referenced by \a ProcessHandle.
- * \param ObjectInformationClass The type of information to set.
- * \param ObjectInformation A buffer which contains the information to set.
- * \param ObjectInformationLength The number of bytes present in \a ObjectInformation.
- * \param AccessMode The mode in which to perform access checks.
+ * \param[in] ProcessHandle A handle to a process.
+ * \param[in] Handle A handle which is present in the process referenced by
+ * \a ProcessHandle.
+ * \param[in] ObjectInformationClass The type of information to set.
+ * \param[in] ObjectInformation A buffer which contains the information to set.
+ * \param[in] ObjectInformationLength The number of bytes present in \a
+ * ObjectInformation.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
  */
-NTSTATUS KpiSetInformationObject(
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphSetInformationObject(
     _In_ HANDLE ProcessHandle,
     _In_ HANDLE Handle,
     _In_ KPH_OBJECT_INFORMATION_CLASS ObjectInformationClass,
@@ -1142,46 +2168,78 @@ NTSTATUS KpiSetInformationObject(
     )
 {
     NTSTATUS status;
+    PVOID objectInformation;
+    BYTE stackBuffer[64];
     PEPROCESS process;
     KAPC_STATE apcState;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
+
+    objectInformation = NULL;
+    process = NULL;
+
+    if (!ObjectInformation)
+    {
+        status = STATUS_INVALID_PARAMETER_4;
+        goto Exit;
+    }
 
     if (AccessMode != KernelMode)
     {
-        ULONG alignment;
-
-        switch (ObjectInformationClass)
+        if (ObjectInformationLength <= ARRAYSIZE(stackBuffer))
         {
-        case KphObjectHandleFlagInformation:
-            alignment = sizeof(BOOLEAN);
-            break;
-        default:
-            alignment = sizeof(ULONG);
-            break;
+            RtlZeroMemory(stackBuffer, ARRAYSIZE(stackBuffer));
+            objectInformation = stackBuffer;
+        }
+        else
+        {
+            objectInformation = KphAllocatePaged(ObjectInformationLength,
+                                                 KPH_TAG_OBJECT_INFO);
+            if (!objectInformation)
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "Failed to allocate object info buffer.");
+
+                status = STATUS_INSUFFICIENT_RESOURCES;
+                goto Exit;
+            }
         }
 
         __try
         {
-            ProbeForRead(ObjectInformation, ObjectInformationLength, alignment);
+            ProbeInputBytes(ObjectInformation, ObjectInformationLength);
+            RtlCopyVolatileMemory(objectInformation,
+                                  ObjectInformation,
+                                  ObjectInformationLength);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            return GetExceptionCode();
+            status = GetExceptionCode();
+            goto Exit;
         }
     }
+    else
+    {
+        objectInformation = ObjectInformation;
+    }
 
-    status = ObReferenceObjectByHandle(
-        ProcessHandle,
-        0,
-        *PsProcessType,
-        AccessMode,
-        &process,
-        NULL
-        );
-
+    status = ObReferenceObjectByHandle(ProcessHandle,
+                                       PROCESS_SET_INFORMATION,
+                                       *PsProcessType,
+                                       AccessMode,
+                                       &process,
+                                       NULL);
     if (!NT_SUCCESS(status))
-        return status;
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed: %!STATUS!",
+                      status);
+
+        process = NULL;
+        goto Exit;
+    }
 
     if (process == PsInitialSystemProcess)
     {
@@ -1191,51 +2249,64 @@ NTSTATUS KpiSetInformationObject(
     {
         if (IsKernelHandle(Handle))
         {
-            ObDereferenceObject(process);
-            return STATUS_INVALID_HANDLE;
+            status = STATUS_INVALID_HANDLE;
+            goto Exit;
         }
     }
 
     switch (ObjectInformationClass)
     {
-    case KphObjectHandleFlagInformation:
+        case KphObjectHandleFlagInformation:
         {
-            OBJECT_HANDLE_FLAG_INFORMATION handleFlagInfo;
-
-            if (ObjectInformationLength == sizeof(OBJECT_HANDLE_FLAG_INFORMATION))
-            {
-                __try
-                {
-                    handleFlagInfo = *(POBJECT_HANDLE_FLAG_INFORMATION)ObjectInformation;
-                }
-                __except (EXCEPTION_EXECUTE_HANDLER)
-                {
-                    status = GetExceptionCode();
-                }
-            }
-            else
+            if (ObjectInformationLength < sizeof(OBJECT_HANDLE_FLAG_INFORMATION))
             {
                 status = STATUS_INFO_LENGTH_MISMATCH;
+                goto Exit;
             }
 
-            if (NT_SUCCESS(status))
-            {
-                KeStackAttachProcess(process, &apcState);
-                status = ObSetHandleAttributes(Handle, &handleFlagInfo, KernelMode);
-                KeUnstackDetachProcess(&apcState);
-            }
+            KeStackAttachProcess(process, &apcState);
+            status = ObSetHandleAttributes(Handle, objectInformation, KernelMode);
+            KeUnstackDetachProcess(&apcState);
+
+            break;
         }
-        break;
-    default:
-        status = STATUS_INVALID_INFO_CLASS;
-        break;
+        default:
+        {
+            status = STATUS_INVALID_INFO_CLASS;
+            break;
+        }
     }
 
-    ObDereferenceObject(process);
+Exit:
+
+    if (objectInformation &&
+        (objectInformation != ObjectInformation) &&
+        (objectInformation != stackBuffer))
+    {
+        KphFree(objectInformation, KPH_TAG_OBJECT_QUERY);
+    }
+
+    if (process)
+    {
+        ObDereferenceObject(process);
+    }
 
     return status;
 }
 
+/**
+ * \brief Opens a named object.
+ *
+ * \param[out] ObjectHandle Set to the opened handle.
+ * \param[in] DesiredAccess Desires access to the object.
+ * \param[in] ObjectAttributes Attributes to open the object.
+ * \param[in] ObjectType Type of object to open.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
 NTSTATUS KphOpenNamedObject(
     _Out_ PHANDLE ObjectHandle,
     _In_ ACCESS_MASK DesiredAccess,
@@ -1247,20 +2318,39 @@ NTSTATUS KphOpenNamedObject(
     NTSTATUS status;
     HANDLE objectHandle;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
 
-    // Open the object.
-    status = ObOpenObjectByName(
-        ObjectAttributes,
-        ObjectType,
-        AccessMode,
-        NULL,
-        DesiredAccess,
-        NULL,
-        &objectHandle
-        );
+    if (AccessMode != KernelMode)
+    {
+        __try
+        {
+            ProbeOutputType(ObjectHandle, HANDLE);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            status = GetExceptionCode();
+            goto Exit;
+        }
+    }
 
-    // Pass the handle back.
+    status = ObOpenObjectByName(ObjectAttributes,
+                                ObjectType,
+                                AccessMode,
+                                NULL,
+                                DesiredAccess,
+                                NULL,
+                                &objectHandle);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObOpenObjectByName failed: %!STATUS!",
+                      status);
+
+        objectHandle = NULL;
+        goto Exit;
+    }
+
     if (AccessMode != KernelMode)
     {
         __try
@@ -1275,6 +2365,292 @@ NTSTATUS KphOpenNamedObject(
     else
     {
         *ObjectHandle = objectHandle;
+    }
+
+Exit:
+
+    return status;
+}
+
+/**
+ * \brief Duplicates an object.
+ *
+ * \param[in] ProcessHandle Handle to process where the source handle exists.
+ * \param[in] SourceHandle Source handle in the target process.
+ * \param[in] DesiredAccess Desired access for duplicated handle.
+ * \param[out] TargetHandle Populated with the duplicated handle.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphDuplicateObject(
+    _In_ HANDLE ProcessHandle,
+    _In_ HANDLE SourceHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _Out_ PHANDLE TargetHandle,
+    _In_ KPROCESSOR_MODE AccessMode
+    )
+{
+    NTSTATUS status;
+    PEPROCESS sourceProcess;
+    PEPROCESS targetProcess;
+    HANDLE targetHandle;
+
+    PAGED_CODE_PASSIVE();
+
+    targetProcess = NULL;
+    sourceProcess = NULL;
+
+    if (DesiredAccess & ~(READ_CONTROL | ACCESS_SYSTEM_SECURITY | SYNCHRONIZE))
+    {
+        status = STATUS_ACCESS_DENIED;
+        goto Exit;
+    }
+
+    if (!TargetHandle)
+    {
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
+    if (AccessMode != KernelMode)
+    {
+        __try
+        {
+            ProbeOutputType(TargetHandle, HANDLE);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            status = GetExceptionCode();
+            goto Exit;
+        }
+    }
+
+    status = ObReferenceObjectByHandle(ProcessHandle,
+                                       0,
+                                       *PsProcessType,
+                                       AccessMode,
+                                       &sourceProcess,
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed %!STATUS!",
+                      status);
+
+        sourceProcess = NULL;
+        goto Exit;
+    }
+
+    if (sourceProcess == PsInitialSystemProcess)
+    {
+        SourceHandle = MakeKernelHandle(SourceHandle);
+    }
+    else
+    {
+        if (IsKernelHandle(SourceHandle))
+        {
+            status = STATUS_INVALID_HANDLE;
+            goto Exit;
+        }
+    }
+
+    status = ObReferenceObjectByHandle(ZwCurrentProcess(),
+                                       0,
+                                       *PsProcessType,
+                                       AccessMode,
+                                       &targetProcess,
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed %!STATUS!",
+                      status);
+
+        targetProcess = NULL;
+        goto Exit;
+    }
+
+    status = ObDuplicateObject(sourceProcess,
+                               SourceHandle,
+                               targetProcess,
+                               &targetHandle,
+                               DesiredAccess,
+                               (AccessMode ? 0 : OBJ_KERNEL_HANDLE),
+                               0,
+                               KernelMode);
+    if (NT_SUCCESS(status))
+    {
+        if (AccessMode != KernelMode)
+        {
+            __try
+            {
+                *TargetHandle = targetHandle;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                status = GetExceptionCode();
+                ObCloseHandle(targetHandle, UserMode);
+            }
+        }
+        else
+        {
+            *TargetHandle = targetHandle;
+        }
+    }
+
+Exit:
+
+    if (targetProcess)
+    {
+        ObDereferenceObject(targetProcess);
+    }
+
+    if (sourceProcess)
+    {
+        ObDereferenceObject(sourceProcess);
+    }
+
+    return status;
+}
+
+/**
+ * \brief Checks if two object handles refer to the same object.
+ *
+ * \param[in] FirstObjectHandle First handle to compare with the second.
+ * \param[in] SecondObjectHandle Second handle to compare with the first.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return STATUS_SUCCESS if the object handles refer to the same object,
+ * STATUS_NOT_SAME_OBJECT if the object handles refer to different objects,
+ * and STATUS_INVALID_HANDLE if one of the handles is invalid.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphpCompareObjects(
+    _In_ HANDLE FirstObjectHandle,
+    _In_ HANDLE SecondObjectHandle,
+    _In_ KPROCESSOR_MODE AccessMode
+    )
+{
+    NTSTATUS status;
+    PVOID firstObject;
+    PVOID secondObject;
+
+    PAGED_CODE_PASSIVE();
+
+    status = ObReferenceObjectByHandle(FirstObjectHandle,
+                                       0,
+                                       NULL,
+                                       AccessMode,
+                                       &firstObject,
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed %!STATUS!",
+                      status);
+
+        firstObject = NULL;
+        secondObject = NULL;
+        goto Exit;
+    }
+
+    status = ObReferenceObjectByHandle(SecondObjectHandle,
+                                       0,
+                                       NULL,
+                                       AccessMode,
+                                       &secondObject,
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed %!STATUS!",
+                      status);
+
+        secondObject = NULL;
+        goto Exit;
+    }
+
+    status = (firstObject == secondObject) ?
+        STATUS_SUCCESS : STATUS_NOT_SAME_OBJECT;
+
+Exit:
+
+    if (secondObject)
+    {
+        ObDereferenceObject(secondObject);
+    }
+
+    if (firstObject)
+    {
+        ObDereferenceObject(firstObject);
+    }
+
+    return status;
+}
+
+/**
+ * \brief Checks if two object handles refer to the same object, for a process.
+ *
+ * \param[in] ProcessHandle A handle to a process.
+ * \param[in] FirstObjectHandle First handle to compare with the second.
+ * \param[in] SecondObjectHandle Second handle to compare with the first.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return STATUS_SUCCESS if the object handles refer to the same object,
+ * STATUS_NOT_SAME_OBJECT if the object handles refer to different objects,
+ * and STATUS_INVALID_HANDLE if one of the handles is invalid.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphCompareObjects(
+    _In_ HANDLE ProcessHandle,
+    _In_ HANDLE FirstObjectHandle,
+    _In_ HANDLE SecondObjectHandle,
+    _In_ KPROCESSOR_MODE AccessMode
+    )
+{
+    NTSTATUS status;
+    PEPROCESS process;
+    KAPC_STATE apcState;
+
+    PAGED_CODE_PASSIVE();
+
+    status = ObReferenceObjectByHandle(ProcessHandle,
+                                       0,
+                                       *PsProcessType,
+                                       AccessMode,
+                                       &process,
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed %!STATUS!",
+                      status);
+
+        process = NULL;
+        goto Exit;
+    }
+
+    KeStackAttachProcess(process, &apcState);
+    status = KphpCompareObjects(FirstObjectHandle,
+                                SecondObjectHandle,
+                                AccessMode);
+    KeUnstackDetachProcess(&apcState);
+
+Exit:
+
+    if (process)
+    {
+        ObDereferenceObject(process);
     }
 
     return status;

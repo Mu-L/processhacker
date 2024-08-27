@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010-2015
- *     dmex    2020-2022
+ *     dmex    2020-2023
  *
  */
 
@@ -17,7 +17,6 @@
  */
 
 #include <phapp.h>
-#include <phsettings.h>
 #include <procprv.h>
 #include <thrdprv.h>
 
@@ -62,12 +61,12 @@ VOID PhShowProcessAffinityDialog(
     context.ProcessItem = ProcessItem;
     context.ThreadItem = ThreadItem;
 
-    DialogBoxParam(
+    PhDialogBox(
         PhInstanceHandle,
         MAKEINTRESOURCE(IDD_AFFINITY),
         ParentWindowHandle,
         PhpProcessAffinityDlgProc,
-        (LPARAM)&context
+        &context
         );
 }
 
@@ -84,12 +83,12 @@ BOOLEAN PhShowProcessAffinityDialog2(
     context.ProcessItem = ProcessItem;
     context.ThreadItem = NULL;
 
-    if (DialogBoxParam(
+    if (PhDialogBox(
         PhInstanceHandle,
         MAKEINTRESOURCE(IDD_AFFINITY),
         ParentWindowHandle,
         PhpProcessAffinityDlgProc,
-        (LPARAM)&context
+        &context
         ) == IDOK)
     {
         *NewAffinityMask = context.NewAffinityMask;
@@ -115,23 +114,33 @@ VOID PhShowThreadAffinityDialog(
     context.NumberOfThreads = NumberOfThreads;
     context.ThreadHandles = PhAllocateZero(NumberOfThreads * sizeof(HANDLE));
 
-    // Cache handles to each thread since the ThreadId gets 
+    // Cache handles to each thread since the ThreadId gets
     // reassigned to a different process after the thread exits. (dmex)
     for (ULONG i = 0; i < NumberOfThreads; i++)
     {
-        PhOpenThread(
+        if (!NT_SUCCESS(PhOpenThread(
             &context.ThreadHandles[i],
-            THREAD_QUERY_LIMITED_INFORMATION | THREAD_SET_LIMITED_INFORMATION,
+            THREAD_QUERY_LIMITED_INFORMATION | THREAD_SET_LIMITED_INFORMATION | THREAD_SET_INFORMATION,
             Threads[i]->ThreadId
-            );
+            )))
+        {
+            if (!NT_SUCCESS(PhOpenThread(
+                &context.ThreadHandles[i],
+                THREAD_QUERY_LIMITED_INFORMATION | THREAD_SET_LIMITED_INFORMATION,
+                Threads[i]->ThreadId
+                )))
+            {
+                context.ThreadHandles[i] = INVALID_HANDLE_VALUE;
+            }
+        }
     }
 
-    DialogBoxParam(
+    PhDialogBox(
         PhInstanceHandle,
         MAKEINTRESOURCE(IDD_AFFINITY),
         ParentWindowHandle,
         PhpProcessAffinityDlgProc,
-        (LPARAM)&context
+        &context
         );
 }
 
@@ -182,15 +191,11 @@ VOID PhpShowThreadErrorAffinityList(
 
     for (ULONG i = 0; i < AffinityErrorsList->Count; i++)
     {
-        PPH_STRING statusMessage = AffinityErrorsList->Items[i];
-
         PhAppendFormatStringBuilder(
             &stringBuilder,
             L"%s\n",
-            PhGetStringOrDefault(statusMessage, L"An unknown error occurred.")
+            PhGetStringOrDefault(AffinityErrorsList->Items[i], L"An unknown error occurred.")
             );
-
-        PhDereferenceObject(statusMessage);
     }
 
     if (PhEndsWithStringRef2(&stringBuilder.String->sr, L"\n", FALSE))
@@ -217,14 +222,17 @@ BOOLEAN PhpCheckThreadsHaveSameAffinity(
     KAFFINITY lastAffinityMask = 0;
     KAFFINITY affinityMask = 0;
 
-    if (NT_SUCCESS(PhGetThreadGroupAffinity(Context->ThreadHandles[0], &groupAffinity)))
+    if (Context->ThreadHandles[0] != INVALID_HANDLE_VALUE)
     {
-        lastAffinityMask = groupAffinity.Mask;
+        if (NT_SUCCESS(PhGetThreadGroupAffinity(Context->ThreadHandles[0], &groupAffinity)))
+        {
+            lastAffinityMask = groupAffinity.Mask;
+        }
     }
 
     for (ULONG i = 0; i < Context->NumberOfThreads; i++)
     {
-        if (!Context->ThreadHandles[i])
+        if (Context->ThreadHandles[i] == INVALID_HANDLE_VALUE)
             continue;
 
         if (NT_SUCCESS(PhGetThreadGroupAffinity(Context->ThreadHandles[i], &groupAffinity)))
@@ -311,23 +319,6 @@ INT_PTR CALLBACK PhpProcessAffinityDlgProc(
                 {
                     status = PhGetProcessGroupAffinity(processHandle, &processGroupAffinity);
 
-                    if (status == STATUS_INVALID_PARAMETER || status == STATUS_INVALID_INFO_CLASS) // GH#1299: Required for Windows 7 (dmex)
-                    {
-                        status = PhGetProcessAffinityMask(processHandle, &processGroupAffinity.Mask);
-                    }
-
-                    if (status == STATUS_INVALID_PARAMETER || status == STATUS_INVALID_INFO_CLASS) // Required for multi-group processes (dmex)
-                    {
-                        PROCESS_BASIC_INFORMATION basicInfo;
-
-                        status = PhGetProcessBasicInformation(processHandle, &basicInfo);
-
-                        if (NT_SUCCESS(status))
-                        {
-                            processGroupAffinity.Mask = basicInfo.AffinityMask;
-                        }
-                    }
-
                     if (NT_SUCCESS(status))
                     {
                         context->AffinityMask = processGroupAffinity.Mask;
@@ -412,16 +403,28 @@ INT_PTR CALLBACK PhpProcessAffinityDlgProc(
 
                 differentAffinity = !PhpCheckThreadsHaveSameAffinity(context);
 
-                // Use affinity from the first thread when all threads are identical (dmex)
-                status = PhGetThreadGroupAffinity(
-                    context->ThreadHandles[0],
-                    &groupAffinity
-                    );
+                if (context->ThreadHandles[0] != INVALID_HANDLE_VALUE)
+                {
+                    // Use affinity from the first thread when all threads are identical (dmex)
+                    status = PhGetThreadGroupAffinity(
+                        context->ThreadHandles[0],
+                        &groupAffinity
+                        );
+                }
+                else
+                {
+                    status = STATUS_UNSUCCESSFUL;
+                }
 
                 if (NT_SUCCESS(status))
                 {
                     context->AffinityMask = groupAffinity.Mask;
                     context->AffinityGroup = groupAffinity.Group;
+
+                    if (context->GroupComboHandle)
+                    {
+                        ComboBox_SetCurSel(context->GroupComboHandle, groupAffinity.Group);
+                    }
 
                     if (NT_SUCCESS(PhGetThreadBasicInformation(
                         context->ThreadHandles[0],
@@ -449,35 +452,20 @@ INT_PTR CALLBACK PhpProcessAffinityDlgProc(
 
             if (NT_SUCCESS(status) && context->SystemAffinityMask == 0)
             {
+                KAFFINITY systemAffinityMask;
+
                 if (PhSystemProcessorInformation.SingleProcessorGroup)
                 {
-                    SYSTEM_BASIC_INFORMATION systemBasicInfo;
-
-                    status = NtQuerySystemInformation(
-                        SystemBasicInformation,
-                        &systemBasicInfo,
-                        sizeof(SYSTEM_BASIC_INFORMATION),
-                        NULL
-                        );
-
-                    if (NT_SUCCESS(status))
-                    {
-                        context->SystemAffinityMask = systemBasicInfo.ActiveProcessorsAffinityMask;
-                    }
+                    status = PhGetProcessorSystemAffinityMask(&systemAffinityMask);
                 }
                 else
                 {
-                    KAFFINITY activeProcessorsAffinityMask;
+                    status = PhGetProcessorGroupActiveAffinityMask(context->AffinityGroup, &systemAffinityMask);
+                }
 
-                    status = PhGetProcessorGroupActiveAffinityMask(
-                        context->AffinityGroup,
-                        &activeProcessorsAffinityMask
-                        );
-
-                    if (NT_SUCCESS(status))
-                    {
-                        context->SystemAffinityMask = activeProcessorsAffinityMask;
-                    }
+                if (NT_SUCCESS(status))
+                {
+                    context->SystemAffinityMask = systemAffinityMask;
                 }
             }
 
@@ -520,7 +508,7 @@ INT_PTR CALLBACK PhpProcessAffinityDlgProc(
             {
                 for (ULONG i = 0; i < context->NumberOfThreads; i++)
                 {
-                    if (context->ThreadHandles[i])
+                    if (context->ThreadHandles[i] != INVALID_HANDLE_VALUE)
                     {
                         NtClose(context->ThreadHandles[i]);
                         context->ThreadHandles[i] = NULL;
@@ -549,15 +537,17 @@ INT_PTR CALLBACK PhpProcessAffinityDlgProc(
                     for (ULONG i = 0; i < MAXIMUM_PROC_PER_GROUP; i++)
                     {
                         if (Button_GetCheck(context->CpuControlList->Items[i]) == BST_CHECKED)
-                            affinityMask |= (KAFFINITY)1 << i;
+                            affinityMask |= AFFINITY_MASK(i);
                     }
 
                     if (context->GroupComboHandle)
                     {
-                        affinityGroup = ComboBox_GetCurSel(context->GroupComboHandle);
+                         INT affinityGroupSelection = ComboBox_GetCurSel(context->GroupComboHandle);
 
-                        if (affinityGroup == CB_ERR)
-                            affinityGroup = context->AffinityGroup;
+                         if (affinityGroupSelection == CB_ERR)
+                             affinityGroup = context->AffinityGroup;
+                         else
+                             affinityGroup = (USHORT)affinityGroupSelection;
                     }
 
                     if (context->ProcessItem)
@@ -599,19 +589,38 @@ INT_PTR CALLBACK PhpProcessAffinityDlgProc(
                     }
                     else if (context->ThreadItem)
                     {
-                        HANDLE threadHandle;
-
-                        if (NT_SUCCESS(status = PhOpenThread(
-                            &threadHandle,
-                            THREAD_SET_LIMITED_INFORMATION,
-                            context->ThreadItem->ThreadId
-                            )))
+                        if (PhSystemProcessorInformation.SingleProcessorGroup)
                         {
-                            if (PhSystemProcessorInformation.SingleProcessorGroup)
+                            HANDLE threadHandle;
+
+                            status = PhOpenThread(
+                                &threadHandle,
+                                THREAD_SET_LIMITED_INFORMATION,
+                                context->ThreadItem->ThreadId
+                                );
+
+                            if (NT_SUCCESS(status))
                             {
                                 status = PhSetThreadAffinityMask(threadHandle, affinityMask);
+                                NtClose(threadHandle);
                             }
-                            else
+
+                            if (!NT_SUCCESS(status))
+                            {
+                                PhpShowThreadErrorAffinity(hwndDlg, context->ThreadItem, status, 0);
+                            }
+                        }
+                        else
+                        {
+                            HANDLE threadHandle;
+
+                            status = PhOpenThread(
+                                &threadHandle,
+                                THREAD_SET_INFORMATION,
+                                context->ThreadItem->ThreadId
+                                );
+
+                            if (NT_SUCCESS(status))
                             {
                                 GROUP_AFFINITY groupAffinity;
 
@@ -620,9 +629,8 @@ INT_PTR CALLBACK PhpProcessAffinityDlgProc(
                                 groupAffinity.Mask = affinityMask;
 
                                 status = PhSetThreadGroupAffinity(threadHandle, groupAffinity);
+                                NtClose(threadHandle);
                             }
-
-                            NtClose(threadHandle);
 
                             if (!NT_SUCCESS(status))
                             {
@@ -636,7 +644,7 @@ INT_PTR CALLBACK PhpProcessAffinityDlgProc(
 
                         for (ULONG i = 0; i < context->NumberOfThreads; i++)
                         {
-                            if (!context->ThreadHandles[i])
+                            if (context->ThreadHandles[i] == INVALID_HANDLE_VALUE)
                                 continue;
 
                             if (PhSystemProcessorInformation.SingleProcessorGroup)
@@ -822,7 +830,7 @@ NTSTATUS PhSetProcessItemIoPriority(
 // Note: Workaround for UserNotes plugin dialog overrides (dmex)
 NTSTATUS PhSetProcessItemPriority(
     _In_ PPH_PROCESS_ITEM ProcessItem,
-    _In_ PROCESS_PRIORITY_CLASS PriorityClass
+    _In_ UCHAR PriorityClass
     )
 {
     NTSTATUS status;
@@ -861,6 +869,47 @@ NTSTATUS PhSetProcessItemPriorityBoost(
     if (NT_SUCCESS(status))
     {
         status = PhSetProcessPriorityBoost(processHandle, PriorityBoost);
+        NtClose(processHandle);
+    }
+
+    return status;
+}
+
+// Note: Workaround for UserNotes plugin dialog overrides (dmex)
+NTSTATUS PhSetProcessItemThrottlingState(
+    _In_ PPH_PROCESS_ITEM ProcessItem,
+    _In_ BOOLEAN ThrottlingState
+    )
+{
+    NTSTATUS status;
+    HANDLE processHandle;
+
+    status = PhOpenProcess(
+        &processHandle,
+        PROCESS_SET_INFORMATION,
+        ProcessItem->ProcessId
+        );
+
+    if (NT_SUCCESS(status))
+    {
+        if (ThrottlingState)
+        {
+            PhSetProcessPriority(processHandle, PROCESS_PRIORITY_CLASS_NORMAL);
+
+            status = PhSetProcessPowerThrottlingState(processHandle, 0, 0);
+        }
+        else
+        {
+            // Taskmgr sets the process priority to idle before enabling 'Eco mode'. (dmex)
+            PhSetProcessPriority(processHandle, PROCESS_PRIORITY_CLASS_IDLE);
+
+            status = PhSetProcessPowerThrottlingState(
+                processHandle,
+                POWER_THROTTLING_PROCESS_EXECUTION_SPEED,
+                POWER_THROTTLING_PROCESS_EXECUTION_SPEED
+                );
+        }
+
         NtClose(processHandle);
     }
 

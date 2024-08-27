@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010
- *     dmex    2021-2022
+ *     dmex    2021-2023
  *
  */
 
@@ -29,15 +29,15 @@ VOID FileLogInitialization(
     NTSTATUS status;
     PPH_STRING fileName;
 
-    fileName = PhaGetStringSetting(SETTING_NAME_LOG_FILENAME);
+    fileName = PhGetStringSetting(SETTING_NAME_LOG_FILENAME);
 
     if (!PhIsNullOrEmptyString(fileName))
     {
-        fileName = PH_AUTO(PhExpandEnvironmentStrings(&fileName->sr));
+        PhMoveReference(&fileName, PhExpandEnvironmentStrings(&fileName->sr));
 
-        if (PhDetermineDosPathNameType(PhGetString(fileName)) == RtlPathTypeRelative)
+        if (PhDetermineDosPathNameType(&fileName->sr) == RtlPathTypeRelative)
         {
-            fileName = PH_AUTO(PhGetApplicationDirectoryFileNameWin32(&fileName->sr));
+            PhMoveReference(&fileName, PhGetApplicationDirectoryFileName(&fileName->sr, FALSE));
         }
 
         status = PhCreateFileStream(
@@ -59,6 +59,8 @@ VOID FileLogInitialization(
                 );
         }
     }
+
+    PhClearReference(&fileName);
 }
 
 VOID NTAPI LoggedCallback(

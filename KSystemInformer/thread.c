@@ -6,76 +6,43 @@
  * Authors:
  *
  *     wj32    2010-2016
+ *     jxy-s   2022-2024
  *
  */
 
 #include <kph.h>
-#include <dyndata.h>
 
-typedef struct _CAPTURE_BACKTRACE_THREAD_CONTEXT
-{
-    BOOLEAN Local;
-    KAPC Apc;
-    KEVENT CompletedEvent;
-    ULONG FramesToSkip;
-    ULONG FramesToCapture;
-    PVOID *BackTrace;
-    ULONG CapturedFrames;
-    ULONG BackTraceHash;
-    ULONG Flags;
-} CAPTURE_BACKTRACE_THREAD_CONTEXT, *PCAPTURE_BACKTRACE_THREAD_CONTEXT;
+#include <trace.h>
 
-KKERNEL_ROUTINE KphpCaptureStackBackTraceThreadSpecialApc;
-
-VOID KphpCaptureStackBackTraceThreadSpecialApc(
-    _In_ PRKAPC Apc,
-    _Inout_opt_ PKNORMAL_ROUTINE *NormalRoutine,
-    _Inout_opt_ PVOID *NormalContext,
-    _Inout_ PVOID *SystemArgument1,
-    _Inout_ PVOID *SystemArgument2
-    );
-
-#ifdef ALLOC_PRAGMA
-#pragma alloc_text(PAGE, KpiOpenThread)
-#pragma alloc_text(PAGE, KpiOpenThreadProcess)
-#pragma alloc_text(PAGE, KphCaptureStackBackTraceThread)
-#pragma alloc_text(PAGE, KphpCaptureStackBackTraceThreadSpecialApc)
-#pragma alloc_text(PAGE, KpiCaptureStackBackTraceThread)
-#pragma alloc_text(PAGE, KpiQueryInformationThread)
-#pragma alloc_text(PAGE, KpiSetInformationThread)
-#endif
+PAGED_FILE();
 
 /**
- * Opens a thread.
+ * \brief Opens a thread.
  *
- * \param ThreadHandle A variable which receives the thread handle.
- * \param DesiredAccess The desired access to the thread.
- * \param ClientId The identifier of a thread. \a UniqueThread must be present. If \a UniqueProcess
- * is present, the process of the referenced thread will be checked against this identifier.
- * \param Key An access key.
- * \li If a L2 key is provided, no access checks are performed.
- * \li If a L1 key is provided, only read access is permitted but no additional access checks are
- * performed.
- * \li If no valid key is provided, the function fails.
- * \param Client The client that initiated the request.
- * \param AccessMode The mode in which to perform access checks.
+ * \param[out] ThreadHandle A variable which receives the thread handle.
+ * \param[in] DesiredAccess The desired access to the thread.
+ * \param[in] ClientId The identifier of a thread. \a UniqueThread must be
+ * present. If \a UniqueProcess is present, the process of the referenced
+ * thread will be checked against this identifier.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
  */
-NTSTATUS KpiOpenThread(
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphOpenThread(
     _Out_ PHANDLE ThreadHandle,
     _In_ ACCESS_MASK DesiredAccess,
     _In_ PCLIENT_ID ClientId,
-    _In_opt_ KPH_KEY Key,
-    _In_ PKPH_CLIENT Client,
     _In_ KPROCESSOR_MODE AccessMode
     )
 {
     NTSTATUS status;
     CLIENT_ID clientId;
     PETHREAD thread;
-    KPH_KEY_LEVEL requiredKeyLevel;
     HANDLE threadHandle = NULL;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
 
     thread = NULL;
 
@@ -83,9 +50,9 @@ NTSTATUS KpiOpenThread(
     {
         __try
         {
-            ProbeForWrite(ThreadHandle, sizeof(HANDLE), sizeof(HANDLE));
-            ProbeForRead(ClientId, sizeof(CLIENT_ID), sizeof(ULONG));
-            clientId = *ClientId;
+            ProbeOutputType(ThreadHandle, HANDLE);
+            ProbeInputType(ClientId, CLIENT_ID);
+            RtlCopyVolatileMemory(&clientId, ClientId, sizeof(CLIENT_ID));
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -97,84 +64,93 @@ NTSTATUS KpiOpenThread(
         clientId = *ClientId;
     }
 
+    //
     // Use the process ID if it was specified.
+    //
     if (clientId.UniqueProcess)
     {
         status = PsLookupProcessThreadByCid(&clientId, NULL, &thread);
+        if (!NT_SUCCESS(status))
+        {
+            KphTracePrint(TRACE_LEVEL_VERBOSE,
+                          GENERAL,
+                          "PsLookupProcessThreadByCid failed: %!STATUS!",
+                          status);
+
+            thread = NULL;
+            goto Exit;
+        }
     }
     else
     {
         status = PsLookupThreadByThreadId(clientId.UniqueThread, &thread);
-    }
+        if (!NT_SUCCESS(status))
+        {
+            KphTracePrint(TRACE_LEVEL_VERBOSE,
+                          GENERAL,
+                          "PsLookupThreadByThreadId failed: %!STATUS!",
+                          status);
 
-    if (!NT_SUCCESS(status))
-    {
-        thread = NULL;
-        goto CleanupExit;
+            thread = NULL;
+            goto Exit;
+        }
     }
-
-    requiredKeyLevel = KphKeyLevel1;
 
     if ((DesiredAccess & KPH_THREAD_READ_ACCESS) != DesiredAccess)
     {
-        requiredKeyLevel = KphKeyLevel2;
-
-        status = KphDominationCheck(
-            Client,
-            PsGetCurrentProcess(),
-            PsGetThreadProcess(thread),
-            AccessMode
-            );
-
+        status = KphDominationCheck(PsGetCurrentProcess(),
+                                    PsGetThreadProcess(thread),
+                                    AccessMode);
         if (!NT_SUCCESS(status))
-            goto CleanupExit;
+        {
+            KphTracePrint(TRACE_LEVEL_VERBOSE,
+                          GENERAL,
+                          "KphDominationCheck failed: %!STATUS!",
+                          status);
 
-        status = KphVerifyCaller(
-            Client,
-            PsGetCurrentThread(),
-            AccessMode
-            );
-
-        if (!NT_SUCCESS(status))
-            goto CleanupExit;
+            goto Exit;
+        }
     }
 
-    status = KphValidateKey(requiredKeyLevel, Key, Client, AccessMode);
-
-    if (!NT_SUCCESS(status))
-        goto CleanupExit;
-
+    //
     // Always open in KernelMode to skip access checks.
-    status = ObOpenObjectByPointer(
-        thread,
-        0,
-        NULL,
-        DesiredAccess,
-        *PsThreadType,
-        KernelMode,
-        &threadHandle
-        );
-
-    if (NT_SUCCESS(status))
+    //
+    status = ObOpenObjectByPointer(thread,
+                                   (AccessMode ? 0 : OBJ_KERNEL_HANDLE),
+                                   NULL,
+                                   DesiredAccess,
+                                   *PsThreadType,
+                                   KernelMode,
+                                   &threadHandle);
+    if (!NT_SUCCESS(status))
     {
-        if (AccessMode != KernelMode)
-        {
-            __try
-            {
-                *ThreadHandle = threadHandle;
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                status = GetExceptionCode();
-            }
-        }
-        else
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObOpenObjectByPointer failed: %!STATUS!",
+                      status);
+
+        threadHandle = NULL;
+        goto Exit;
+    }
+
+    if (AccessMode != KernelMode)
+    {
+        __try
         {
             *ThreadHandle = threadHandle;
         }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            ObCloseHandle(threadHandle, UserMode);
+            status = GetExceptionCode();
+        }
+    }
+    else
+    {
+        *ThreadHandle = threadHandle;
     }
 
-CleanupExit:
+Exit:
     if (thread)
     {
         ObDereferenceObject(thread);
@@ -184,34 +160,29 @@ CleanupExit:
 }
 
 /**
- * Opens the process of a thread.
+ * \brief Opens the process of a thread.
  *
- * \param ThreadHandle A handle to a thread.
- * \param DesiredAccess The desired access to the process.
- * \param ProcessHandle A variable which receives the process handle.
- * \param Key An access key.
- * \li If a L2 key is provided, no access checks are performed.
- * \li If a L1 key is provided, only read access is permitted but no additional access checks are
- * performed.
- * \li If no valid key is provided, the function fails.
- * \param Client The client that initiated the request.
- * \param AccessMode The mode in which to perform access checks.
+ * \param[in] ThreadHandle A handle to a thread.
+ * \param[in] DesiredAccess The desired access to the process.
+ * \param[out] ProcessHandle A variable which receives the process handle.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
  */
-NTSTATUS KpiOpenThreadProcess(
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphOpenThreadProcess(
     _In_ HANDLE ThreadHandle,
     _In_ ACCESS_MASK DesiredAccess,
     _Out_ PHANDLE ProcessHandle,
-    _In_opt_ KPH_KEY Key,
-    _In_ PKPH_CLIENT Client,
     _In_ KPROCESSOR_MODE AccessMode
     )
 {
     NTSTATUS status;
     PETHREAD thread;
-    KPH_KEY_LEVEL requiredKeyLevel;
     HANDLE processHandle;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
 
     thread = NULL;
 
@@ -219,7 +190,7 @@ NTSTATUS KpiOpenThreadProcess(
     {
         __try
         {
-            ProbeForWrite(ProcessHandle, sizeof(HANDLE), sizeof(HANDLE));
+            ProbeOutputType(ProcessHandle, HANDLE);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -227,83 +198,78 @@ NTSTATUS KpiOpenThreadProcess(
         }
     }
 
-    requiredKeyLevel = KphKeyLevel1;
+    status = ObReferenceObjectByHandle(ThreadHandle,
+                                       0,
+                                       *PsThreadType,
+                                       AccessMode,
+                                       &thread,
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed: %!STATUS!",
+                      status);
+
+        thread = NULL;
+        goto Exit;
+    }
 
     if ((DesiredAccess & KPH_PROCESS_READ_ACCESS) != DesiredAccess)
     {
-        requiredKeyLevel = KphKeyLevel2;
-
-        status = KphDominationCheck(
-            Client,
-            PsGetCurrentProcess(),
-            PsGetThreadProcess(thread),
-            AccessMode
-            );
-
+        status = KphDominationCheck(PsGetCurrentProcess(),
+                                    PsGetThreadProcess(thread),
+                                    AccessMode);
         if (!NT_SUCCESS(status))
-            goto CleanupExit;
-
-        status = KphVerifyCaller(
-            Client,
-            PsGetCurrentThread(),
-            AccessMode
-            );
-
-        if (!NT_SUCCESS(status))
-            goto CleanupExit;
-    }
-
-    status = KphValidateKey(requiredKeyLevel, Key, Client, AccessMode);
-
-    if (!NT_SUCCESS(status))
-        goto CleanupExit;
-
-    status = ObReferenceObjectByHandle(
-        ThreadHandle,
-        0,
-        *PsThreadType,
-        AccessMode,
-        &thread,
-        NULL
-        );
-
-    if (!NT_SUCCESS(status))
-    {
-        thread = NULL;
-        goto CleanupExit;
-    }
-    
-    // Note: Windows 7 and Windows 8 require KernelMode (dmex)
-    status = ObOpenObjectByPointer(
-        PsGetThreadProcess(thread),
-        0,
-        NULL,
-        DesiredAccess,
-        *PsProcessType,
-        KernelMode,
-        &processHandle
-        );
-
-    if (NT_SUCCESS(status))
-    {
-        if (AccessMode != KernelMode)
         {
-            __try
-            {
-                *ProcessHandle = processHandle;
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                status = GetExceptionCode();
-            }
+            KphTracePrint(TRACE_LEVEL_VERBOSE,
+                          GENERAL,
+                          "KphDominationCheck failed: %!STATUS!",
+                          status);
+
+            goto Exit;
         }
-        else
+    }
+
+    //
+    // Always open in KernelMode to skip access checks.
+    //
+    status = ObOpenObjectByPointer(PsGetThreadProcess(thread),
+                                   (AccessMode ? 0 : OBJ_KERNEL_HANDLE),
+                                   NULL,
+                                   DesiredAccess,
+                                   *PsProcessType,
+                                   KernelMode,
+                                   &processHandle);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObOpenObjectByPointer failed: %!STATUS!",
+                      status);
+
+        processHandle = NULL;
+        goto Exit;
+    }
+
+    if (AccessMode != KernelMode)
+    {
+        __try
         {
             *ProcessHandle = processHandle;
         }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            ObCloseHandle(processHandle, UserMode);
+            status = GetExceptionCode();
+        }
+    }
+    else
+    {
+        *ProcessHandle = processHandle;
     }
 
-CleanupExit:
+Exit:
     if (thread)
     {
         ObDereferenceObject(thread);
@@ -313,412 +279,617 @@ CleanupExit:
 }
 
 /**
- * Captures a stack trace of the current thread.
+ * \brief Captures the stack trace of a thread.
  *
- * \param FramesToSkip The number of frames to skip from the bottom of the stack.
- * \param FramesToCapture The number of frames to capture.
- * \param Flags A combination of the following:
- * \li \c KPH_STACK_TRACE_CAPTURE_USER_STACK The user-mode stack will be
- * included in the back trace.
- * \param BackTrace An array in which the stack trace will be stored.
- * \param BackTraceHash A variable which receives a hash of the stack trace.
+ * \param[in] ThreadHandle A handle to the thread to capture the stack trace of.
+ * \param[in] FramesToSkip The number of kernel frames to skip.
+ * \param[in] FramesToCapture The number of frames to capture.
+ * \param[out] BackTrace Buffer to store the back trace in.
+ * \param[out] CapturedFrames Receives the number of captured frames.
+ * \param[out] BackTraceHash Optionally receives a hash of the back trace.
+ * \param[in] Flags A combination of KPH_STACK_BACK_TRACE_* flags.
+ * \param[in] Timeout Optionally specifies a timeout for the capture operation.
  *
- * \return The number of frames captured.
+ * \return STATUS_SUCCES, STATUS_TIMEOUT, or errant status.
  */
-_Success_(return != 0)
-ULONG KphCaptureStackBackTrace(
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphCaptureStackBackTraceThreadByHandle(
+    _In_ HANDLE ThreadHandle,
     _In_ ULONG FramesToSkip,
     _In_ ULONG FramesToCapture,
-    _In_opt_ ULONG Flags,
-    _Out_writes_(FramesToCapture) PVOID *BackTrace,
-    _Out_opt_ PULONG BackTraceHash
-    )
-{
-    PVOID backTrace[MAX_STACK_DEPTH];
-    ULONG framesFound;
-    ULONG hash;
-    ULONG i;
-
-    // Skip the current frame (for this function).
-    FramesToSkip++;
-
-    // Ensure that we won't overrun the buffer.
-    if (FramesToCapture + FramesToSkip > MAX_STACK_DEPTH)
-        return 0;
-
-    // Walk the stack.
-    framesFound = RtlWalkFrameChain(
-        backTrace,
-        FramesToCapture + FramesToSkip,
-        0 
-        );
-
-    if (FlagOn(Flags, KPH_STACK_TRACE_CAPTURE_USER_STACK))
-    {
-        framesFound += RtlWalkFrameChain(
-            &backTrace[framesFound],
-            (FramesToCapture + FramesToSkip) - framesFound,
-            RTL_WALK_USER_MODE_STACK
-            );
-    }
-
-    // Return nothing if we found fewer frames than we wanted to skip.
-    if (framesFound <= FramesToSkip)
-        return 0;
-
-    // Copy over the stack trace. At the same time we calculate the stack trace hash by summing the
-    // addresses.
-    for (i = 0, hash = 0; i < FramesToCapture; i++)
-    {
-        if (FramesToSkip + i >= framesFound)
-            break;
-
-        BackTrace[i] = backTrace[FramesToSkip + i];
-        hash += PtrToUlong(BackTrace[i]);
-    }
-
-    if (BackTraceHash)
-        *BackTraceHash = hash;
-
-    return i;
-}
-
-/**
- * Captures the stack trace of a thread.
- *
- * \param Thread The thread to capture the stack trace of.
- * \param FramesToSkip The number of frames to skip from the bottom of the stack.
- * \param FramesToCapture The number of frames to capture.
- * \param BackTrace An array in which the stack trace will be stored.
- * \param CapturedFrames A variable which receives the number of frames captured.
- * \param BackTraceHash A variable which receives a hash of the stack trace.
- * \param AccessMode The mode in which to perform access checks.
- * \param Flags A combination of the following:
- * \li \c KPH_STACK_TRACE_CAPTURE_USER_STACK The user-mode stack will be
- * included in the back trace.
- *
- * \return The number of frames captured.
- */
-NTSTATUS KphCaptureStackBackTraceThread(
-    _In_ PETHREAD Thread,
-    _In_ ULONG FramesToSkip,
-    _In_ ULONG FramesToCapture,
-    _Out_writes_(FramesToCapture) PVOID *BackTrace,
-    _Out_opt_ PULONG CapturedFrames,
+    _Out_writes_(FramesToCapture) PVOID* BackTrace,
+    _Out_ PULONG CapturedFrames,
     _Out_opt_ PULONG BackTraceHash,
-    _In_ KPROCESSOR_MODE AccessMode,
-    _In_ ULONG Flags
+    _In_ ULONG Flags,
+    _In_opt_ PLARGE_INTEGER Timeout,
+    _In_ KPROCESSOR_MODE AccessMode
     )
 {
     NTSTATUS status = STATUS_SUCCESS;
-    CAPTURE_BACKTRACE_THREAD_CONTEXT context;
-    ULONG backTraceSize;
-    PVOID *backTrace;
+    PETHREAD thread;
+    PVOID backTrace;
+    ULONG capturedFrames;
+    ULONG backTraceHash;
+    LARGE_INTEGER timeout;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
 
-    // Make sure the caller didn't request too many frames. This also restricts the amount of memory
-    // we will try to allocate later.
-    if (FramesToCapture > MAX_STACK_DEPTH)
-        return STATUS_INVALID_PARAMETER_3;
+    backTrace = NULL;
+    thread = NULL;
+    backTraceHash = 0;
 
-    backTraceSize = FramesToCapture * sizeof(PVOID);
+    if (!CapturedFrames)
+    {
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
 
     if (AccessMode != KernelMode)
     {
         __try
         {
-            ProbeForWrite(BackTrace, backTraceSize, sizeof(PVOID));
+            ProbeOutputBytes(BackTrace, FramesToCapture * sizeof(PVOID));
 
-            if (CapturedFrames)
-                ProbeForWrite(CapturedFrames, sizeof(ULONG), sizeof(ULONG));
+            ProbeOutputType(CapturedFrames, ULONG);
+            *CapturedFrames = 0;
+
             if (BackTraceHash)
-                ProbeForWrite(BackTraceHash, sizeof(ULONG), sizeof(ULONG));
+            {
+                ProbeOutputType(BackTraceHash, ULONG);
+                *BackTraceHash = 0;
+            }
+
+            if (Timeout)
+            {
+                ProbeInputType(Timeout, LARGE_INTEGER);
+                RtlCopyVolatileMemory(&timeout, Timeout, sizeof(LARGE_INTEGER));
+            }
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            return GetExceptionCode();
+            status = GetExceptionCode();
+            goto Exit;
         }
-    }
 
-    // If the caller doesn't want to capture anything, return immediately.
-    if (backTraceSize == 0)
-    {
-        if (AccessMode != KernelMode)
+        backTrace = KphAllocatePaged(FramesToCapture * sizeof(PVOID),
+                                     KPH_TAG_THREAD_BACK_TRACE);
+        if (!backTrace)
         {
-            __try
-            {
-                if (CapturedFrames)
-                    *CapturedFrames = 0;
-                if (BackTraceHash)
-                    *BackTraceHash = 0;
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                status = GetExceptionCode();
-            }
+            KphTracePrint(TRACE_LEVEL_VERBOSE,
+                          GENERAL,
+                          "Failed to allocate back trace buffer.");
+
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Exit;
         }
-        else
-        {
-            if (CapturedFrames)
-                *CapturedFrames = 0;
-            if (BackTraceHash)
-                *BackTraceHash = 0;
-        }
-
-        return status;
-    }
-
-    // Allocate storage for the stack trace.
-    backTrace = ExAllocatePoolZero(NonPagedPool, backTraceSize, 'bhpK');
-
-    if (!backTrace)
-        return STATUS_INSUFFICIENT_RESOURCES;
-
-    // Initialize the context structure.
-    context.FramesToSkip = FramesToSkip;
-    context.FramesToCapture = FramesToCapture;
-    context.BackTrace = backTrace;
-    context.Flags = Flags;
-
-    // Check if we're trying to get a stack trace of the current thread.
-    // If so, we don't need to insert an APC.
-    if (Thread == PsGetCurrentThread())
-    {
-        PCAPTURE_BACKTRACE_THREAD_CONTEXT contextPtr = &context;
-        PVOID dummy = NULL;
-        KIRQL oldIrql;
-
-        // Raise the IRQL to APC_LEVEL to simulate an APC environment,
-        // and call the APC routine directly.
-
-        context.Local = TRUE;
-        KeRaiseIrql(APC_LEVEL, &oldIrql);
-        KphpCaptureStackBackTraceThreadSpecialApc(
-            &context.Apc,
-            NULL,
-            NULL,
-            &contextPtr,
-            &dummy
-            );
-        KeLowerIrql(oldIrql);
     }
     else
     {
-        context.Local = FALSE;
-        KeInitializeEvent(&context.CompletedEvent, NotificationEvent, FALSE);
-        KeInitializeApc(
-            &context.Apc,
-            (PKTHREAD)Thread,
-            OriginalApcEnvironment,
-            KphpCaptureStackBackTraceThreadSpecialApc,
-            NULL,
-            NULL,
-            KernelMode,
-            NULL
-            );
+        *CapturedFrames = 0;
 
-        if (KeInsertQueueApc(&context.Apc, &context, NULL, 2))
+        if (BackTraceHash)
         {
-            // Wait for the APC to complete.
-            status = KeWaitForSingleObject(
-                &context.CompletedEvent,
-                Executive,
-                KernelMode,
-                FALSE,
-                NULL
-                );
+            *BackTraceHash = 0;
         }
-        else
+
+        if (Timeout)
         {
-            status = STATUS_UNSUCCESSFUL;
+            timeout.QuadPart = Timeout->QuadPart;
         }
+
+        backTrace = BackTrace;
     }
 
-    if (NT_SUCCESS(status))
-    {
-        ASSERT(context.CapturedFrames <= FramesToCapture);
-
-        if (AccessMode != KernelMode)
-        {
-            __try
-            {
-                memcpy(BackTrace, backTrace, context.CapturedFrames * sizeof(PVOID));
-
-                if (CapturedFrames)
-                    *CapturedFrames = context.CapturedFrames;
-                if (BackTraceHash)
-                    *BackTraceHash = context.BackTraceHash;
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                status = GetExceptionCode();
-            }
-        }
-        else
-        {
-            memcpy(BackTrace, backTrace, context.CapturedFrames * sizeof(PVOID));
-
-            if (CapturedFrames)
-                *CapturedFrames = context.CapturedFrames;
-            if (BackTraceHash)
-                *BackTraceHash = context.BackTraceHash;
-        }
-    }
-
-    ExFreePoolWithTag(backTrace, 'bhpK');
-
-    return status;
-}
-
-VOID KphpCaptureStackBackTraceThreadSpecialApc(
-    _In_ PRKAPC Apc,
-    _Inout_opt_ PKNORMAL_ROUTINE *NormalRoutine,
-    _Inout_opt_ PVOID *NormalContext,
-    _Inout_ PVOID *SystemArgument1,
-    _Inout_ PVOID *SystemArgument2
-    )
-{
-    PCAPTURE_BACKTRACE_THREAD_CONTEXT context = *SystemArgument1;
-
-    PAGED_CODE();
-
-    context->CapturedFrames = KphCaptureStackBackTrace(
-        context->FramesToSkip,
-        context->FramesToCapture,
-        context->Flags,
-        context->BackTrace,
-        &context->BackTraceHash
-        );
-
-    if (!context->Local)
-    {
-        // Notify the originating thread that we have completed.
-        KeSetEvent(&context->CompletedEvent, 0, FALSE);
-    }
-}
-
-/**
- * Captures the stack trace of a thread.
- *
- * \param ThreadHandle A handle to the thread to capture the stack trace of.
- * \param FramesToSkip The number of frames to skip from the bottom of the stack.
- * \param FramesToCapture The number of frames to capture.
- * \param BackTrace An array in which the stack trace will be stored.
- * \param CapturedFrames A variable which receives the number of frames captured.
- * \param BackTraceHash A variable which receives a hash of the stack trace.
- * \param AccessMode The mode in which to perform access checks.
- * \param Flags A combination of the following:
- * \li \c KPH_STACK_TRACE_CAPTURE_USER_STACK The user-mode stack will be
- * included in the back trace.
- *
- * \return The number of frames captured.
- */
-NTSTATUS KpiCaptureStackBackTraceThread(
-    _In_ HANDLE ThreadHandle,
-    _In_ ULONG FramesToSkip,
-    _In_ ULONG FramesToCapture,
-    _Out_writes_(FramesToCapture) PVOID *BackTrace,
-    _Out_opt_ PULONG CapturedFrames,
-    _Out_opt_ PULONG BackTraceHash,
-    _In_ KPROCESSOR_MODE AccessMode,
-    _In_ ULONG Flags
-    )
-{
-    NTSTATUS status = STATUS_SUCCESS;
-    PETHREAD thread;
-
-    PAGED_CODE();
-
-    status = ObReferenceObjectByHandle(
-        ThreadHandle,
-        0,
-        *PsThreadType,
-        AccessMode,
-        &thread,
-        NULL
-        );
-
+    status = ObReferenceObjectByHandle(ThreadHandle,
+                                       0,
+                                       *PsThreadType,
+                                       AccessMode,
+                                       &thread,
+                                       NULL);
     if (!NT_SUCCESS(status))
-        return status;
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed: %!STATUS!",
+                      status);
 
-    status = KphCaptureStackBackTraceThread(
-        thread,
-        FramesToSkip,
-        FramesToCapture,
-        BackTrace,
-        CapturedFrames,
-        BackTraceHash,
-        AccessMode,
-        Flags
-        );
-    ObDereferenceObject(thread);
+        thread = NULL;
+        goto Exit;
+    }
+
+    status = KphCaptureStackBackTraceThread(thread,
+                                            FramesToSkip,
+                                            FramesToCapture,
+                                            backTrace,
+                                            &capturedFrames,
+                                            (BackTraceHash ? &backTraceHash : NULL),
+                                            Flags,
+                                            (Timeout ? &timeout : NULL));
+    if (!NT_SUCCESS(status) || (status == STATUS_TIMEOUT))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "KphCaptureStackBackTraceThread failed: %!STATUS!",
+                      status);
+
+        goto Exit;
+    }
+
+    if (AccessMode != KernelMode)
+    {
+        __try
+        {
+            RtlCopyMemory(BackTrace, backTrace, capturedFrames * sizeof(PVOID));
+
+            *CapturedFrames = capturedFrames;
+
+            if (BackTraceHash)
+            {
+                *BackTraceHash = backTraceHash;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            status = GetExceptionCode();
+        }
+    }
+    else
+    {
+        *CapturedFrames = capturedFrames;
+
+        if (BackTraceHash)
+        {
+            *BackTraceHash = backTraceHash;
+        }
+    }
+
+Exit:
+
+    if (backTrace && (backTrace != BackTrace))
+    {
+        KphFree(backTrace, KPH_TAG_THREAD_BACK_TRACE);
+    }
+
+    if (thread)
+    {
+        ObDereferenceObject(thread);
+    }
 
     return status;
 }
 
 /**
- * Queries thread information.
+ * \brief Sets information about a thread.
  *
- * \param ThreadHandle A handle to a thread.
- * \param ThreadInformationClass The type of information to query.
- * \param ThreadInformation The buffer in which the information will be stored.
- * \param ThreadInformationLength The number of bytes available in \a ThreadInformation.
- * \param ReturnLength A variable which receives the number of bytes required to be available in
- * \a ThreadInformation.
- * \param AccessMode The mode in which to perform access checks.
+ * \param[in] ThreadHandle Handle to thread to set information for.
+ * \param[in] ThreadInformationClass Information class to set.
+ * \param[in] ThreadInformation Information to set.
+ * \param[in] ThreadInformationLength Length of the thread information buffer.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
  */
-NTSTATUS KpiQueryInformationThread(
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphSetInformationThread(
     _In_ HANDLE ThreadHandle,
     _In_ KPH_THREAD_INFORMATION_CLASS ThreadInformationClass,
-    _Out_writes_bytes_(ThreadInformationLength) PVOID ThreadInformation,
+    _In_reads_bytes_(ThreadInformationLength) PVOID ThreadInformation,
+    _In_ ULONG ThreadInformationLength,
+    _In_ KPROCESSOR_MODE AccessMode
+    )
+{
+    NTSTATUS status;
+    PVOID threadInformation;
+    BYTE stackBuffer[64];
+    PETHREAD thread;
+    HANDLE threadHandle;
+    THREADINFOCLASS threadInformationClass;
+
+    PAGED_CODE_PASSIVE();
+
+    threadInformation = NULL;
+    thread = NULL;
+    threadHandle = NULL;
+
+    if (!ThreadInformation)
+    {
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
+    if (AccessMode != KernelMode)
+    {
+        if (ThreadInformationLength <= ARRAYSIZE(stackBuffer))
+        {
+            RtlZeroMemory(stackBuffer, ARRAYSIZE(stackBuffer));
+            threadInformation = stackBuffer;
+        }
+        else
+        {
+            threadInformation = KphAllocatePaged(ThreadInformationLength,
+                                                 KPH_TAG_THREAD_INFO);
+            if (!threadInformation)
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "Failed to allocate thread info buffer.");
+
+                status = STATUS_INSUFFICIENT_RESOURCES;
+                goto Exit;
+            }
+        }
+
+        __try
+        {
+            ProbeInputBytes(ThreadInformation, ThreadInformationLength);
+            RtlCopyVolatileMemory(threadInformation,
+                                  ThreadInformation,
+                                  ThreadInformationLength);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            status = GetExceptionCode();
+            goto Exit;
+        }
+    }
+    else
+    {
+        threadInformation = ThreadInformation;
+    }
+
+    status = ObReferenceObjectByHandle(ThreadHandle,
+                                       0,
+                                       *PsThreadType,
+                                       AccessMode,
+                                       &thread,
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed: %!STATUS!",
+                      status);
+
+        thread = NULL;
+        goto Exit;
+    }
+
+    status = KphDominationCheck(PsGetCurrentProcess(),
+                                PsGetThreadProcess(thread),
+                                AccessMode);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "KphDominationCheck failed: %!STATUS!",
+                      status);
+
+        goto Exit;
+    }
+
+    status = ObOpenObjectByPointer(thread,
+                                   OBJ_KERNEL_HANDLE,
+                                   NULL,
+                                   THREAD_SET_INFORMATION,
+                                   *PsThreadType,
+                                   KernelMode,
+                                   &threadHandle);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObOpenObjectByPointer failed: %!STATUS!",
+                      status);
+
+        threadHandle = NULL;
+        goto Exit;
+    }
+
+    switch (ThreadInformationClass)
+    {
+        case KphThreadPriority:
+        {
+            threadInformationClass = ThreadPriority;
+            break;
+        }
+        case KphThreadBasePriority:
+        {
+            threadInformationClass = ThreadBasePriority;
+            break;
+        }
+        case KphThreadAffinityMask:
+        {
+            threadInformationClass = ThreadAffinityMask;
+            break;
+        }
+        case KphThreadIdealProcessor:
+        {
+            threadInformationClass = ThreadIdealProcessor;
+            break;
+        }
+        case KphThreadPriorityBoost:
+        {
+            threadInformationClass = ThreadPriorityBoost;
+            break;
+        }
+        case KphThreadIoPriority:
+        {
+            threadInformationClass = ThreadIoPriority;
+            break;
+        }
+        case KphThreadPagePriority:
+        {
+            threadInformationClass = ThreadPagePriority;
+            break;
+        }
+        case KphThreadActualBasePriority:
+        {
+            threadInformationClass = ThreadActualBasePriority;
+            break;
+        }
+        case KphThreadGroupInformation:
+        {
+            threadInformationClass = ThreadGroupInformation;
+            break;
+        }
+        case KphThreadIdealProcessorEx:
+        {
+            threadInformationClass = ThreadIdealProcessorEx;
+            break;
+        }
+        case KphThreadActualGroupAffinity:
+        {
+            threadInformationClass = ThreadActualGroupAffinity;
+            break;
+        }
+        case KphThreadPowerThrottlingState:
+        {
+            threadInformationClass = ThreadPowerThrottlingState;
+            break;
+        }
+        case KphThreadExplicitCaseSensitivity:
+        {
+            threadInformationClass = ThreadExplicitCaseSensitivity;
+            break;
+        }
+        default:
+        {
+            status = STATUS_INVALID_INFO_CLASS;
+            goto Exit;
+        }
+    }
+
+    status = ZwSetInformationThread(threadHandle,
+                                    threadInformationClass,
+                                    threadInformation,
+                                    ThreadInformationLength);
+
+Exit:
+
+    if (threadHandle)
+    {
+        ObCloseHandle(threadHandle, KernelMode);
+    }
+
+    if (thread)
+    {
+        ObDereferenceObject(thread);
+    }
+
+    if (threadInformation &&
+        (threadInformation != ThreadInformation) &&
+        (threadInformation != stackBuffer))
+    {
+        KphFree(threadInformation, KPH_TAG_THREAD_INFO);
+    }
+
+    return status;
+}
+
+/**
+ * \brief Queries thread information.
+ *
+ * \param[in] ThreadHandle Handle to thread to query information of.
+ * \param[in] ThreadInformationClass Information class to query.
+ * \param[out] ThreadInformation Populated with thread information by class.
+ * \param[in] ThreadInformationLength Length of the thread information buffer.
+ * \param[out] ReturnLength Number of bytes written or necessary for the
+ * information.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphQueryInformationThread(
+    _In_ HANDLE ThreadHandle,
+    _In_ KPH_THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _Out_writes_bytes_opt_(ThreadInformationLength) PVOID ThreadInformation,
     _In_ ULONG ThreadInformationLength,
     _Out_opt_ PULONG ReturnLength,
     _In_ KPROCESSOR_MODE AccessMode
     )
 {
     NTSTATUS status;
-    PETHREAD thread;
+    PKPH_DYN dyn;
+    PETHREAD threadObject;
+    PKPH_THREAD_CONTEXT thread;
     ULONG returnLength;
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
+
+    dyn = NULL;
+    threadObject = NULL;
+    thread = NULL;
+    returnLength = 0;
 
     if (AccessMode != KernelMode)
     {
         __try
         {
-            ProbeForWrite(ThreadInformation, ThreadInformationLength, sizeof(ULONG));
+            if (ThreadInformation)
+            {
+                ProbeOutputBytes(ThreadInformation, ThreadInformationLength);
+            }
 
             if (ReturnLength)
-                ProbeForWrite(ReturnLength, sizeof(ULONG), sizeof(ULONG));
+            {
+                ProbeOutputType(ReturnLength, ULONG);
+            }
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            return GetExceptionCode();
+            status = GetExceptionCode();
+            goto Exit;
         }
     }
 
-    status = ObReferenceObjectByHandle(
-        ThreadHandle,
-        THREAD_QUERY_INFORMATION,
-        *PsThreadType,
-        AccessMode,
-        &thread,
-        NULL
-        );
-
+    status = ObReferenceObjectByHandle(ThreadHandle,
+                                       0,
+                                       *PsThreadType,
+                                       AccessMode,
+                                       &threadObject,
+                                       NULL);
     if (!NT_SUCCESS(status))
-        return status;
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed: %!STATUS!",
+                      status);
+
+        threadObject = NULL;
+        goto Exit;
+    }
+
+    thread = KphGetEThreadContext(threadObject);
+    if (!thread)
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "KphGetThreadContext returned null.");
+
+        status = STATUS_OBJECTID_NOT_FOUND;
+        goto Exit;
+    }
 
     switch (ThreadInformationClass)
     {
-    default:
-        status = STATUS_INVALID_INFO_CLASS;
-        returnLength = 0;
-        break;
+        case KphThreadIoCounters:
+        {
+            PIO_COUNTERS counters;
+            PULONGLONG value;
+
+            dyn = KphReferenceDynData();
+
+            if (!dyn ||
+                (dyn->KtReadOperationCount == ULONG_MAX) ||
+                (dyn->KtWriteOperationCount == ULONG_MAX) ||
+                (dyn->KtOtherOperationCount == ULONG_MAX) ||
+                (dyn->KtReadTransferCount == ULONG_MAX) ||
+                (dyn->KtWriteTransferCount == ULONG_MAX) ||
+                (dyn->KtOtherTransferCount == ULONG_MAX))
+            {
+                status = STATUS_NOINTERFACE;
+                goto Exit;
+            }
+
+            if (!ThreadInformation ||
+                (ThreadInformationLength < sizeof(IO_COUNTERS)))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(IO_COUNTERS);
+                goto Exit;
+            }
+
+            counters = ThreadInformation;
+
+            __try
+            {
+                value = Add2Ptr(threadObject, dyn->KtReadOperationCount);
+                counters->ReadOperationCount = *value;
+
+                value = Add2Ptr(threadObject, dyn->KtWriteOperationCount);
+                counters->WriteOperationCount = *value;
+
+                value = Add2Ptr(threadObject, dyn->KtOtherOperationCount);
+                counters->OtherOperationCount = *value;
+
+                value = Add2Ptr(threadObject, dyn->KtReadTransferCount);
+                counters->ReadTransferCount = *value;
+
+                value = Add2Ptr(threadObject, dyn->KtWriteTransferCount);
+                counters->WriteTransferCount = *value;
+
+                value = Add2Ptr(threadObject, dyn->KtOtherTransferCount);
+                counters->OtherTransferCount = *value;
+
+                returnLength = sizeof(IO_COUNTERS);
+                status = STATUS_SUCCESS;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                status = GetExceptionCode();
+                goto Exit;
+            }
+
+            break;
+        }
+        case KphThreadWSLThreadId:
+        {
+            ULONG threadId;
+
+            if (thread->SubsystemType != SubsystemInformationTypeWSL)
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "Invalid subsystem for WSL thread ID query.");
+
+                status = STATUS_INVALID_HANDLE;
+                goto Exit;
+            }
+
+            if (!ThreadInformation ||
+                (ThreadInformationLength < sizeof(ULONG)))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                returnLength = sizeof(ULONG);
+                goto Exit;
+            }
+
+            status = KphQueryInformationThreadContext(thread,
+                                                      KphThreadContextWSLThreadId,
+                                                      &threadId,
+                                                      sizeof(threadId),
+                                                      NULL);
+            if (!NT_SUCCESS(status))
+            {
+                goto Exit;
+            }
+
+            __try
+            {
+                *(PULONG)ThreadInformation = threadId;
+                returnLength = sizeof(ULONG);
+                status = STATUS_SUCCESS;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                status = GetExceptionCode();
+                goto Exit;
+            }
+
+            break;
+        }
+        default:
+        {
+            status = STATUS_INVALID_INFO_CLASS;
+            break;
+        }
     }
 
-    ObDereferenceObject(thread);
+Exit:
 
     if (ReturnLength)
     {
@@ -739,63 +910,20 @@ NTSTATUS KpiQueryInformationThread(
         }
     }
 
-    return status;
-}
-
-/**
- * Sets thread information.
- *
- * \param ThreadHandle A handle to a thread.
- * \param ThreadInformationClass The type of information to set.
- * \param ThreadInformation A buffer which contains the information to set.
- * \param ThreadInformationLength The number of bytes present in \a ThreadInformation.
- * \param AccessMode The mode in which to perform access checks.
- */
-NTSTATUS KpiSetInformationThread(
-    _In_ HANDLE ThreadHandle,
-    _In_ KPH_THREAD_INFORMATION_CLASS ThreadInformationClass,
-    _In_reads_bytes_(ThreadInformationLength) PVOID ThreadInformation,
-    _In_ ULONG ThreadInformationLength,
-    _In_ KPROCESSOR_MODE AccessMode
-    )
-{
-    NTSTATUS status;
-    PETHREAD thread;
-
-    PAGED_CODE();
-
-    if (AccessMode != KernelMode)
+    if (thread)
     {
-        __try
-        {
-            ProbeForRead(ThreadInformation, ThreadInformationLength, sizeof(ULONG));
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            return GetExceptionCode();
-        }
+        KphDereferenceObject(thread);
     }
 
-    status = ObReferenceObjectByHandle(
-        ThreadHandle,
-        THREAD_SET_INFORMATION,
-        *PsThreadType,
-        AccessMode,
-        &thread,
-        NULL
-        );
-
-    if (!NT_SUCCESS(status))
-        return status;
-
-    switch (ThreadInformationClass)
+    if (threadObject)
     {
-    default:
-        status = STATUS_INVALID_INFO_CLASS;
-        break;
+        ObDereferenceObject(threadObject);
     }
 
-    ObDereferenceObject(thread);
+    if (dyn)
+    {
+        KphDereferenceObject(dyn);
+    }
 
     return status;
 }

@@ -15,9 +15,6 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="devctrl.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="dyndata.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -48,6 +45,96 @@
     <ClCompile Include="verify.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="informer_file.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="comms.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="informer_image.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="informer_process.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="informer_thread.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="informer_debug.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="comms_handlers.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="hash.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="informer_object.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="alloc.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="cid_table.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="kphobject.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="cid_tracking.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="protection.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="alpc.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="system.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="file.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="knowndll.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="socket.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="back_trace.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="download.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="http.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="parameters.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="informer_fileop.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="informer_filenc.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="informer.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="informer_registry.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="session_token.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="lsa.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="imgcoherency.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="resource.rc">
@@ -55,13 +142,25 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\dyndata.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="include\kph.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\ntfill.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\comms.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\informer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\trace.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\pooltags.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\informer_filep.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010-2013
- *     dmex    2018-2022
+ *     dmex    2018-2024
  *
  */
 
@@ -14,10 +14,12 @@
 #include <hndlprv.h>
 #include <phplug.h>
 #include <phsettings.h>
+#include <kphuser.h>
 
 #include <emenu.h>
 #include <settings.h>
 #include <hndlinfo.h>
+#include <procprv.h>
 #include <secedit.h>
 
 typedef enum _PHP_HANDLE_GENERAL_CATEGORY
@@ -50,6 +52,7 @@ typedef enum _PHP_HANDLE_GENERAL_INDEX
     PH_HANDLE_GENERAL_INDEX_PAGED,
     PH_HANDLE_GENERAL_INDEX_NONPAGED,
 
+    PH_HANDLE_GENERAL_INDEX_FLAGS,
     PH_HANDLE_GENERAL_INDEX_SEQUENCENUMBER,
     PH_HANDLE_GENERAL_INDEX_PORTCONTEXT,
 
@@ -57,6 +60,9 @@ typedef enum _PHP_HANDLE_GENERAL_INDEX
     PH_HANDLE_GENERAL_INDEX_FILEMODE,
     PH_HANDLE_GENERAL_INDEX_FILEPOSITION,
     PH_HANDLE_GENERAL_INDEX_FILESIZE,
+    PH_HANDLE_GENERAL_INDEX_FILEPRIORITY,
+    PH_HANDLE_GENERAL_INDEX_FILEDRIVER,
+    PH_HANDLE_GENERAL_INDEX_FILEDRIVERIMAGE,
 
     PH_HANDLE_GENERAL_INDEX_SECTIONTYPE,
     PH_HANDLE_GENERAL_INDEX_SECTIONFILE,
@@ -65,6 +71,10 @@ typedef enum _PHP_HANDLE_GENERAL_INDEX
     PH_HANDLE_GENERAL_INDEX_MUTANTCOUNT,
     PH_HANDLE_GENERAL_INDEX_MUTANTABANDONED,
     PH_HANDLE_GENERAL_INDEX_MUTANTOWNER,
+
+    PH_HANDLE_GENERAL_INDEX_ALPCCONNECTION,
+    PH_HANDLE_GENERAL_INDEX_ALPCSERVER,
+    PH_HANDLE_GENERAL_INDEX_ALPCCLIENT,
 
     PH_HANDLE_GENERAL_INDEX_PROCESSTHREADNAME,
     PH_HANDLE_GENERAL_INDEX_PROCESSTHREADCREATETIME,
@@ -84,14 +94,14 @@ typedef struct _HANDLE_PROPERTIES_CONTEXT
     HANDLE ProcessId;
     PPH_HANDLE_ITEM HandleItem;
     PH_LAYOUT_MANAGER LayoutManager;
-    ULONG ListViewRowCache[PH_HANDLE_GENERAL_INDEX_MAXIMUM];
+    INT ListViewRowCache[PH_HANDLE_GENERAL_INDEX_MAXIMUM];
 } HANDLE_PROPERTIES_CONTEXT, *PHANDLE_PROPERTIES_CONTEXT;
 
 #define PH_FILEMODE_ASYNC 0x01000000
 #define PhFileModeUpdAsyncFlag(mode) \
-    (mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT) ? mode &~ PH_FILEMODE_ASYNC: mode | PH_FILEMODE_ASYNC)
+    ((mode) & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT) ? (mode) &~ PH_FILEMODE_ASYNC: (mode) | PH_FILEMODE_ASYNC)
 
-PH_ACCESS_ENTRY FileModeAccessEntries[6] = 
+CONST PH_ACCESS_ENTRY FileModeAccessEntries[6] =
 {
     { L"FILE_FLAG_OVERLAPPED", PH_FILEMODE_ASYNC, FALSE, FALSE, L"Asynchronous" },
     { L"FILE_FLAG_WRITE_THROUGH", FILE_WRITE_THROUGH, FALSE, FALSE, L"Write through" },
@@ -111,33 +121,50 @@ INT_PTR CALLBACK PhpHandleGeneralDlgProc(
 static NTSTATUS PhpDuplicateHandleFromProcess(
     _Out_ PHANDLE Handle,
     _In_ ACCESS_MASK DesiredAccess,
-    _In_opt_ PVOID Context
+    _In_ PVOID Context
     )
 {
     PHANDLE_PROPERTIES_CONTEXT context = Context;
     NTSTATUS status;
     HANDLE processHandle;
 
-    if (!context)
-        return STATUS_UNSUCCESSFUL;
+    *Handle = NULL;
 
-    if (!NT_SUCCESS(status = PhOpenProcess(
+    if (NT_SUCCESS(status = PhOpenProcess(
         &processHandle,
         PROCESS_DUP_HANDLE,
         context->ProcessId
         )))
-        return status;
+    {
+        status = NtDuplicateObject(
+            processHandle,
+            context->HandleItem->Handle,
+            NtCurrentProcess(),
+            Handle,
+            DesiredAccess,
+            0,
+            0
+            );
+        NtClose(processHandle);
+    }
 
-    status = NtDuplicateObject(
-        processHandle,
-        context->HandleItem->Handle,
-        NtCurrentProcess(),
-        Handle,
-        DesiredAccess,
-        0,
-        0
-        );
-    NtClose(processHandle);
+    if (!NT_SUCCESS(status) && KsiLevel() >= KphLevelMax)
+    {
+        if (NT_SUCCESS(status = PhOpenProcess(
+            &processHandle,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            context->ProcessId
+            )))
+        {
+            status = KphDuplicateObject(
+                processHandle,
+                context->HandleItem->Handle,
+                DesiredAccess,
+                Handle
+                );
+            NtClose(processHandle);
+        }
+    }
 
     return status;
 }
@@ -234,6 +261,13 @@ NTSTATUS PhpShowHandlePropertiesThread(
             context.ProcessId,
             &context,
             NULL
+            );
+    }
+    else if (PhEqualString2(handleContext->HandleItem->TypeName, L"Section", TRUE))
+    {
+        pages[propSheetHeader.nPages++] = PhCreateMappingsPage(
+            handleContext->ProcessId,
+            handleContext->HandleItem->Handle
             );
     }
 
@@ -364,6 +398,13 @@ VOID PhpUpdateHandleGeneralListViewGroups(
     else if (PhEqualString2(Context->HandleItem->TypeName, L"ALPC Port", TRUE))
     {
         PhAddListViewGroup(Context->ListViewHandle, PH_HANDLE_GENERAL_CATEGORY_ALPC, L"ALPC Port");
+        Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FLAGS] = PhAddListViewGroupItem(
+            Context->ListViewHandle,
+            PH_HANDLE_GENERAL_CATEGORY_ALPC,
+            PH_HANDLE_GENERAL_INDEX_FLAGS,
+            L"Flags",
+            NULL
+            );
         Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_SEQUENCENUMBER] = PhAddListViewGroupItem(
             Context->ListViewHandle,
             PH_HANDLE_GENERAL_CATEGORY_ALPC,
@@ -386,6 +427,33 @@ VOID PhpUpdateHandleGeneralListViewGroups(
                 PH_HANDLE_GENERAL_CATEGORY_ALPC,
                 PH_HANDLE_GENERAL_INDEX_MUTANTOWNER,
                 L"Owner",
+                NULL
+                );
+        }
+
+        if (KsiLevel() >= KphLevelMed)
+        {
+            Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_ALPCCONNECTION] = PhAddListViewGroupItem(
+                Context->ListViewHandle,
+                PH_HANDLE_GENERAL_CATEGORY_ALPC,
+                PH_HANDLE_GENERAL_INDEX_ALPCCONNECTION,
+                L"Connection",
+                NULL
+                );
+
+            Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_ALPCSERVER] = PhAddListViewGroupItem(
+                Context->ListViewHandle,
+                PH_HANDLE_GENERAL_CATEGORY_ALPC,
+                PH_HANDLE_GENERAL_INDEX_ALPCSERVER,
+                L"Server",
+                NULL
+                );
+
+            Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_ALPCCLIENT] = PhAddListViewGroupItem(
+                Context->ListViewHandle,
+                PH_HANDLE_GENERAL_CATEGORY_ALPC,
+                PH_HANDLE_GENERAL_INDEX_ALPCCLIENT,
+                L"Client",
                 NULL
                 );
         }
@@ -440,6 +508,32 @@ VOID PhpUpdateHandleGeneralListViewGroups(
             L"Size",
             NULL
             );
+        Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPRIORITY] = PhAddListViewGroupItem(
+            Context->ListViewHandle,
+            PH_HANDLE_GENERAL_CATEGORY_FILE,
+            PH_HANDLE_GENERAL_INDEX_FILEPRIORITY,
+            L"Priority",
+            NULL
+            );
+
+        if (KsiLevel() >= KphLevelMed)
+        {
+            Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEDRIVER] = PhAddListViewGroupItem(
+                Context->ListViewHandle,
+                PH_HANDLE_GENERAL_CATEGORY_FILE,
+                PH_HANDLE_GENERAL_INDEX_FILEDRIVER,
+                L"Driver",
+                NULL
+                );
+
+            Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEDRIVERIMAGE] = PhAddListViewGroupItem(
+                Context->ListViewHandle,
+                PH_HANDLE_GENERAL_CATEGORY_FILE,
+                PH_HANDLE_GENERAL_INDEX_FILEDRIVERIMAGE,
+                L"Driver Image",
+                NULL
+                );
+        }
     }
     else if (PhEqualStringRef2(&Context->HandleItem->TypeName->sr, L"Section", TRUE))
     {
@@ -568,7 +662,6 @@ VOID PhpUpdateHandleGeneral(
     HANDLE processHandle;
     PPH_ACCESS_ENTRY accessEntries;
     ULONG numberOfAccessEntries;
-    OBJECT_BASIC_INFORMATION basicInfo;
     WCHAR string[PH_INT64_STR_LEN_1];
 
     PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_NAME], 1, PhGetStringOrEmpty(Context->HandleItem->BestObjectName));
@@ -621,10 +714,12 @@ VOID PhpUpdateHandleGeneral(
 
     if (NT_SUCCESS(PhOpenProcess(
         &processHandle,
-        PROCESS_DUP_HANDLE,
+        (KsiLevel() >= KphLevelMed ? PROCESS_QUERY_LIMITED_INFORMATION : PROCESS_DUP_HANDLE),
         Context->ProcessId
         )))
     {
+        OBJECT_BASIC_INFORMATION basicInfo;
+
         if (NT_SUCCESS(PhGetHandleInformation(
             processHandle,
             Context->HandleItem->Handle,
@@ -657,41 +752,111 @@ VOID PhpUpdateHandleGeneral(
     }
     else if (PhEqualString2(Context->HandleItem->TypeName, L"ALPC Port", TRUE))
     {
-#if (PHNT_VERSION >= PHNT_WIN7)
         NTSTATUS status;
-        HANDLE processHandle;
-        HANDLE alpcPortHandle = NULL;
 
-        if (NT_SUCCESS(status = PhOpenProcess(
-            &processHandle,
-            PROCESS_DUP_HANDLE,
-            Context->ProcessId
-            )))
+        if (KsiLevel() >= KphLevelMed && NT_SUCCESS(PhOpenProcess(
+                &processHandle,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                Context->ProcessId
+                )))
         {
-            status = NtDuplicateObject(
+            //
+            // TODO this path doesn't use all the ALPC info returned yet
+            // see: KPH_ALPC_BASIC_INFORMATION.State
+            //
+            KPH_ALPC_BASIC_INFORMATION basicInfo;
+            PKPH_ALPC_COMMUNICATION_NAMES_INFORMATION connectionNames;
+            KPH_ALPC_COMMUNICATION_INFORMATION connectionInfo;
+
+            if (NT_SUCCESS(KphAlpcQueryInformation(
                 processHandle,
                 Context->HandleItem->Handle,
-                NtCurrentProcess(),
-                &alpcPortHandle,
-                READ_CONTROL,
-                0,
-                0
-                );
-            NtClose(processHandle);
-        }
-
-        if (NT_SUCCESS(status) && alpcPortHandle)
-        {
-            ALPC_BASIC_INFORMATION basicInfo;
-
-            if (NT_SUCCESS(NtAlpcQueryInformation(
-                alpcPortHandle,
-                AlpcBasicInformation,
+                KphAlpcBasicInformation,
                 &basicInfo,
-                sizeof(ALPC_BASIC_INFORMATION),
+                sizeof(basicInfo),
                 NULL
                 )))
             {
+                ULONG remainingFlags = basicInfo.Flags;
+                PH_STRING_BUILDER stringBuilder;
+
+                PhInitializeStringBuilder(&stringBuilder, 0x100);
+
+                if (basicInfo.Flags & ALPC_PORFLG_LPC_MODE)
+                {
+                    PhAppendStringBuilder2(&stringBuilder, L"LPC mode, ");
+                    ClearFlag(remainingFlags, ALPC_PORFLG_LPC_MODE);
+                }
+                if (basicInfo.Flags & ALPC_PORFLG_ALLOW_IMPERSONATION)
+                {
+                    PhAppendStringBuilder2(&stringBuilder, L"Allow impersonation, ");
+                    ClearFlag(remainingFlags, ALPC_PORFLG_ALLOW_IMPERSONATION);
+                }
+                if (basicInfo.Flags & ALPC_PORFLG_ALLOW_LPC_REQUESTS)
+                {
+                    PhAppendStringBuilder2(&stringBuilder, L"Allow LPC requests, ");
+                    ClearFlag(remainingFlags, ALPC_PORFLG_ALLOW_LPC_REQUESTS);
+                }
+                if (basicInfo.Flags & ALPC_PORFLG_WAITABLE_PORT)
+                {
+                    PhAppendStringBuilder2(&stringBuilder, L"Waitable, ");
+                    ClearFlag(remainingFlags, ALPC_PORFLG_WAITABLE_PORT);
+                }
+                if (basicInfo.Flags & ALPC_PORFLG_ALLOW_DUP_OBJECT)
+                {
+                    PhAppendStringBuilder2(&stringBuilder, L"Allow object duplication, ");
+                    ClearFlag(remainingFlags, ALPC_PORFLG_ALLOW_DUP_OBJECT);
+                }
+                if (basicInfo.Flags & ALPC_PORFLG_SYSTEM_PROCESS)
+                {
+                    PhAppendStringBuilder2(&stringBuilder, L"System process only, ");
+                    ClearFlag(remainingFlags, ALPC_PORFLG_SYSTEM_PROCESS);
+                }
+                if (basicInfo.Flags & ALPC_PORFLG_WAKE_POLICY1)
+                {
+                    PhAppendStringBuilder2(&stringBuilder, L"Wake policy (1), ");
+                    ClearFlag(remainingFlags, ALPC_PORFLG_WAKE_POLICY1);
+                }
+                if (basicInfo.Flags & ALPC_PORFLG_WAKE_POLICY2)
+                {
+                    PhAppendStringBuilder2(&stringBuilder, L"Wake policy (2), ");
+                    ClearFlag(remainingFlags, ALPC_PORFLG_WAKE_POLICY2);
+                }
+                if (basicInfo.Flags & ALPC_PORFLG_WAKE_POLICY3)
+                {
+                    PhAppendStringBuilder2(&stringBuilder, L"Wake policy (3), ");
+                    ClearFlag(remainingFlags, ALPC_PORFLG_WAKE_POLICY3);
+                }
+                if (basicInfo.Flags & ALPC_PORFLG_DIRECT_MESSAGE)
+                {
+                    PhAppendStringBuilder2(&stringBuilder, L"No shared section (direct), ");
+                    ClearFlag(remainingFlags, ALPC_PORFLG_DIRECT_MESSAGE);
+                }
+                if (basicInfo.Flags & ALPC_PORFLG_ALLOW_MULTIHANDLE_ATTRIBUTE)
+                {
+                    PhAppendStringBuilder2(&stringBuilder, L"Allow multi-handle attributes, ");
+                    ClearFlag(remainingFlags, ALPC_PORFLG_ALLOW_MULTIHANDLE_ATTRIBUTE);
+                }
+                if (PhEndsWithString2(stringBuilder.String, L", ", FALSE))
+                    PhRemoveEndStringBuilder(&stringBuilder, 2);
+
+                if (basicInfo.Flags == 0)
+                    PhAppendStringBuilder2(&stringBuilder, L"None ");
+                else
+                {
+                    PhPrintPointer(string, UlongToPtr(basicInfo.Flags));
+                    PhAppendFormatStringBuilder(&stringBuilder, L" (%s)", string);
+                }
+
+                if (remainingFlags)
+                {
+                    PhPrintPointer(string, UlongToPtr(remainingFlags));
+                    PhAppendFormatStringBuilder(&stringBuilder, L" (UNKNOWN: %s)", string);
+                }
+
+                PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FLAGS], 1, PhFinalStringBuilderString(&stringBuilder)->Buffer);
+                PhDeleteStringBuilder(&stringBuilder);
+
                 PhPrintUInt32(string, basicInfo.SequenceNo);
                 PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_SEQUENCENUMBER], 1, string);
 
@@ -699,33 +864,255 @@ VOID PhpUpdateHandleGeneral(
                 PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PORTCONTEXT], 1, string);
             }
 
-            if (WindowsVersion >= WINDOWS_10_19H2)
+            if (!NT_SUCCESS(KphAlpcQueryComminicationsNamesInfo(
+                processHandle,
+                Context->HandleItem->Handle,
+                &connectionNames)))
             {
-                ALPC_SERVER_SESSION_INFORMATION serverInfo;
+                connectionNames = NULL;
+            }
 
-                if (NT_SUCCESS(NtAlpcQueryInformation(
-                    alpcPortHandle,
-                    AlpcServerSessionInformation,
-                    &serverInfo,
-                    sizeof(ALPC_SERVER_SESSION_INFORMATION),
-                    NULL
-                    )))
+            if (NT_SUCCESS(KphAlpcQueryInformation(
+                processHandle,
+                Context->HandleItem->Handle,
+                KphAlpcCommunicationInformation,
+                &connectionInfo,
+                sizeof(connectionInfo),
+                NULL
+                )))
+            {
+                CLIENT_ID clientId;
+                PPH_STRING name;
+
+                if (connectionInfo.ConnectionPort.OwnerProcessId)
                 {
-                    CLIENT_ID clientId;
-                    PPH_STRING name;
-
-                    clientId.UniqueProcess = UlongToHandle(serverInfo.ProcessId);
+                    clientId.UniqueProcess = connectionInfo.ConnectionPort.OwnerProcessId;
                     clientId.UniqueThread = 0;
 
                     name = PhStdGetClientIdName(&clientId);
-                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_MUTANTOWNER], 1, name->Buffer);
+
+                    if (connectionNames && connectionNames->ConnectionPort.Length > 0)
+                    {
+                        PPH_STRING newName;
+                        PH_FORMAT format[3];
+
+                        PhInitFormatSR(&format[0], name->sr);
+                        PhInitFormatS(&format[1], L" - ");
+                        PhInitFormatUCS(&format[2], &connectionNames->ConnectionPort);
+
+                        newName = PhFormat(format, 3, MAX_PATH);
+                        PhDereferenceObject(name);
+                        name = newName;
+                    }
+
+                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_ALPCCONNECTION], 1, name->Buffer);
                     PhDereferenceObject(name);
                 }
-            }
 
-            NtClose(alpcPortHandle);
+                if (connectionInfo.ServerCommunicationPort.OwnerProcessId)
+                {
+                    clientId.UniqueProcess = connectionInfo.ServerCommunicationPort.OwnerProcessId;
+                    clientId.UniqueThread = 0;
+
+                    name = PhStdGetClientIdName(&clientId);
+
+                    if (connectionNames && connectionNames->ServerCommunicationPort.Length > 0)
+                    {
+                        PPH_STRING newName;
+                        PH_FORMAT format[3];
+
+                        PhInitFormatSR(&format[0], name->sr);
+                        PhInitFormatS(&format[1], L" - ");
+                        PhInitFormatUCS(&format[2], &connectionNames->ServerCommunicationPort);
+
+                        newName = PhFormat(format, 3, MAX_PATH);
+                        PhDereferenceObject(name);
+                        name = newName;
+                    }
+
+                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_ALPCSERVER], 1, name->Buffer);
+                    PhDereferenceObject(name);
+                }
+
+                if (connectionInfo.ClientCommunicationPort.OwnerProcessId)
+                {
+                    clientId.UniqueProcess = connectionInfo.ClientCommunicationPort.OwnerProcessId;
+                    clientId.UniqueThread = 0;
+
+                    name = PhStdGetClientIdName(&clientId);
+
+                    if (connectionNames && connectionNames->ClientCommunicationPort.Length > 0)
+                    {
+                        PPH_STRING newName;
+                        PH_FORMAT format[3];
+
+                        PhInitFormatSR(&format[0], name->sr);
+                        PhInitFormatS(&format[1], L" - ");
+                        PhInitFormatUCS(&format[2], &connectionNames->ClientCommunicationPort);
+
+                        newName = PhFormat(format, 3, MAX_PATH);
+                        PhDereferenceObject(name);
+                        name = newName;
+                    }
+
+                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_ALPCCLIENT], 1, name->Buffer);
+                    PhDereferenceObject(name);
+                }
+
+                if (connectionNames)
+                    PhFree(connectionNames);
+
+                NtClose(processHandle);
+            }
+            else
+            {
+                HANDLE alpcPortHandle = NULL;
+
+                if (NT_SUCCESS(status = PhOpenProcess(
+                    &processHandle,
+                    PROCESS_DUP_HANDLE,
+                    Context->ProcessId
+                    )))
+                {
+                    status = NtDuplicateObject(
+                        processHandle,
+                        Context->HandleItem->Handle,
+                        NtCurrentProcess(),
+                        &alpcPortHandle,
+                        READ_CONTROL,
+                        0,
+                        0
+                        );
+                    NtClose(processHandle);
+                }
+
+                if (NT_SUCCESS(status) && alpcPortHandle)
+                {
+                    ALPC_BASIC_INFORMATION alpcBasicInfo;
+
+                    if (NT_SUCCESS(NtAlpcQueryInformation(
+                        alpcPortHandle,
+                        AlpcBasicInformation,
+                        &alpcBasicInfo,
+                        sizeof(ALPC_BASIC_INFORMATION),
+                        NULL
+                        )))
+                    {
+                        ULONG remainingFlags = alpcBasicInfo.Flags;
+                        PH_STRING_BUILDER stringBuilder;
+
+                        PhInitializeStringBuilder(&stringBuilder, 0x100);
+
+                        if (FlagOn(alpcBasicInfo.Flags, ALPC_PORFLG_LPC_MODE))
+                        {
+                            PhAppendStringBuilder2(&stringBuilder, L"LPC mode, ");
+                            ClearFlag(remainingFlags, ALPC_PORFLG_LPC_MODE);
+                        }
+                        if (FlagOn(alpcBasicInfo.Flags, ALPC_PORFLG_ALLOW_IMPERSONATION))
+                        {
+                            PhAppendStringBuilder2(&stringBuilder, L"Allow impersonation, ");
+                            ClearFlag(remainingFlags, ALPC_PORFLG_ALLOW_IMPERSONATION);
+                        }
+                        if (FlagOn(alpcBasicInfo.Flags, ALPC_PORFLG_ALLOW_LPC_REQUESTS))
+                        {
+                            PhAppendStringBuilder2(&stringBuilder, L"Allow LPC requests, ");
+                            ClearFlag(remainingFlags, ALPC_PORFLG_ALLOW_LPC_REQUESTS);
+                        }
+                        if (FlagOn(alpcBasicInfo.Flags, ALPC_PORFLG_WAITABLE_PORT))
+                        {
+                            PhAppendStringBuilder2(&stringBuilder, L"Waitable, ");
+                            ClearFlag(remainingFlags, ALPC_PORFLG_WAITABLE_PORT);
+                        }
+                        if (FlagOn(alpcBasicInfo.Flags, ALPC_PORFLG_ALLOW_DUP_OBJECT))
+                        {
+                            PhAppendStringBuilder2(&stringBuilder, L"Allow object duplication, ");
+                            ClearFlag(remainingFlags, ALPC_PORFLG_ALLOW_DUP_OBJECT);
+                        }
+                        if (FlagOn(alpcBasicInfo.Flags, ALPC_PORFLG_SYSTEM_PROCESS))
+                        {
+                            PhAppendStringBuilder2(&stringBuilder, L"System process only, ");
+                            ClearFlag(remainingFlags, ALPC_PORFLG_SYSTEM_PROCESS);
+                        }
+                        if (FlagOn(alpcBasicInfo.Flags, ALPC_PORFLG_WAKE_POLICY1))
+                        {
+                            PhAppendStringBuilder2(&stringBuilder, L"Wake policy (1), ");
+                            ClearFlag(remainingFlags, ALPC_PORFLG_WAKE_POLICY1);
+                        }
+                        if (FlagOn(alpcBasicInfo.Flags, ALPC_PORFLG_WAKE_POLICY2))
+                        {
+                            PhAppendStringBuilder2(&stringBuilder, L"Wake policy (2), ");
+                            ClearFlag(remainingFlags, ALPC_PORFLG_WAKE_POLICY2);
+                        }
+                        if (FlagOn(alpcBasicInfo.Flags, ALPC_PORFLG_WAKE_POLICY3))
+                        {
+                            PhAppendStringBuilder2(&stringBuilder, L"Wake policy (3), ");
+                            ClearFlag(remainingFlags, ALPC_PORFLG_WAKE_POLICY3);
+                        }
+                        if (FlagOn(alpcBasicInfo.Flags, ALPC_PORFLG_DIRECT_MESSAGE))
+                        {
+                            PhAppendStringBuilder2(&stringBuilder, L"No shared section (direct), ");
+                            ClearFlag(remainingFlags, ALPC_PORFLG_DIRECT_MESSAGE);
+                        }
+                        if (FlagOn(alpcBasicInfo.Flags, ALPC_PORFLG_ALLOW_MULTIHANDLE_ATTRIBUTE))
+                        {
+                            PhAppendStringBuilder2(&stringBuilder, L"Allow multi-handle attributes, ");
+                            ClearFlag(remainingFlags, ALPC_PORFLG_ALLOW_MULTIHANDLE_ATTRIBUTE);
+                        }
+                        if (PhEndsWithString2(stringBuilder.String, L", ", FALSE))
+                            PhRemoveEndStringBuilder(&stringBuilder, 2);
+
+                        if (basicInfo.Flags == 0)
+                            PhAppendStringBuilder2(&stringBuilder, L"None ");
+                        else
+                        {
+                            PhPrintPointer(string, UlongToPtr(basicInfo.Flags));
+                            PhAppendFormatStringBuilder(&stringBuilder, L" (%s)", string);
+                        }
+
+                        if (remainingFlags)
+                        {
+                            PhPrintPointer(string, UlongToPtr(remainingFlags));
+                            PhAppendFormatStringBuilder(&stringBuilder, L" (UNKNOWN: %s)", string);
+                        }
+
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FLAGS], 1, PhFinalStringBuilderString(&stringBuilder)->Buffer);
+                        PhDeleteStringBuilder(&stringBuilder);
+
+                        PhPrintUInt32(string, basicInfo.SequenceNo);
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_SEQUENCENUMBER], 1, string);
+
+                        PhPrintPointer(string, basicInfo.PortContext);
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PORTCONTEXT], 1, string);
+                    }
+
+                    if (WindowsVersion >= WINDOWS_10_19H2)
+                    {
+                        ALPC_SERVER_SESSION_INFORMATION serverInfo;
+
+                        if (NT_SUCCESS(NtAlpcQueryInformation(
+                            alpcPortHandle,
+                            AlpcServerSessionInformation,
+                            &serverInfo,
+                            sizeof(ALPC_SERVER_SESSION_INFORMATION),
+                            NULL
+                            )))
+                        {
+                            CLIENT_ID clientId;
+                            PPH_STRING name;
+
+                            clientId.UniqueProcess = UlongToHandle(serverInfo.ProcessId);
+                            clientId.UniqueThread = 0;
+
+                            name = PhGetClientIdName(&clientId);
+                            PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_MUTANTOWNER], 1, name->Buffer);
+                            PhDereferenceObject(name);
+                        }
+                    }
+
+                    NtClose(alpcPortHandle);
+                }
+            }
         }
-#endif
     }
     else if (PhEqualString2(Context->HandleItem->TypeName, L"EtwRegistration", TRUE))
     {
@@ -734,56 +1121,40 @@ VOID PhpUpdateHandleGeneral(
     else if (PhEqualString2(Context->HandleItem->TypeName, L"File", TRUE))
     {
         NTSTATUS status;
-        HANDLE processHandle;
-        HANDLE fileHandle = NULL;
 
-        if (NT_SUCCESS(status = PhOpenProcess(
-            &processHandle,
-            PROCESS_DUP_HANDLE,
-            Context->ProcessId
-            )))
+        if (KsiLevel() >= KphLevelMed && NT_SUCCESS(PhOpenProcess(
+                &processHandle,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                Context->ProcessId
+                )))
         {
-            status = NtDuplicateObject(
-                processHandle,
-                Context->HandleItem->Handle,
-                NtCurrentProcess(),
-                &fileHandle,
-                MAXIMUM_ALLOWED,
-                0,
-                0
-                );
-            NtClose(processHandle);
-        }
-
-        if (NT_SUCCESS(status) && fileHandle)
-        {
-            BOOLEAN disableFlushButton = FALSE;
             BOOLEAN isFileOrDirectory = FALSE;
             BOOLEAN isConsoleHandle = FALSE;
-            BOOLEAN isPipeHandle = FALSE;
-            BOOLEAN isNetworkHandle = FALSE;
             FILE_FS_DEVICE_INFORMATION fileDeviceInfo;
             FILE_MODE_INFORMATION fileModeInfo;
             FILE_STANDARD_INFORMATION fileStandardInfo;
             FILE_POSITION_INFORMATION filePositionInfo;
+            FILE_IO_PRIORITY_HINT_INFORMATION_EX priorityInfo;
             IO_STATUS_BLOCK isb;
+            KPH_FILE_OBJECT_DRIVER fileObjectDriver;
 
-            if (NT_SUCCESS(NtQueryVolumeInformationFile(
-                fileHandle,
-                &isb,
+            if (NT_SUCCESS(KphQueryVolumeInformationFile(
+                processHandle,
+                Context->HandleItem->Handle,
+                FileFsDeviceInformation,
                 &fileDeviceInfo,
                 sizeof(FILE_FS_DEVICE_INFORMATION),
-                FileFsDeviceInformation
+                &isb
                 )))
             {
                 switch (fileDeviceInfo.DeviceType)
                 {
                 case FILE_DEVICE_NAMED_PIPE:
-                    isPipeHandle = TRUE;
+                    //isPipeHandle = TRUE;
                     PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILETYPE], 1, L"Pipe");
                     break;
                 case FILE_DEVICE_NETWORK:
-                    isNetworkHandle = TRUE;
+                    //isNetworkHandle = TRUE;
                     PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILETYPE], 1, L"Network");
                     break;
                 case FILE_DEVICE_CD_ROM:
@@ -812,8 +1183,9 @@ VOID PhpUpdateHandleGeneral(
             // 2) \Device\ConDrv\CurrentIn
             // 3) \Device\VolMgrControl
 
-            if (NT_SUCCESS(status = PhCallNtQueryFileInformationWithTimeout(
-                fileHandle,
+            if (NT_SUCCESS(status = PhCallKphQueryFileInformationWithTimeout(
+                processHandle,
+                Context->HandleItem->Handle,
                 FileModeInformation,
                 &fileModeInfo,
                 sizeof(FILE_MODE_INFORMATION)
@@ -827,7 +1199,7 @@ VOID PhpUpdateHandleGeneral(
                 // it only if none of synchronous flags are present. That's why we need PhFileModeUpdAsyncFlag.
                 fileModeAccessStr = PhGetAccessString(
                     PhFileModeUpdAsyncFlag(fileModeInfo.Mode),
-                    FileModeAccessEntries,
+                    (PPH_ACCESS_ENTRY)FileModeAccessEntries,
                     RTL_NUMBER_OF(FileModeAccessEntries)
                     );
 
@@ -847,8 +1219,9 @@ VOID PhpUpdateHandleGeneral(
 
             if (!isConsoleHandle)
             {
-                if (NT_SUCCESS(status = PhCallNtQueryFileInformationWithTimeout(
-                    fileHandle,
+                if (NT_SUCCESS(status = PhCallKphQueryFileInformationWithTimeout(
+                    processHandle,
+                    Context->HandleItem->Handle,
                     FileStandardInformation,
                     &fileStandardInfo,
                     sizeof(FILE_STANDARD_INFORMATION)
@@ -869,11 +1242,12 @@ VOID PhpUpdateHandleGeneral(
                         PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILETYPE], 1, fileStandardInfo.Directory ? L"Directory" : L"File");
                     }
 
-                    disableFlushButton |= fileStandardInfo.Directory;
+                    //disableFlushButton |= fileStandardInfo.Directory;
                 }
 
-                if (NT_SUCCESS(status = PhCallNtQueryFileInformationWithTimeout(
-                    fileHandle,
+                if (NT_SUCCESS(status = PhCallKphQueryFileInformationWithTimeout(
+                    processHandle,
+                    Context->HandleItem->Handle,
                     FilePositionInformation,
                     &filePositionInfo,
                     sizeof(FILE_POSITION_INFORMATION)
@@ -909,89 +1283,459 @@ VOID PhpUpdateHandleGeneral(
                 }
             }
 
-            NtClose(fileHandle);
+            if (NT_SUCCESS(status = PhCallKphQueryFileInformationWithTimeout(
+                processHandle,
+                Context->HandleItem->Handle,
+                FileIoPriorityHintInformation,
+                &priorityInfo,
+                sizeof(priorityInfo)
+                )))
+            {
+                switch (priorityInfo.PriorityHint)
+                {
+                case IoPriorityVeryLow:
+                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPRIORITY], 1, L"Very Low");
+                    break;
+                case IoPriorityLow:
+                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPRIORITY], 1, L"Low");
+                    break;
+                case IoPriorityNormal:
+                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPRIORITY], 1, L"Normal");
+                    break;
+                case IoPriorityHigh:
+                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPRIORITY], 1, L"High");
+                    break;
+                case IoPriorityCritical:
+                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPRIORITY], 1, L"Critical");
+                    break;
+                }
+            }
+
+            if (NT_SUCCESS(KphQueryInformationObject(
+                processHandle,
+                Context->HandleItem->Handle,
+                KphObjectFileObjectDriver,
+                &fileObjectDriver,
+                sizeof(fileObjectDriver),
+                NULL
+                )))
+            {
+                PPH_STRING driverName;
+
+                if (NT_SUCCESS(PhGetDriverName(fileObjectDriver.DriverHandle, &driverName)))
+                {
+                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEDRIVER], 1, PhGetString(driverName));
+                    PhDereferenceObject(driverName);
+                }
+
+                if (NT_SUCCESS(PhGetDriverImageFileName(fileObjectDriver.DriverHandle, &driverName)))
+                {
+                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEDRIVERIMAGE], 1, PhGetString(driverName));
+                    PhDereferenceObject(driverName);
+                }
+
+                NtClose(fileObjectDriver.DriverHandle);
+            }
+
+            NtClose(processHandle);
+        }
+        else
+        {
+            HANDLE fileHandle = NULL;
+
+            if (NT_SUCCESS(status = PhOpenProcess(
+                &processHandle,
+                PROCESS_DUP_HANDLE,
+                Context->ProcessId
+                )))
+            {
+                status = NtDuplicateObject(
+                    processHandle,
+                    Context->HandleItem->Handle,
+                    NtCurrentProcess(),
+                    &fileHandle,
+                    FILE_READ_ACCESS | SYNCHRONIZE,
+                    0,
+                    0
+                    );
+
+                if (!NT_SUCCESS(status))
+                {
+                    status = NtDuplicateObject(
+                        processHandle,
+                        Context->HandleItem->Handle,
+                        NtCurrentProcess(),
+                        &fileHandle,
+                        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                        0,
+                        0
+                        );
+                }
+
+                //if (!NT_SUCCESS(status))
+                //{
+                //    status = NtDuplicateObject(
+                //        processHandle,
+                //        Context->HandleItem->Handle,
+                //        NtCurrentProcess(),
+                //        &fileHandle,
+                //        MAXIMUM_ALLOWED | SYNCHRONIZE,
+                //        0,
+                //        0
+                //        );
+                //}
+
+                if (!NT_SUCCESS(status))
+                {
+                    status = NtDuplicateObject(
+                        processHandle,
+                        Context->HandleItem->Handle,
+                        NtCurrentProcess(),
+                        &fileHandle,
+                        0,
+                        0,
+                        DUPLICATE_SAME_ACCESS
+                        );
+
+                    HANDLE newhandle;
+                    PhReOpenFile(&newhandle, fileHandle, FILE_READ_ACCESS | SYNCHRONIZE, 0, 0);
+                }
+
+                NtClose(processHandle);
+            }
+
+            if (NT_SUCCESS(status) && fileHandle)
+            {
+                //BOOLEAN disableFlushButton = FALSE;
+                BOOLEAN isFileOrDirectory = FALSE;
+                BOOLEAN isConsoleHandle = FALSE;
+                //BOOLEAN isPipeHandle = FALSE;
+                //BOOLEAN isNetworkHandle = FALSE;
+                FILE_FS_DEVICE_INFORMATION fileDeviceInfo;
+                FILE_MODE_INFORMATION fileModeInfo;
+                FILE_STANDARD_INFORMATION fileStandardInfo;
+                FILE_POSITION_INFORMATION filePositionInfo;
+                FILE_IO_PRIORITY_HINT_INFORMATION_EX priorityInfo;
+                IO_STATUS_BLOCK isb;
+
+                if (NT_SUCCESS(NtQueryVolumeInformationFile(
+                    fileHandle,
+                    &isb,
+                    &fileDeviceInfo,
+                    sizeof(FILE_FS_DEVICE_INFORMATION),
+                    FileFsDeviceInformation
+                    )))
+                {
+                    switch (fileDeviceInfo.DeviceType)
+                    {
+                    case FILE_DEVICE_NAMED_PIPE:
+                        //isPipeHandle = TRUE;
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILETYPE], 1, L"Pipe");
+                        break;
+                    case FILE_DEVICE_NETWORK:
+                        //isNetworkHandle = TRUE;
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILETYPE], 1, L"Network");
+                        break;
+                    case FILE_DEVICE_CD_ROM:
+                    case FILE_DEVICE_CD_ROM_FILE_SYSTEM:
+                    case FILE_DEVICE_CONTROLLER:
+                    case FILE_DEVICE_DATALINK:
+                    case FILE_DEVICE_DFS:
+                    case FILE_DEVICE_DISK:
+                    case FILE_DEVICE_DISK_FILE_SYSTEM:
+                    case FILE_DEVICE_VIRTUAL_DISK:
+                        isFileOrDirectory = TRUE;
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILETYPE], 1, L"File or directory");
+                        break;
+                    case FILE_DEVICE_CONSOLE:
+                        isConsoleHandle = TRUE;
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILETYPE], 1, L"Console");
+                        break;
+                    default:
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILETYPE], 1, L"Other");
+                        break;
+                    }
+                }
+
+                // Note: These devices deadlock without a timeout (dmex)
+                // 1) Named pipes
+                // 2) \Device\ConDrv\CurrentIn
+                // 3) \Device\VolMgrControl
+
+                if (NT_SUCCESS(status = PhCallNtQueryFileInformationWithTimeout(
+                    fileHandle,
+                    FileModeInformation,
+                    &fileModeInfo,
+                    sizeof(FILE_MODE_INFORMATION)
+                    )))
+                {
+                    PH_FORMAT format[5];
+                    PPH_STRING fileModeAccessStr;
+                    WCHAR fileModeString[MAX_PATH];
+
+                    // Since FILE_MODE_INFORMATION has no flag for asynchronous I/O we should use our own flag and set
+                    // it only if none of synchronous flags are present. That's why we need PhFileModeUpdAsyncFlag.
+                    fileModeAccessStr = PhGetAccessString(
+                        PhFileModeUpdAsyncFlag(fileModeInfo.Mode),
+                        (PPH_ACCESS_ENTRY)FileModeAccessEntries,
+                        RTL_NUMBER_OF(FileModeAccessEntries)
+                        );
+
+                    PhInitFormatS(&format[0], L"0x");
+                    PhInitFormatX(&format[1], fileModeInfo.Mode);
+                    PhInitFormatS(&format[2], L" (");
+                    PhInitFormatSR(&format[3], fileModeAccessStr->sr);
+                    PhInitFormatS(&format[4], L")");
+
+                    if (PhFormatToBuffer(format, RTL_NUMBER_OF(format), fileModeString, sizeof(fileModeString), NULL))
+                    {
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEMODE], 1, fileModeString);
+                    }
+
+                    PhDereferenceObject(fileModeAccessStr);
+                }
+
+                if (!isConsoleHandle)
+                {
+                    if (NT_SUCCESS(status = PhCallNtQueryFileInformationWithTimeout(
+                        fileHandle,
+                        FileStandardInformation,
+                        &fileStandardInfo,
+                        sizeof(FILE_STANDARD_INFORMATION)
+                        )))
+                    {
+                        PH_FORMAT format[1];
+                        WCHAR fileSizeString[PH_INT64_STR_LEN];
+
+                        PhInitFormatSize(&format[0], fileStandardInfo.EndOfFile.QuadPart);
+
+                        if (PhFormatToBuffer(format, RTL_NUMBER_OF(format), fileSizeString, sizeof(fileSizeString), NULL))
+                        {
+                            PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILESIZE], 1, fileSizeString);
+                        }
+
+                        if (isFileOrDirectory)
+                        {
+                            PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILETYPE], 1, fileStandardInfo.Directory ? L"Directory" : L"File");
+                        }
+
+                        //disableFlushButton |= fileStandardInfo.Directory;
+                    }
+
+                    if (NT_SUCCESS(status = PhCallNtQueryFileInformationWithTimeout(
+                        fileHandle,
+                        FilePositionInformation,
+                        &filePositionInfo,
+                        sizeof(FILE_POSITION_INFORMATION)
+                        )))
+                    {
+                        if (filePositionInfo.CurrentByteOffset.QuadPart != 0 && fileStandardInfo.EndOfFile.QuadPart != 0)
+                        {
+                            PH_FORMAT format[4];
+                            WCHAR filePositionString[PH_INT64_STR_LEN];
+
+                            PhInitFormatI64UGroupDigits(&format[0], filePositionInfo.CurrentByteOffset.QuadPart);
+                            PhInitFormatS(&format[1], L" (");
+                            PhInitFormatF(&format[2], (DOUBLE)filePositionInfo.CurrentByteOffset.QuadPart / (DOUBLE)fileStandardInfo.EndOfFile.QuadPart * 100.0, 1);
+                            PhInitFormatS(&format[3], L"%)");
+
+                            if (PhFormatToBuffer(format, RTL_NUMBER_OF(format), filePositionString, sizeof(filePositionString), NULL))
+                            {
+                                PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPOSITION], 1, filePositionString);
+                            }
+                        }
+                        else if (filePositionInfo.CurrentByteOffset.QuadPart != 0)
+                        {
+                            PH_FORMAT format[1];
+                            WCHAR filePositionString[PH_INT64_STR_LEN];
+
+                            PhInitFormatI64UGroupDigits(&format[0], filePositionInfo.CurrentByteOffset.QuadPart);
+
+                            if (PhFormatToBuffer(format, RTL_NUMBER_OF(format), filePositionString, sizeof(filePositionString), NULL))
+                            {
+                                PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPOSITION], 1, filePositionString);
+                            }
+                        }
+                    }
+                }
+
+
+                if (NT_SUCCESS(status = PhCallNtQueryFileInformationWithTimeout(
+                    fileHandle,
+                    FileIoPriorityHintInformation,
+                    &priorityInfo,
+                    sizeof(priorityInfo)
+                    )))
+                {
+                    switch (priorityInfo.PriorityHint)
+                    {
+                    case IoPriorityVeryLow:
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPRIORITY], 1, L"Very Low");
+                        break;
+                    case IoPriorityLow:
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPRIORITY], 1, L"Low");
+                        break;
+                    case IoPriorityNormal:
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPRIORITY], 1, L"Normal");
+                        break;
+                    case IoPriorityHigh:
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPRIORITY], 1, L"High");
+                        break;
+                    case IoPriorityCritical:
+                        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_FILEPRIORITY], 1, L"Critical");
+                        break;
+                    }
+                }
+
+                NtClose(fileHandle);
+            }
         }
     }
     else if (PhEqualString2(Context->HandleItem->TypeName, L"Section", TRUE))
     {
         NTSTATUS status;
-        HANDLE processHandle;
-        HANDLE sectionHandle = NULL;
+        SECTION_BASIC_INFORMATION basicInfo;
+        PPH_STRING fileName = NULL;
 
-        if (NT_SUCCESS(status = PhOpenProcess(
-            &processHandle,
-            PROCESS_DUP_HANDLE,
-            Context->ProcessId
-            )))
+        if (KsiLevel() >= KphLevelMed && NT_SUCCESS(PhOpenProcess(
+                &processHandle,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                Context->ProcessId
+                )))
         {
-            status = NtDuplicateObject(
+            ULONG bufferSize;
+            ULONG returnLength;
+            PUNICODE_STRING buffer;
+            NTSTATUS status2;
+
+            returnLength = 0;
+            bufferSize = 0x100;
+            buffer = PhAllocate(bufferSize);
+
+            status = KphQueryInformationObject(
                 processHandle,
                 Context->HandleItem->Handle,
-                NtCurrentProcess(),
-                &sectionHandle,
-                SECTION_QUERY | SECTION_MAP_READ,
-                0,
-                0
+                KphObjectSectionBasicInformation,
+                &basicInfo,
+                sizeof(basicInfo),
+                NULL
                 );
-            
-            if (!NT_SUCCESS(status))
+
+            status2 = KphQueryInformationObject(
+                processHandle,
+                Context->HandleItem->Handle,
+                KphObjectSectionFileName,
+                buffer,
+                bufferSize,
+                &returnLength
+                );
+            if (status2 == STATUS_BUFFER_OVERFLOW && returnLength > 0)
+            {
+                PhFree(buffer);
+                bufferSize = returnLength;
+                buffer = PhAllocate(returnLength);
+
+                status2 = KphQueryInformationObject(
+                    processHandle,
+                    Context->HandleItem->Handle,
+                    KphObjectSectionFileName,
+                    buffer,
+                    bufferSize,
+                    &returnLength
+                    );
+            }
+
+            if (NT_SUCCESS(status2))
+            {
+                fileName = PhCreateStringFromUnicodeString(buffer);
+            }
+
+            PhFree(buffer);
+            NtClose(processHandle);
+        }
+        else
+        {
+            HANDLE sectionHandle = NULL;
+
+            if (NT_SUCCESS(status = PhOpenProcess(
+                &processHandle,
+                PROCESS_DUP_HANDLE,
+                Context->ProcessId
+                )))
             {
                 status = NtDuplicateObject(
                     processHandle,
                     Context->HandleItem->Handle,
                     NtCurrentProcess(),
                     &sectionHandle,
-                    SECTION_QUERY,
+                    SECTION_QUERY | SECTION_MAP_READ,
                     0,
                     0
                     );
+
+                if (!NT_SUCCESS(status))
+                {
+                    status = NtDuplicateObject(
+                        processHandle,
+                        Context->HandleItem->Handle,
+                        NtCurrentProcess(),
+                        &sectionHandle,
+                        SECTION_QUERY,
+                        0,
+                        0
+                        );
+                }
+
+                NtClose(processHandle);
             }
 
-            NtClose(processHandle);
+            if (NT_SUCCESS(status) && sectionHandle)
+            {
+                status = PhGetSectionBasicInformation(sectionHandle, &basicInfo);
+
+                if (!NT_SUCCESS(PhGetSectionFileName(sectionHandle, &fileName)))
+                {
+                    fileName = NULL;
+                }
+
+                NtClose(sectionHandle);
+            }
         }
 
-        if (NT_SUCCESS(status) && sectionHandle)
+        if (NT_SUCCESS(status))
         {
-            SECTION_BASIC_INFORMATION basicInfo;
             PWSTR sectionType = L"Unknown";
             PPH_STRING sectionSize = NULL;
-            PPH_STRING fileName = NULL;
 
-            if (NT_SUCCESS(PhGetSectionBasicInformation(sectionHandle, &basicInfo)))
-            {
-                if (basicInfo.AllocationAttributes & SEC_COMMIT)
-                    sectionType = L"Commit";
-                else if (basicInfo.AllocationAttributes & SEC_FILE)
-                    sectionType = L"File";
-                else if (basicInfo.AllocationAttributes & SEC_IMAGE)
-                    sectionType = L"Image";
-                else if (basicInfo.AllocationAttributes & SEC_RESERVE)
-                    sectionType = L"Reserve";
+            if (FlagOn(basicInfo.AllocationAttributes, SEC_COMMIT))
+                sectionType = L"Commit";
+            else if (FlagOn(basicInfo.AllocationAttributes, SEC_FILE))
+                sectionType = L"File";
+            else if (FlagOn(basicInfo.AllocationAttributes, SEC_IMAGE))
+                sectionType = L"Image";
+            else if (FlagOn(basicInfo.AllocationAttributes, SEC_RESERVE))
+                sectionType = L"Reserve";
 
-                sectionSize = PhaFormatSize(basicInfo.MaximumSize.QuadPart, -1);
-            }
+            sectionSize = PhaFormatSize(basicInfo.MaximumSize.QuadPart, ULONG_MAX);
 
-            if (NT_SUCCESS(PhGetSectionFileName(sectionHandle, &fileName)))
+            if (fileName)
             {
                 PPH_STRING newFileName;
 
-                PH_AUTO(fileName);
-
-                if (newFileName = PhResolveDevicePrefix(fileName))
-                    fileName = PH_AUTO(newFileName);
+                if (newFileName = PhResolveDevicePrefix(&fileName->sr))
+                {
+                    PhMoveReference(&fileName, newFileName);
+                }
             }
 
-            PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_SECTIONTYPE], 1, sectionType);
             PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_SECTIONFILE], 1, PhGetStringOrDefault(fileName, L"N/A"));
+            PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_SECTIONTYPE], 1, sectionType);
             PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_SECTIONSIZE], 1, PhGetStringOrDefault(sectionSize, L"Unknown"));
-
-            NtClose(sectionHandle);
         }
     }
     else if (PhEqualString2(Context->HandleItem->TypeName, L"Mutant", TRUE))
     {
         NTSTATUS status;
-        HANDLE processHandle;
         HANDLE mutantHandle = NULL;
 
         if (NT_SUCCESS(status = PhOpenProcess(
@@ -1029,7 +1773,7 @@ VOID PhpUpdateHandleGeneral(
 
                 if (ownerInfo.ClientId.UniqueProcess)
                 {
-                    name = PhStdGetClientIdName(&ownerInfo.ClientId);
+                    name = PhGetClientIdName(&ownerInfo.ClientId);
                     PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_MUTANTOWNER], 1, name->Buffer);
                     PhDereferenceObject(name);
                 }
@@ -1041,181 +1785,349 @@ VOID PhpUpdateHandleGeneral(
     else if (PhEqualString2(Context->HandleItem->TypeName, L"Process", TRUE))
     {
         NTSTATUS status;
-        HANDLE processHandle;
-        HANDLE dupHandle = NULL;
+        NTSTATUS exitStatus = STATUS_PENDING;
+        PPH_STRING fileName = NULL;
+        PROCESS_BASIC_INFORMATION basicInfo;
+        KERNEL_USER_TIMES times;
+        BOOLEAN haveTimes = FALSE;
 
-        if (NT_SUCCESS(status = PhOpenProcess(
-            &processHandle,
-            PROCESS_DUP_HANDLE,
-            Context->ProcessId
-            )))
+        if (KsiLevel() >= KphLevelMed && NT_SUCCESS(PhOpenProcess(
+                &processHandle,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                Context->ProcessId
+                )))
         {
-            status = NtDuplicateObject(
+            ULONG bufferSize;
+            ULONG returnLength;
+            PUNICODE_STRING buffer;
+            NTSTATUS status2;
+
+            returnLength = 0;
+            bufferSize = 0x100;
+            buffer = PhAllocate(bufferSize);
+
+            if (NT_SUCCESS(KphQueryInformationObject(
                 processHandle,
                 Context->HandleItem->Handle,
-                NtCurrentProcess(),
-                &dupHandle,
-                PROCESS_QUERY_LIMITED_INFORMATION,
-                0,
-                0
-                );
-
-            NtClose(processHandle);
-        }
-
-        if (NT_SUCCESS(status) && dupHandle)
-        {
-            NTSTATUS exitStatus = STATUS_PENDING;
-            PPH_STRING fileName;
-            PROCESS_BASIC_INFORMATION basicInfo;
-            KERNEL_USER_TIMES times;
-
-            if (NT_SUCCESS(PhGetProcessImageFileName(dupHandle, &fileName)))
-            {
-                PhMoveReference(&fileName, PhGetFileName(fileName));
-                PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADNAME], 1, PhGetStringOrEmpty(fileName));
-                PhDereferenceObject(fileName);
-            }
-
-            if (NT_SUCCESS(PhGetProcessBasicInformation(dupHandle, &basicInfo)))
+                KphObjectProcessBasicInformation,
+                &basicInfo,
+                sizeof(basicInfo),
+                NULL
+                )))
             {
                 exitStatus = basicInfo.ExitStatus;
             }
 
-            if (NT_SUCCESS(PhGetProcessTimes(dupHandle, &times)))
+            haveTimes = NT_SUCCESS(KphQueryInformationObject(
+                processHandle,
+                Context->HandleItem->Handle,
+                KphObjectProcessTimes,
+                &times,
+                sizeof(times),
+                NULL
+                ));
+
+            status2 = KphQueryInformationObject(
+                processHandle,
+                Context->HandleItem->Handle,
+                KphObjectProcessImageFileName,
+                buffer,
+                bufferSize,
+                &returnLength
+                );
+            if (status2 == STATUS_BUFFER_TOO_SMALL && returnLength > 0)
             {
-                SYSTEMTIME time;
+                PhFree(buffer);
+                bufferSize = returnLength;
+                buffer = PhAllocate(returnLength);
 
-                PhLargeIntegerToLocalSystemTime(&time, &times.CreateTime);
-                PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADCREATETIME], 1, PhaFormatDateTime(&time)->Buffer);
-
-                if (exitStatus != STATUS_PENDING)
-                {
-                    PhLargeIntegerToLocalSystemTime(&time, &times.ExitTime);
-                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADEXITTIME], 1, PhaFormatDateTime(&time)->Buffer);
-                }
+                status2 = KphQueryInformationObject(
+                    processHandle,
+                    Context->HandleItem->Handle,
+                    KphObjectProcessImageFileName,
+                    buffer,
+                    bufferSize,
+                    &returnLength
+                    );
             }
+
+            if (NT_SUCCESS(status2))
+            {
+                PPH_STRING newName;
+
+                fileName = PhCreateStringFromUnicodeString(buffer);
+
+                newName = PhGetFileName(fileName);
+                PhDereferenceObject(fileName);
+                fileName = newName;
+            }
+
+            NtClose(processHandle);
+        }
+        else
+        {
+            HANDLE dupHandle = NULL;
+
+            if (NT_SUCCESS(status = PhOpenProcess(
+                &processHandle,
+                PROCESS_DUP_HANDLE,
+                Context->ProcessId
+                )))
+            {
+                status = NtDuplicateObject(
+                    processHandle,
+                    Context->HandleItem->Handle,
+                    NtCurrentProcess(),
+                    &dupHandle,
+                    PROCESS_QUERY_LIMITED_INFORMATION,
+                    0,
+                    0
+                    );
+
+                NtClose(processHandle);
+            }
+
+            if (NT_SUCCESS(status) && dupHandle)
+            {
+                if (NT_SUCCESS(PhGetProcessImageFileName(dupHandle, &fileName)))
+                {
+                    PPH_STRING newName;
+
+                    newName = PhGetFileName(fileName);
+                    PhDereferenceObject(fileName);
+                    fileName = newName;
+                }
+
+                if (NT_SUCCESS(PhGetProcessBasicInformation(dupHandle, &basicInfo)))
+                {
+                    exitStatus = basicInfo.ExitStatus;
+                }
+
+                haveTimes = NT_SUCCESS(PhGetProcessTimes(dupHandle, &times));
+
+                NtClose(dupHandle);
+            }
+        }
+
+        if (fileName)
+        {
+            PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADNAME], 1, PhGetStringOrEmpty(fileName));
+            PhDereferenceObject(fileName);
+        }
+
+        if (haveTimes)
+        {
+            SYSTEMTIME time;
+
+            PhLargeIntegerToLocalSystemTime(&time, &times.CreateTime);
+            PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADCREATETIME], 1, PhaFormatDateTime(&time)->Buffer);
 
             if (exitStatus != STATUS_PENDING)
             {
-                PPH_STRING status;
-                PPH_STRING exitcode;
-
-                status = PhGetStatusMessage(exitStatus, 0);
-                exitcode = PhFormatString(
-                    L"0x%x (%s)",
-                    exitStatus,
-                    PhGetStringOrDefault(status, L"Unknown")
-                    );
-
-                PhSetListViewSubItem(
-                    Context->ListViewHandle,
-                    Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADEXITCODE],
-                    1,
-                    PhGetStringOrEmpty(exitcode)
-                    );
-
-                PhDereferenceObject(exitcode);
-                PhClearReference(&status);
+                PhLargeIntegerToLocalSystemTime(&time, &times.ExitTime);
+                PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADEXITTIME], 1, PhaFormatDateTime(&time)->Buffer);
             }
+        }
 
-            NtClose(dupHandle);
+        if (exitStatus != STATUS_PENDING)
+        {
+            PPH_STRING message;
+            PPH_STRING exitcode;
+
+            message = PhGetStatusMessage(exitStatus, 0);
+            exitcode = PhFormatString(
+                L"0x%x (%s)",
+                exitStatus,
+                PhGetStringOrDefault(message, L"Unknown")
+                );
+
+            PhSetListViewSubItem(
+                Context->ListViewHandle,
+                Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADEXITCODE],
+                1,
+                PhGetStringOrEmpty(exitcode)
+                );
+
+            PhDereferenceObject(exitcode);
+            PhClearReference(&message);
         }
     }
     else if (PhEqualString2(Context->HandleItem->TypeName, L"Thread", TRUE))
     {
         NTSTATUS status;
-        HANDLE processHandle;
-        HANDLE dupHandle = NULL;
+        BOOLEAN isTerminated = FALSE;
+        PPH_STRING name = NULL;
+        KERNEL_USER_TIMES times;
+        NTSTATUS exitStatus = STATUS_PENDING;
 
-        if (NT_SUCCESS(status = PhOpenProcess(
-            &processHandle,
-            PROCESS_DUP_HANDLE,
-            Context->ProcessId
-            )))
+        if (KsiLevel() >= KphLevelMed && NT_SUCCESS(PhOpenProcess(
+                &processHandle,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                Context->ProcessId
+                )))
         {
-            status = NtDuplicateObject(
+            ULONG bufferSize;
+            ULONG returnLength;
+            PTHREAD_NAME_INFORMATION buffer;
+            NTSTATUS status2;
+            ULONG threadIsTerminated;
+            THREAD_BASIC_INFORMATION basicInfo;
+
+            returnLength = 0;
+            bufferSize = 0x100;
+            buffer = PhAllocate(bufferSize);
+
+            status2 = KphQueryInformationObject(
                 processHandle,
                 Context->HandleItem->Handle,
-                NtCurrentProcess(),
-                &dupHandle,
-                THREAD_QUERY_LIMITED_INFORMATION,
-                0,
-                0
+                KphObjectThreadNameInformation,
+                buffer,
+                bufferSize,
+                &returnLength
+                );
+            if (status2 == STATUS_BUFFER_TOO_SMALL && returnLength > 0)
+            {
+                PhFree(buffer);
+                bufferSize = returnLength;
+                buffer = PhAllocate(returnLength);
+
+                status2 = KphQueryInformationObject(
+                    processHandle,
+                    Context->HandleItem->Handle,
+                    KphObjectThreadNameInformation,
+                    buffer,
+                    bufferSize,
+                    &returnLength
+                    );
+            }
+
+            if (NT_SUCCESS(status2))
+            {
+                name = PhCreateStringFromUnicodeString(&buffer->ThreadName);
+            }
+
+            if (NT_SUCCESS(KphQueryInformationObject(
+                processHandle,
+                Context->HandleItem->Handle,
+                KphObjectThreadIsTerminated,
+                &threadIsTerminated,
+                sizeof(threadIsTerminated),
+                NULL
+                )))
+            {
+                isTerminated = !!threadIsTerminated;
+            }
+
+            if (isTerminated && NT_SUCCESS(KphQueryInformationObject(
+                processHandle,
+                Context->HandleItem->Handle,
+                KphObjectThreadBasicInformation,
+                &basicInfo,
+                sizeof(basicInfo),
+                NULL
+                )))
+            {
+                exitStatus = basicInfo.ExitStatus;
+            }
+
+            status = KphQueryInformationObject(
+                processHandle,
+                Context->HandleItem->Handle,
+                KphObjectThreadTimes,
+                &times,
+                sizeof(times),
+                NULL
                 );
 
+            PhFree(buffer);
             NtClose(processHandle);
         }
-
-        if (NT_SUCCESS(status) && dupHandle)
+        else
         {
-            BOOLEAN isTerminated = FALSE;
+            HANDLE dupHandle = NULL;
             THREAD_BASIC_INFORMATION basicInfo;
-            KERNEL_USER_TIMES times;
-            PPH_STRING name;
 
-            if (NT_SUCCESS(PhGetThreadName(dupHandle, &name)))
+            if (NT_SUCCESS(status = PhOpenProcess(
+                &processHandle,
+                PROCESS_DUP_HANDLE,
+                Context->ProcessId
+                )))
             {
-                PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADNAME], 1, PhGetStringOrEmpty(name));
-                PhDereferenceObject(name);
-            }
-
-            PhGetThreadIsTerminated(dupHandle, &isTerminated);
-
-            if (isTerminated && NT_SUCCESS(PhGetThreadBasicInformation(dupHandle, &basicInfo)))
-            {
-                PPH_STRING status;
-                PPH_STRING exitcode;
-
-                status = PhGetStatusMessage(basicInfo.ExitStatus, 0);
-                exitcode = PhFormatString(
-                    L"0x%x (%s)",
-                    basicInfo.ExitStatus,
-                    PhGetStringOrDefault(status, L"Unknown")
+                status = NtDuplicateObject(
+                    processHandle,
+                    Context->HandleItem->Handle,
+                    NtCurrentProcess(),
+                    &dupHandle,
+                    THREAD_QUERY_LIMITED_INFORMATION,
+                    0,
+                    0
                     );
 
-                PhSetListViewSubItem(
-                    Context->ListViewHandle,
-                    Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADEXITCODE],
-                    1,
-                    PhGetStringOrEmpty(exitcode)
-                    );
-
-                PhDereferenceObject(exitcode);
-                PhClearReference(&status);
-
-                //if (NT_SUCCESS(PhOpenProcess(
-                //    &processHandle,
-                //    PROCESS_QUERY_LIMITED_INFORMATION,
-                //    basicInfo.ClientId.UniqueProcess
-                //    )))
-                //{
-                //    if (NT_SUCCESS(PhGetProcessImageFileName(processHandle, &fileName)))
-                //    {
-                //        PhMoveReference(&fileName, PhGetFileName(fileName));
-                //        PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADNAME], 1, PhGetStringOrEmpty(fileName));
-                //        PhDereferenceObject(fileName);
-                //    }
-                //
-                //    NtClose(processHandle);
-                //}
+                NtClose(processHandle);
             }
 
-            if (NT_SUCCESS(PhGetThreadTimes(dupHandle, &times)))
+            if (NT_SUCCESS(status) && dupHandle)
             {
-                SYSTEMTIME time;
 
-                PhLargeIntegerToLocalSystemTime(&time, &times.CreateTime);
-                PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADCREATETIME], 1, PhaFormatDateTime(&time)->Buffer);
-
-                if (isTerminated)
+                if (NT_SUCCESS(PhGetThreadName(dupHandle, &name)))
                 {
-                    PhLargeIntegerToLocalSystemTime(&time, &times.ExitTime);
-                    PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADEXITTIME], 1, PhaFormatDateTime(&time)->Buffer);
+                    PhDereferenceObject(name);
                 }
-            }
 
-            NtClose(dupHandle);
+                PhGetThreadIsTerminated(dupHandle, &isTerminated);
+
+                if (isTerminated && NT_SUCCESS(PhGetThreadBasicInformation(dupHandle, &basicInfo)))
+                {
+                    exitStatus = basicInfo.ExitStatus;
+                }
+
+                status = PhGetThreadTimes(dupHandle, &times);
+
+                NtClose(dupHandle);
+            }
+        }
+
+        if (name)
+        {
+            PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADNAME], 1, PhGetStringOrEmpty(name));
+            PhDereferenceObject(name);
+        }
+
+        if (isTerminated)
+        {
+            PPH_STRING message;
+            PPH_STRING exitcode;
+
+            message = PhGetStatusMessage(exitStatus, 0);
+            exitcode = PhFormatString(
+                L"0x%x (%s)",
+                exitStatus,
+                PhGetStringOrDefault(message, L"Unknown")
+                );
+
+            PhSetListViewSubItem(
+                Context->ListViewHandle,
+                Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADEXITCODE],
+                1,
+                PhGetStringOrEmpty(exitcode)
+                );
+
+            PhDereferenceObject(exitcode);
+            PhClearReference(&message);
+        }
+
+        if (NT_SUCCESS(status))
+        {
+            SYSTEMTIME time;
+
+            PhLargeIntegerToLocalSystemTime(&time, &times.CreateTime);
+            PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADCREATETIME], 1, PhaFormatDateTime(&time)->Buffer);
+
+            if (isTerminated)
+            {
+                PhLargeIntegerToLocalSystemTime(&time, &times.ExitTime);
+                PhSetListViewSubItem(Context->ListViewHandle, Context->ListViewRowCache[PH_HANDLE_GENERAL_INDEX_PROCESSTHREADEXITTIME], 1, PhaFormatDateTime(&time)->Buffer);
+            }
         }
     }
 }
@@ -1308,6 +2220,8 @@ INT_PTR CALLBACK PhpHandleGeneralDlgProc(
                 SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, (LONG_PTR)context->ListViewHandle);
                 return TRUE;
             }
+
+            REFLECT_MESSAGE_DLG(hwndDlg, context->ListViewHandle, uMsg, wParam, lParam);
         }
         break;
     case WM_CONTEXTMENU:
@@ -1324,7 +2238,7 @@ INT_PTR CALLBACK PhpHandleGeneralDlgProc(
                 point.y = GET_Y_LPARAM(lParam);
 
                 if (point.x == -1 && point.y == -1)
-                    PhGetListViewContextMenuPoint((HWND)wParam, &point);
+                    PhGetListViewContextMenuPoint(context->ListViewHandle, &point);
 
                 PhGetSelectedListViewItemParams(context->ListViewHandle, &listviewItems, &numberOfItems);
 
@@ -1380,8 +2294,6 @@ INT_PTR CALLBACK PhpHandleGeneralDlgProc(
     case WM_CTLCOLORSTATIC:
         return HANDLE_WM_CTLCOLORSTATIC(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
     }
-
-    REFLECT_MESSAGE_DLG(hwndDlg, context->ListViewHandle, uMsg, wParam, lParam);
 
     return FALSE;
 }

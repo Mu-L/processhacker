@@ -6,7 +6,8 @@
  * Authors:
  *
  *     wj32    2010-2011
- *     dmex    2017-2021
+ *     dmex    2017-2023
+ *     jxy-s   2023
  *
  */
 
@@ -17,18 +18,18 @@
 #include "resource.h"
 
 VOID NTAPI LoadCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     );
 
 VOID NTAPI ShowOptionsCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     );
 
 VOID NTAPI NotifyEventCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     );
 
 INT_PTR CALLBACK ProcessesDlgProc(
@@ -39,6 +40,13 @@ INT_PTR CALLBACK ProcessesDlgProc(
     );
 
 INT_PTR CALLBACK ServicesDlgProc(
+    _In_ HWND hwndDlg,
+    _In_ UINT uMsg,
+    _In_ WPARAM wParam,
+    _In_ LPARAM lParam
+    );
+
+INT_PTR CALLBACK DevicesDlgProc(
     _In_ HWND hwndDlg,
     _In_ UINT uMsg,
     _In_ WPARAM wParam,
@@ -58,6 +66,7 @@ PH_CALLBACK_REGISTRATION PluginShowOptionsCallbackRegistration;
 PH_CALLBACK_REGISTRATION NotifyEventCallbackRegistration;
 PPH_LIST ProcessFilterList;
 PPH_LIST ServiceFilterList;
+PPH_LIST DeviceFilterList;
 
 LOGICAL DllMain(
     _In_ HINSTANCE Instance,
@@ -105,7 +114,8 @@ LOGICAL DllMain(
                 {
                     { StringSettingType, SETTING_NAME_LOG_FILENAME, L"" },
                     { StringSettingType, SETTING_NAME_PROCESS_LIST, L"\\i*" },
-                    { StringSettingType, SETTING_NAME_SERVICE_LIST, L"\\i*" }
+                    { StringSettingType, SETTING_NAME_SERVICE_LIST, L"\\i*" },
+                    { StringSettingType, SETTING_NAME_DEVICE_LIST, L"\\i*" },
                 };
 
                 PhAddSettings(settings, sizeof(settings) / sizeof(PH_SETTING_CREATE));
@@ -113,6 +123,7 @@ LOGICAL DllMain(
 
             ProcessFilterList = PhCreateList(10);
             ServiceFilterList = PhCreateList(10);
+            DeviceFilterList = PhCreateList(10);
         }
         break;
     }
@@ -278,21 +289,35 @@ VOID NTAPI LoadCallback(
     _In_opt_ PVOID Context
     )
 {
-    LoadFilterList(ProcessFilterList, PhaGetStringSetting(SETTING_NAME_PROCESS_LIST));
-    LoadFilterList(ServiceFilterList, PhaGetStringSetting(SETTING_NAME_SERVICE_LIST));
+    PPH_STRING settings;
+
+    if (settings = PhGetStringSetting(SETTING_NAME_PROCESS_LIST))
+    {
+        LoadFilterList(ProcessFilterList, settings);
+        PhDereferenceObject(settings);
+    }
+
+    if (settings = PhGetStringSetting(SETTING_NAME_SERVICE_LIST))
+    {
+        LoadFilterList(ServiceFilterList, settings);
+        PhDereferenceObject(settings);
+    }
+
+    if (settings = PhGetStringSetting(SETTING_NAME_DEVICE_LIST))
+    {
+        LoadFilterList(DeviceFilterList, settings);
+        PhDereferenceObject(settings);
+    }
 
     FileLogInitialization();
 }
 
 VOID NTAPI ShowOptionsCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_PLUGIN_OPTIONS_POINTERS optionsEntry = (PPH_PLUGIN_OPTIONS_POINTERS)Parameter;
-
-    if (!optionsEntry)
-        return;
 
     optionsEntry->CreateSection(
         L"Notifications - Processes",
@@ -306,6 +331,13 @@ VOID NTAPI ShowOptionsCallback(
         PluginInstance->DllBase,
         MAKEINTRESOURCE(IDD_SERVICES),
         ServicesDlgProc,
+        NULL
+        );
+    optionsEntry->CreateSection(
+        L"Notifications - Devices",
+        PluginInstance->DllBase,
+        MAKEINTRESOURCE(IDD_DEVICES),
+        DevicesDlgProc,
         NULL
         );
     optionsEntry->CreateSection(
@@ -353,42 +385,51 @@ BOOLEAN MatchFilterList(
 }
 
 VOID NTAPI NotifyEventCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_PLUGIN_NOTIFY_EVENT notifyEvent = Parameter;
     PPH_PROCESS_ITEM processItem;
     PPH_SERVICE_ITEM serviceItem;
+    PPH_DEVICE_ITEM deviceItem;
     FILTER_TYPE filterType = FilterExclude;
     BOOLEAN found = FALSE;
-
-    if (!notifyEvent)
-        return;
+    PPH_STRING string;
 
     switch (notifyEvent->Type)
     {
     case PH_NOTIFY_PROCESS_CREATE:
     case PH_NOTIFY_PROCESS_DELETE:
-        processItem = notifyEvent->Parameter;
+        {
+            processItem = notifyEvent->Parameter;
 
-        if (processItem->FileNameWin32)
-            found = MatchFilterList(ProcessFilterList, processItem->FileNameWin32, &filterType);
+            if (processItem->FileNameWin32)
+                found = MatchFilterList(ProcessFilterList, processItem->FileNameWin32, &filterType);
 
-        if (!found)
-            MatchFilterList(ProcessFilterList, processItem->ProcessName, &filterType);
-
+            if (!found)
+                MatchFilterList(ProcessFilterList, processItem->ProcessName, &filterType);
+        }
         break;
-
     case PH_NOTIFY_SERVICE_CREATE:
     case PH_NOTIFY_SERVICE_DELETE:
     case PH_NOTIFY_SERVICE_START:
     case PH_NOTIFY_SERVICE_STOP:
     case PH_NOTIFY_SERVICE_MODIFIED:
-        serviceItem = notifyEvent->Parameter;
+        {
+            serviceItem = notifyEvent->Parameter;
 
-        MatchFilterList(ServiceFilterList, serviceItem->Name, &filterType);
-
+            MatchFilterList(ServiceFilterList, serviceItem->Name, &filterType);
+        }
+        break;
+    case PH_NOTIFY_DEVICE_ARRIVED:
+    case PH_NOTIFY_DEVICE_REMOVED:
+        {
+            deviceItem = notifyEvent->Parameter;
+            string = PhGetDeviceProperty(deviceItem, PhDevicePropertyName)->AsString;
+            if (string)
+                MatchFilterList(DeviceFilterList, string, &filterType);
+        }
         break;
     }
 
@@ -420,6 +461,7 @@ VOID AddEntriesToListBox(
 
 PPH_LIST EditingProcessFilterList;
 PPH_LIST EditingServiceFilterList;
+PPH_LIST EditingDeviceFilterList;
 
 LRESULT CALLBACK TextBoxSubclassProc(
     _In_ HWND hWnd,
@@ -435,7 +477,7 @@ LRESULT CALLBACK TextBoxSubclassProc(
 
     switch (uMsg)
     {
-    case WM_DESTROY:
+    case WM_NCDESTROY:
         {
             SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)oldWndProc);
             PhRemoveWindowContext(hWnd, UCHAR_MAX);
@@ -466,8 +508,8 @@ VOID FixControlStates(
     _In_ HWND ListBox
     )
 {
-    ULONG i;
-    ULONG count;
+    INT i;
+    INT count;
 
     i = ListBox_GetCurSel(ListBox);
     count = ListBox_GetCount(ListBox);
@@ -497,7 +539,7 @@ INT_PTR HandleCommonMessages(
             oldWndProc = (WNDPROC)GetWindowLongPtr(textBoxHandle, GWLP_WNDPROC);
             PhSetWindowContext(textBoxHandle, UCHAR_MAX, oldWndProc);
             SetWindowLongPtr(textBoxHandle, GWLP_WNDPROC, (LONG_PTR)TextBoxSubclassProc);
-            
+
             Button_SetCheck(GetDlgItem(hwndDlg, IDC_INCLUDE), BST_CHECKED);
 
             FixControlStates(hwndDlg, ListBox);
@@ -511,7 +553,7 @@ INT_PTR HandleCommonMessages(
                 {
                     if (GET_WM_COMMAND_CMD(wParam, lParam) == LBN_SELCHANGE)
                     {
-                        ULONG i;
+                        INT i;
 
                         i = ListBox_GetCurSel(ListBox);
 
@@ -599,7 +641,7 @@ INT_PTR HandleCommonMessages(
 
                     i = ListBox_GetCurSel(ListBox);
 
-                    if (i != LB_ERR)
+                    if (i != (ULONG)((INT)LB_ERR))
                     {
                         entry = FilterList->Items[i];
                         FreeFilterEntry(entry);
@@ -623,7 +665,7 @@ INT_PTR HandleCommonMessages(
 
                     i = ListBox_GetCurSel(ListBox);
 
-                    if (i != LB_ERR && i != 0)
+                    if (i != (ULONG)((INT)LB_ERR) && i != 0)
                     {
                         entry = FilterList->Items[i];
 
@@ -650,7 +692,7 @@ INT_PTR HandleCommonMessages(
 
                     i = ListBox_GetCurSel(ListBox);
 
-                    if (i != LB_ERR && i != FilterList->Count - 1)
+                    if (i != (ULONG)((INT)LB_ERR) && i != FilterList->Count - 1)
                     {
                         entry = FilterList->Items[i];
 
@@ -795,6 +837,75 @@ INT_PTR CALLBACK ServicesDlgProc(
             ClearFilterList(EditingServiceFilterList);
             PhDereferenceObject(EditingServiceFilterList);
             EditingServiceFilterList = NULL;
+
+            PhDeleteLayoutManager(&LayoutManager);
+        }
+        break;
+    case WM_SIZE:
+        {
+            PhLayoutManagerLayout(&LayoutManager);
+        }
+        break;
+    case WM_CTLCOLORBTN:
+        return HANDLE_WM_CTLCOLORBTN(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+    case WM_CTLCOLORDLG:
+        return HANDLE_WM_CTLCOLORDLG(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+    case WM_CTLCOLORSTATIC:
+        return HANDLE_WM_CTLCOLORSTATIC(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+    }
+
+    return FALSE;
+}
+
+INT_PTR CALLBACK DevicesDlgProc(
+    _In_ HWND hwndDlg,
+    _In_ UINT uMsg,
+    _In_ WPARAM wParam,
+    _In_ LPARAM lParam
+    )
+{
+    static PH_LAYOUT_MANAGER LayoutManager;
+    INT_PTR result;
+
+    if (result = HandleCommonMessages(hwndDlg, uMsg, wParam, lParam,
+        GetDlgItem(hwndDlg, IDC_LIST), EditingDeviceFilterList))
+        return result;
+
+    switch (uMsg)
+    {
+    case WM_INITDIALOG:
+        {
+            EditingDeviceFilterList = PhCreateList(DeviceFilterList->Count + 10);
+            CopyFilterList(EditingDeviceFilterList, DeviceFilterList);
+
+            PhInitializeLayoutManager(&LayoutManager, hwndDlg);
+            PhAddLayoutItem(&LayoutManager, GetDlgItem(hwndDlg, IDC_LIST), NULL, PH_ANCHOR_ALL);
+            PhAddLayoutItem(&LayoutManager, GetDlgItem(hwndDlg, IDC_MOVEUP), NULL, PH_ANCHOR_TOP | PH_ANCHOR_RIGHT);
+            PhAddLayoutItem(&LayoutManager, GetDlgItem(hwndDlg, IDC_MOVEDOWN), NULL, PH_ANCHOR_TOP | PH_ANCHOR_RIGHT);
+            PhAddLayoutItem(&LayoutManager, GetDlgItem(hwndDlg, IDC_TEXT), NULL, PH_ANCHOR_BOTTOM | PH_ANCHOR_LEFT | PH_ANCHOR_RIGHT);
+            PhAddLayoutItem(&LayoutManager, GetDlgItem(hwndDlg, IDC_INCLUDE), NULL, PH_ANCHOR_BOTTOM | PH_ANCHOR_RIGHT);
+            PhAddLayoutItem(&LayoutManager, GetDlgItem(hwndDlg, IDC_EXCLUDE), NULL, PH_ANCHOR_BOTTOM | PH_ANCHOR_RIGHT);
+            PhAddLayoutItem(&LayoutManager, GetDlgItem(hwndDlg, IDC_ADD), NULL, PH_ANCHOR_BOTTOM | PH_ANCHOR_RIGHT);
+            PhAddLayoutItem(&LayoutManager, GetDlgItem(hwndDlg, IDC_REMOVE), NULL, PH_ANCHOR_BOTTOM | PH_ANCHOR_RIGHT);
+            PhAddLayoutItem(&LayoutManager, GetDlgItem(hwndDlg, IDC_INFO), NULL, PH_ANCHOR_BOTTOM | PH_ANCHOR_LEFT);
+
+            AddEntriesToListBox(GetDlgItem(hwndDlg, IDC_LIST), EditingDeviceFilterList);
+        }
+        break;
+    case WM_DESTROY:
+        {
+            PPH_STRING string;
+
+            ClearFilterList(DeviceFilterList);
+            CopyFilterList(DeviceFilterList, EditingDeviceFilterList);
+
+            string = SaveFilterList(DeviceFilterList);
+            PhSetStringSetting2(SETTING_NAME_DEVICE_LIST, &string->sr);
+            PhDereferenceObject(string);
+
+            ClearFilterList(EditingDeviceFilterList);
+            PhDereferenceObject(EditingDeviceFilterList);
+            EditingDeviceFilterList = NULL;
 
             PhDeleteLayoutManager(&LayoutManager);
         }

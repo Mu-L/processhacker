@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2016
- *     dmex    2016-2022
+ *     dmex    2016-2023
  *
  */
 
@@ -118,12 +118,12 @@ VOID PhShowProcessMitigationPolicyDialog(
                 }
             }
 
-            DialogBoxParam(
+            PhDialogBox(
                 PhInstanceHandle,
                 MAKEINTRESOURCE(IDD_MITIGATION),
                 ParentWindowHandle,
                 PhpProcessMitigationPolicyDlgProc,
-                (LPARAM)&context
+                &context
                 );
 
             for (policy = 0; policy < MaxProcessMitigationPolicy; policy++)
@@ -225,12 +225,12 @@ INT_PTR CALLBACK PhpProcessMitigationPolicyDlgProc(
                 if (context->SystemDllInitBlock->MitigationOptionsMap.Map[0] & PROCESS_CREATION_MITIGATION_POLICY2_RESTRICT_INDIRECT_BRANCH_PREDICTION_ALWAYS_ON)
                 {
                     PMITIGATION_POLICY_ENTRY entry;
-                
+
                     entry = PhAllocate(sizeof(MITIGATION_POLICY_ENTRY));
                     entry->NonStandard = TRUE;
                     entry->ShortDescription = PhCreateString(L"Indirect branch prediction");
                     entry->LongDescription = PhCreateString(L"Protects against sibling hardware threads (hyperthreads) from interfering with indirect branch predictions.");
-                
+
                     PhAddListViewItem(lvHandle, MAXINT, entry->ShortDescription->Buffer, entry);
                 }
 
@@ -270,13 +270,13 @@ INT_PTR CALLBACK PhpProcessMitigationPolicyDlgProc(
         break;
     case WM_DESTROY:
         {
-            ULONG index = -1;
+            INT index = INT_ERROR;
 
             while ((index = PhFindListViewItemByFlags(
                 context->ListViewHandle,
                 index,
                 LVNI_ALL
-                )) != -1)
+                )) != INT_ERROR)
             {
                 PMITIGATION_POLICY_ENTRY entry;
 

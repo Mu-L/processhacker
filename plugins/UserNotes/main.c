@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2011-2016
- *     dmex    2016-2022
+ *     dmex    2016-2024
  *
  */
 
@@ -14,11 +14,6 @@
 #include <toolstatusintf.h>
 #include <commdlg.h>
 #include <mapimg.h>
-
-VOID SearchChangedHandler(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
-    );
 
 static PPH_PLUGIN PluginInstance;
 static PH_CALLBACK_REGISTRATION PluginLoadCallbackRegistration;
@@ -41,16 +36,15 @@ static PH_CALLBACK_REGISTRATION ProcessesUpdatedCallbackRegistration;
 static PH_CALLBACK_REGISTRATION SearchChangedRegistration;
 
 static PTOOLSTATUS_INTERFACE ToolStatusInterface = NULL;
+static COLORREF ProcessCustomColors[16] = { 0 };
 
-HWND ProcessTreeNewHandle;
+HWND ProcessTreeNewHandle = NULL;
 LIST_ENTRY ProcessListHead = { &ProcessListHead, &ProcessListHead };
 PH_QUEUED_LOCK ProcessListLock = PH_QUEUED_LOCK_INIT;
 
-HWND ServiceTreeNewHandle;
+HWND ServiceTreeNewHandle = NULL;
 LIST_ENTRY ServiceListHead = { &ServiceListHead, &ServiceListHead };
 PH_QUEUED_LOCK ServiceListLock = PH_QUEUED_LOCK_INIT;
-
-static COLORREF ProcessCustomColors[16] = { 0 };
 
 BOOLEAN MatchDbObjectIntent(
     _In_ PDB_OBJECT Object,
@@ -64,7 +58,8 @@ BOOLEAN MatchDbObjectIntent(
         (!(Intent & INTENT_PROCESS_COLLAPSE) || Object->Collapse == TRUE) &&
         (!(Intent & INTENT_PROCESS_AFFINITY) || Object->AffinityMask != 0) &&
         (!(Intent & INTENT_PROCESS_PAGEPRIORITY) || Object->PagePriorityPlusOne != 0) &&
-        (!(Intent & INTENT_PROCESS_BOOST) || Object->Boost == TRUE);
+        (!(Intent & INTENT_PROCESS_BOOST) || Object->Boost == TRUE) &&
+        (!(Intent & INTENT_PROCESS_EFFICIENCY) || Object->Efficiency == TRUE);
 }
 
 PDB_OBJECT FindDbObjectForProcess(
@@ -106,11 +101,27 @@ VOID DeleteDbObjectForProcessIfUnused(
         Object->BackColor == ULONG_MAX &&
         Object->Collapse == FALSE &&
         Object->AffinityMask == 0 &&
-        Object->Boost == FALSE
+        Object->PagePriorityPlusOne == 0 &&
+        Object->Boost == FALSE &&
+        Object->Efficiency == FALSE
         )
     {
         DeleteDbObject(Object);
     }
+}
+
+PPROCESS_EXTENSION GetProcessObjectExtension(
+    _In_ PPH_PROCESS_ITEM ProcessItem
+    )
+{
+    return PhPluginGetObjectExtension(PluginInstance, ProcessItem, EmProcessItemType);
+}
+
+PSERVICE_EXTENSION GetServiceObjectExtension(
+    _In_ PPH_SERVICE_ITEM ServiceItem
+    )
+{
+    return PhPluginGetObjectExtension(PluginInstance, ServiceItem, EmServiceItemType);
 }
 
 NTSTATUS GetProcessAffinity(
@@ -125,6 +136,11 @@ NTSTATUS GetProcessAffinity(
         ProcessHandle,
         &groupAffinity
         );
+
+    if (status == STATUS_INVALID_PARAMETER || status == STATUS_INVALID_INFO_CLASS) // GH#1317: Required for Windows 7 (jxy-s)
+    {
+        status = PhGetProcessAffinityMask(ProcessHandle, &groupAffinity.Mask);
+    }
 
     if (NT_SUCCESS(status))
     {
@@ -243,28 +259,19 @@ VOID InitializeDbPath(
     VOID
     )
 {
-    static PH_STRINGREF databaseFileNameSr = PH_STRINGREF_INIT(L"usernotesdb.xml");
-    PPH_STRING fileName;
-
-    fileName = PhGetApplicationDirectoryFileNameWin32(&databaseFileNameSr);
-
-    if (fileName && PhDoesFileExistsWin32(PhGetString(fileName)))
+    if (ProcessHacker_IsPortableMode())
     {
+        PPH_STRING fileName;
+
+        fileName = PhGetApplicationDirectoryFileNameZ(L"usernotesdb.xml", TRUE);
         SetDbPath(fileName);
     }
     else
     {
-        if (fileName = PhaGetStringSetting(SETTING_NAME_DATABASE_PATH))
-        {
-            fileName = PH_AUTO(PhExpandEnvironmentStrings(&fileName->sr));
+        PPH_STRING fileName;
 
-            if (PhDetermineDosPathNameType(PhGetString(fileName)) == RtlPathTypeRelative)
-            {
-                fileName = PH_AUTO(PhGetApplicationDirectoryFileNameWin32(&fileName->sr));
-            }
-
-            SetDbPath(fileName);
-        }
+        fileName = PhGetKnownLocationZ(PH_FOLDERID_RoamingAppData, L"\\SystemInformer\\usernotesdb.xml", TRUE);
+        SetDbPath(fileName);
     }
 }
 
@@ -273,16 +280,6 @@ VOID NTAPI LoadCallback(
     _In_opt_ PVOID Context
     )
 {
-    PPH_PLUGIN toolStatusPlugin;
-
-    if (toolStatusPlugin = PhFindPlugin(TOOLSTATUS_PLUGIN_NAME))
-    {
-        ToolStatusInterface = PhGetPluginInformation(toolStatusPlugin)->Interface;
-
-        if (ToolStatusInterface->Version < TOOLSTATUS_INTERFACE_VERSION)
-            ToolStatusInterface = NULL;
-    }
-
     InitializeDbPath();
     InitializeDb();
     LoadDb();
@@ -293,18 +290,15 @@ VOID NTAPI UnloadCallback(
     _In_opt_ PVOID Context
     )
 {
-    SaveDb();
+    NOTHING;
 }
 
 VOID NTAPI ShowOptionsCallback(
-    _In_opt_ PVOID Parameter,
+    _In_ PVOID Parameter,
     _In_opt_ PVOID Context
     )
 {
     PPH_PLUGIN_OPTIONS_POINTERS optionsEntry = (PPH_PLUGIN_OPTIONS_POINTERS)Parameter;
-
-    if (!optionsEntry)
-        return;
 
     optionsEntry->CreateSection(
         L"UserNotes",
@@ -316,23 +310,20 @@ VOID NTAPI ShowOptionsCallback(
 }
 
 VOID NTAPI MainMenuInitializingCallback(
-    _In_opt_ PVOID Parameter,
+    _In_ PVOID Parameter,
     _In_opt_ PVOID Context
     )
 {
     PPH_PLUGIN_MENU_INFORMATION menuInfo = Parameter;
     PPH_EMENU_ITEM onlineMenuItem;
 
-    if (!menuInfo)
-        return;
-
     if (menuInfo->u.MainMenu.SubMenuIndex != PH_MENU_ITEM_LOCATION_TOOLS)
         return;
 
     onlineMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, 0, L"&User Notes", NULL);
-    PhInsertEMenuItem(onlineMenuItem, PhPluginCreateEMenuItem(PluginInstance, 0, FILE_PRIORITY_SAVE_IFEO, L"Configure priority for executable file...", NULL), ULONG_MAX);
-    PhInsertEMenuItem(onlineMenuItem, PhPluginCreateEMenuItem(PluginInstance, 0, FILE_IO_PRIORITY_SAVE_IFEO, L"Configure IO priority for executable file...", NULL), ULONG_MAX);
-    PhInsertEMenuItem(onlineMenuItem, PhPluginCreateEMenuItem(PluginInstance, 0, FILE_PAGE_PRIORITY_SAVE_IFEO, L"Configure page priority for executable file...", NULL), ULONG_MAX);
+    PhInsertEMenuItem(onlineMenuItem, PhPluginCreateEMenuItem(PluginInstance, 0, FILE_PRIORITY_SAVE_IFEO, L"Configure priority for executable...", NULL), ULONG_MAX);
+    PhInsertEMenuItem(onlineMenuItem, PhPluginCreateEMenuItem(PluginInstance, 0, FILE_IO_PRIORITY_SAVE_IFEO, L"Configure IO priority for executable...", NULL), ULONG_MAX);
+    PhInsertEMenuItem(onlineMenuItem, PhPluginCreateEMenuItem(PluginInstance, 0, FILE_PAGE_PRIORITY_SAVE_IFEO, L"Configure page priority for executable...", NULL), ULONG_MAX);
     PhInsertEMenuItem(menuInfo->Menu, onlineMenuItem, ULONG_MAX);
 }
 
@@ -342,6 +333,7 @@ PPH_STRING ShowFileDialog(
 {
     static PH_FILETYPE_FILTER filters[] =
     {
+        { L"Executable files (*.exe)", L"*.exe" },
         { L"All files (*.*)", L"*.*" }
     };
     PPH_STRING fileName = NULL;
@@ -362,22 +354,23 @@ PPH_STRING ShowFileDialog(
         NTSTATUS status;
         PH_MAPPED_IMAGE mappedImage;
 
-        status = PhLoadMappedImage(
-            PhGetString(fileName),
-            NULL,
-            &mappedImage
-            );
+        PhMoveReference(&fileName, PhDosPathNameToNtPathName(&fileName->sr));
+
+        if (!PhIsNullOrEmptyString(fileName))
+            status = PhLoadMappedImageHeaderPageSize(&fileName->sr, NULL, &mappedImage);
+        else
+            status = STATUS_OBJECT_NAME_NOT_FOUND;
 
         if (NT_SUCCESS(status))
         {
             if (mappedImage.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
             {
-                if (!(mappedImage.NtHeaders32->FileHeader.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE) || mappedImage.NtHeaders32->FileHeader.Characteristics & IMAGE_FILE_DLL)
+                if (!FlagOn(mappedImage.NtHeaders32->FileHeader.Characteristics, IMAGE_FILE_EXECUTABLE_IMAGE) || FlagOn(mappedImage.NtHeaders32->FileHeader.Characteristics, IMAGE_FILE_DLL))
                     status = STATUS_INVALID_IMAGE_NOT_MZ;
             }
             else if (mappedImage.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
             {
-                if (!(mappedImage.NtHeaders32->FileHeader.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE) || mappedImage.NtHeaders32->FileHeader.Characteristics & IMAGE_FILE_DLL)
+                if (!FlagOn(mappedImage.NtHeaders->FileHeader.Characteristics, IMAGE_FILE_EXECUTABLE_IMAGE) || FlagOn(mappedImage.NtHeaders->FileHeader.Characteristics, IMAGE_FILE_DLL))
                     status = STATUS_INVALID_IMAGE_NOT_MZ;
             }
 
@@ -816,16 +809,13 @@ VOID ShowProcessPagePriorityDialog(
 }
 
 VOID NTAPI MenuItemCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_PLUGIN_MENU_ITEM menuItem = Parameter;
     PPH_PROCESS_ITEM processItem;
     PDB_OBJECT object;
-
-    if (!menuItem)
-        return;
 
     switch (menuItem->Id)
     {
@@ -850,11 +840,11 @@ VOID NTAPI MenuItemCallback(
 
                     if (NT_SUCCESS(status))
                     {
-                        PhShowInformation(menuItem->OwnerWindow, L"Sucessfully deleted the IFEO key.", status, 0);
+                        PhShowInformation(menuItem->OwnerWindow, L"Successfully deleted the IFEO key.", status, 0);
                     }
                     else
                     {
-                        PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO key for process priority.", status, 0);
+                        PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO for priority.", status, 0);
                     }
                 }
                 else
@@ -887,11 +877,11 @@ VOID NTAPI MenuItemCallback(
 
                     if (NT_SUCCESS(status))
                     {
-                        PhShowInformation(menuItem->OwnerWindow, L"Sucessfully deleted the IFEO key.", status, 0);
+                        PhShowInformation(menuItem->OwnerWindow, L"Successfully deleted the IFEO key.", status, 0);
                     }
                     else
                     {
-                        PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO key for process IO priority.", status, 0);
+                        PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO for IO priority.", status, 0);
                     }
                 }
                 else
@@ -924,11 +914,11 @@ VOID NTAPI MenuItemCallback(
 
                     if (NT_SUCCESS(status))
                     {
-                        PhShowInformation(menuItem->OwnerWindow, L"Sucessfully deleted the IFEO key.", status, 0);
+                        PhShowInformation(menuItem->OwnerWindow, L"Successfully deleted the IFEO key.", status, 0);
                     }
                     else
                     {
-                        PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO key for process page priority.", status, 0);
+                        PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO for page priority.", status, 0);
                     }
                 }
                 else
@@ -960,8 +950,23 @@ VOID NTAPI MenuItemCallback(
             }
             else
             {
-                object = CreateDbObject(FILE_TAG, &processItem->ProcessName->sr, NULL);
-                object->PriorityClass = processItem->PriorityClass;
+                NTSTATUS status = STATUS_ACCESS_DENIED;
+                UCHAR priorityClass = PROCESS_PRIORITY_CLASS_UNKNOWN;
+
+                if (processItem->QueryHandle)
+                {
+                    status = PhGetProcessPriority(processItem->QueryHandle, &priorityClass);
+                }
+
+                if (NT_SUCCESS(status))
+                {
+                    object = CreateDbObject(FILE_TAG, &processItem->ProcessName->sr, NULL);
+                    object->PriorityClass = priorityClass;
+                }
+                else
+                {
+                    PhShowStatus(menuItem->OwnerWindow, L"Unable to query priority.", status, 0);
+                }
             }
 
             UnlockDb();
@@ -981,8 +986,23 @@ VOID NTAPI MenuItemCallback(
                 }
                 else
                 {
-                    object = CreateDbObject(COMMAND_LINE_TAG, &processItem->CommandLine->sr, NULL);
-                    object->PriorityClass = processItem->PriorityClass;
+                    NTSTATUS status = STATUS_ACCESS_DENIED;
+                    UCHAR priorityClass = PROCESS_PRIORITY_CLASS_UNKNOWN;
+
+                    if (processItem->QueryHandle)
+                    {
+                        status = PhGetProcessPriority(processItem->QueryHandle, &priorityClass);
+                    }
+
+                    if (NT_SUCCESS(status))
+                    {
+                        object = CreateDbObject(COMMAND_LINE_TAG, &processItem->CommandLine->sr, NULL);
+                        object->PriorityClass = priorityClass;
+                    }
+                    else
+                    {
+                        PhShowStatus(menuItem->OwnerWindow, L"Unable to query priority.", status, 0);
+                    }
                 }
 
                 UnlockDb();
@@ -1006,7 +1026,7 @@ VOID NTAPI MenuItemCallback(
 
                 if (!NT_SUCCESS(status))
                 {
-                    PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO key for process priority.", status, 0);
+                    PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO for priority.", status, 0);
                 }
             }
             else
@@ -1027,8 +1047,8 @@ VOID NTAPI MenuItemCallback(
             }
             else
             {
-                NTSTATUS status = STATUS_RETRY;
-                IO_PRIORITY_HINT ioPriority;
+                NTSTATUS status = STATUS_ACCESS_DENIED;
+                IO_PRIORITY_HINT ioPriority = IoPriorityNormal;
 
                 if (processItem->QueryHandle)
                 {
@@ -1042,7 +1062,7 @@ VOID NTAPI MenuItemCallback(
                 }
                 else
                 {
-                    PhShowStatus(menuItem->OwnerWindow, L"Unable to query the process IO priority.", status, 0);
+                    PhShowStatus(menuItem->OwnerWindow, L"Unable to query IO priority.", status, 0);
                 }
             }
 
@@ -1063,8 +1083,8 @@ VOID NTAPI MenuItemCallback(
                 }
                 else
                 {
-                    NTSTATUS status = STATUS_RETRY;
-                    IO_PRIORITY_HINT ioPriority;
+                    NTSTATUS status = STATUS_ACCESS_DENIED;
+                    IO_PRIORITY_HINT ioPriority = PHAPP_ID_IOPRIORITY_NORMAL;
 
                     if (processItem->QueryHandle)
                     {
@@ -1078,7 +1098,7 @@ VOID NTAPI MenuItemCallback(
                     }
                     else
                     {
-                        PhShowStatus(menuItem->OwnerWindow, L"Unable to query the process IO priority.", status, 0);
+                        PhShowStatus(menuItem->OwnerWindow, L"Unable to query IO priority.", status, 0);
                     }
                 }
 
@@ -1104,7 +1124,7 @@ VOID NTAPI MenuItemCallback(
 
                 if (!NT_SUCCESS(status))
                 {
-                    PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO key for process IO priority.", status, 0);
+                    PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO for IO priority.", status, 0);
                 }
             }
             else
@@ -1185,6 +1205,36 @@ VOID NTAPI MenuItemCallback(
             SaveDb();
         }
         break;
+    case PROCESS_AFFINITY_ID:
+        {
+            BOOLEAN changed = FALSE;
+            KAFFINITY affinityMask;
+
+            // Show the affinity dialog (with our values).
+            if (PhShowProcessAffinityDialog2(menuItem->OwnerWindow, processItem, &affinityMask))
+            {
+                LockDb();
+
+                if (object = FindDbObjectForProcess(processItem, INTENT_PROCESS_AFFINITY))
+                {
+                    // Update the process affinity in our database (if the database values are different).
+                    if (object->AffinityMask != affinityMask)
+                    {
+                        object->AffinityMask = affinityMask;
+                        changed = TRUE;
+                    }
+                }
+
+                UnlockDb();
+
+                if (changed)
+                {
+                    SaveDb();
+                    InvalidateProcessAffinity();
+                }
+            }
+        }
+        break;
     case PROCESS_AFFINITY_SAVE_ID:
         {
             LockDb();
@@ -1196,8 +1246,8 @@ VOID NTAPI MenuItemCallback(
             }
             else
             {
-                NTSTATUS status = STATUS_RETRY;
-                KAFFINITY affinityMask;
+                NTSTATUS status = STATUS_ACCESS_DENIED;
+                KAFFINITY affinityMask = SIZE_MAX;
 
                 if (processItem->QueryHandle)
                 {
@@ -1229,13 +1279,14 @@ VOID NTAPI MenuItemCallback(
                     }
                     else
                     {
-                        PhShowStatus(menuItem->OwnerWindow, L"Unable to query the process affinity.", status, 0);
+                        PhShowStatus(menuItem->OwnerWindow, L"Unable to query process affinity.", status, 0);
                     }
                 }
             }
 
             UnlockDb();
             SaveDb();
+            InvalidateProcessAffinity();
         }
         break;
     case PROCESS_AFFINITY_SAVE_FOR_THIS_COMMAND_LINE_ID:
@@ -1251,8 +1302,8 @@ VOID NTAPI MenuItemCallback(
                 }
                 else
                 {
-                    NTSTATUS status = STATUS_RETRY;
-                    KAFFINITY affinityMask;
+                    NTSTATUS status = STATUS_ACCESS_DENIED;
+                    KAFFINITY affinityMask = SIZE_MAX;
 
                     if (processItem->QueryHandle)
                     {
@@ -1284,13 +1335,14 @@ VOID NTAPI MenuItemCallback(
                         }
                         else
                         {
-                            PhShowStatus(menuItem->OwnerWindow, L"Unable to query the process affinity.", status, 0);
+                            PhShowStatus(menuItem->OwnerWindow, L"Unable to query process affinity.", status, 0);
                         }
                     }
                 }
 
                 UnlockDb();
                 SaveDb();
+                InvalidateProcessAffinity();
             }
         }
         break;
@@ -1305,8 +1357,8 @@ VOID NTAPI MenuItemCallback(
             }
             else
             {
-                NTSTATUS status = STATUS_RETRY;
-                ULONG pagePriority;
+                NTSTATUS status = STATUS_ACCESS_DENIED;
+                ULONG pagePriority = MEMORY_PRIORITY_NORMAL;
 
                 if (processItem->QueryHandle)
                 {
@@ -1320,7 +1372,7 @@ VOID NTAPI MenuItemCallback(
                 }
                 else
                 {
-                    PhShowStatus(menuItem->OwnerWindow, L"Unable to query the process page priority.", status, 0);  
+                    PhShowStatus(menuItem->OwnerWindow, L"Unable to query page priority.", status, 0);
                 }
             }
 
@@ -1341,8 +1393,8 @@ VOID NTAPI MenuItemCallback(
                 }
                 else
                 {
-                    NTSTATUS status = STATUS_RETRY;
-                    ULONG pagePriority;
+                    NTSTATUS status = STATUS_ACCESS_DENIED;
+                    ULONG pagePriority = MEMORY_PRIORITY_NORMAL;
 
                     if (processItem->QueryHandle)
                     {
@@ -1356,7 +1408,7 @@ VOID NTAPI MenuItemCallback(
                     }
                     else
                     {
-                        PhShowStatus(menuItem->OwnerWindow, L"Unable to query the process page priority.", status, 0);
+                        PhShowStatus(menuItem->OwnerWindow, L"Unable to query page priority.", status, 0);
                     }
                 }
 
@@ -1382,7 +1434,7 @@ VOID NTAPI MenuItemCallback(
 
                 if (!NT_SUCCESS(status))
                 {
-                    PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO key for process page priority.", status, 0);
+                    PhShowStatus(menuItem->OwnerWindow, L"Unable to update the IFEO for page priority.", status, 0);
                 }
             }
             else
@@ -1397,34 +1449,22 @@ VOID NTAPI MenuItemCallback(
         break;
     case PROCESS_BOOST_PRIORITY_ID:
         {
-            NTSTATUS status = STATUS_RETRY;
-            BOOLEAN priorityBoost = FALSE;
+            NTSTATUS status = STATUS_ACCESS_DENIED;
+            BOOLEAN priorityBoostDisabled = FALSE;
 
             if (processItem->QueryHandle)
             {
-                status = PhGetProcessPriorityBoost(processItem->QueryHandle, &priorityBoost);
+                status = PhGetProcessPriorityBoost(processItem->QueryHandle, &priorityBoostDisabled);
             }
 
             if (NT_SUCCESS(status))
             {
-                HANDLE processHandle;
-
-                status = PhOpenProcess(
-                    &processHandle,
-                    PROCESS_SET_INFORMATION,
-                    processItem->ProcessId
-                    );
-
-                if (NT_SUCCESS(status))
-                {
-                    status = PhSetProcessPriorityBoost(processHandle, !priorityBoost);
-                    NtClose(processHandle);
-                }
+                status = PhSetProcessItemPriorityBoost(processItem, !priorityBoostDisabled);
             }
 
             if (!NT_SUCCESS(status))
             {
-                PhShowStatus(menuItem->OwnerWindow, L"Unable to change the process boost priority.", status, 0);
+                PhShowStatus(menuItem->OwnerWindow, L"Unable to query process boost.", status, 0);
             }
         }
         break;
@@ -1439,22 +1479,22 @@ VOID NTAPI MenuItemCallback(
             }
             else
             {
-                NTSTATUS status = STATUS_RETRY;
-                BOOLEAN priorityBoost = FALSE;
+                NTSTATUS status = STATUS_ACCESS_DENIED;
+                BOOLEAN priorityBoostDisabled = FALSE;
 
                 if (processItem->QueryHandle)
                 {
-                    status = PhGetProcessPriorityBoost(processItem->QueryHandle, &priorityBoost);
+                    status = PhGetProcessPriorityBoost(processItem->QueryHandle, &priorityBoostDisabled);
                 }
 
                 if (NT_SUCCESS(status))
                 {
                     object = CreateDbObject(FILE_TAG, &processItem->ProcessName->sr, NULL);
-                    object->Boost = TRUE; // intentional
+                    object->Boost = TRUE;
                 }
                 else
                 {
-                    PhShowStatus(menuItem->OwnerWindow, L"Unable to query the process boost priority.", status, 0);  
+                    PhShowStatus(menuItem->OwnerWindow, L"Unable to query process boost.", status, 0);
                 }
             }
 
@@ -1475,22 +1515,147 @@ VOID NTAPI MenuItemCallback(
                 }
                 else
                 {
-                    NTSTATUS status = STATUS_RETRY;
-                    BOOLEAN priorityBoost = FALSE;
+                    NTSTATUS status = STATUS_ACCESS_DENIED;
+                    BOOLEAN priorityBoostDisabled = FALSE;
 
                     if (processItem->QueryHandle)
                     {
-                        status = PhGetProcessPriorityBoost(processItem->QueryHandle, &priorityBoost);
+                        status = PhGetProcessPriorityBoost(processItem->QueryHandle, &priorityBoostDisabled);
                     }
 
                     if (NT_SUCCESS(status))
                     {
                         object = CreateDbObject(COMMAND_LINE_TAG, &processItem->CommandLine->sr, NULL);
-                        object->Boost = TRUE; // intentional
+                        object->Boost = TRUE;
                     }
                     else
                     {
-                        PhShowStatus(menuItem->OwnerWindow, L"Unable to query the process boost priority.", status, 0);
+                        PhShowStatus(menuItem->OwnerWindow, L"Unable to query process boost.", status, 0);
+                    }
+                }
+
+                UnlockDb();
+                SaveDb();
+            }
+        }
+        break;
+    case PROCESS_EFFICIENCY_ID:
+        {
+            NTSTATUS status = STATUS_ACCESS_DENIED;
+            BOOLEAN efficiencyModeEnabled = FALSE;
+
+            if (processItem->QueryHandle)
+            {
+                POWER_THROTTLING_PROCESS_STATE powerThrottlingState;
+
+                status = PhGetProcessPowerThrottlingState(processItem->QueryHandle, &powerThrottlingState);
+
+                if (NT_SUCCESS(status))
+                {
+                    if (FlagOn(powerThrottlingState.ControlMask, POWER_THROTTLING_PROCESS_EXECUTION_SPEED) &&
+                        FlagOn(powerThrottlingState.StateMask, POWER_THROTTLING_PROCESS_EXECUTION_SPEED))
+                    {
+                        efficiencyModeEnabled = TRUE;
+                    }
+                }
+            }
+
+            if (NT_SUCCESS(status))
+            {
+                status = PhSetProcessItemThrottlingState(processItem, efficiencyModeEnabled);
+            }
+
+            if (!NT_SUCCESS(status))
+            {
+                PhShowStatus(menuItem->OwnerWindow, L"Unable to query process efficiency mode.", status, 0);
+            }
+        }
+        break;
+    case PROCESS_EFFICIENCY_SAVE_ID:
+        {
+            LockDb();
+
+            if ((object = FindDbObject(FILE_TAG, &processItem->ProcessName->sr)) && object->Efficiency)
+            {
+                object->Efficiency = FALSE;
+                DeleteDbObjectForProcessIfUnused(object);
+            }
+            else
+            {
+                NTSTATUS status = STATUS_ACCESS_DENIED;
+                BOOLEAN efficiencyModeEnabled = FALSE;
+
+                if (processItem->QueryHandle)
+                {
+                    POWER_THROTTLING_PROCESS_STATE powerThrottlingState;
+
+                    status = PhGetProcessPowerThrottlingState(processItem->QueryHandle, &powerThrottlingState);
+
+                    if (NT_SUCCESS(status))
+                    {
+                        if (FlagOn(powerThrottlingState.ControlMask, POWER_THROTTLING_PROCESS_EXECUTION_SPEED) &&
+                            FlagOn(powerThrottlingState.StateMask, POWER_THROTTLING_PROCESS_EXECUTION_SPEED))
+                        {
+                            efficiencyModeEnabled = TRUE;
+                        }
+                    }
+                }
+
+                if (NT_SUCCESS(status))
+                {
+                    object = CreateDbObject(FILE_TAG, &processItem->ProcessName->sr, NULL);
+                    object->Efficiency = efficiencyModeEnabled;
+                }
+                else
+                {
+                    PhShowStatus(menuItem->OwnerWindow, L"Unable to query process efficiency mode.", status, 0);
+                }
+            }
+
+            UnlockDb();
+            SaveDb();
+        }
+        break;
+    case PROCESS_EFFICIENCY_SAVE_FOR_THIS_COMMAND_LINE_ID:
+        {
+            if (processItem->CommandLine)
+            {
+                LockDb();
+
+                if ((object = FindDbObject(COMMAND_LINE_TAG, &processItem->CommandLine->sr)) && object->Efficiency)
+                {
+                    object->Efficiency = FALSE;
+                    DeleteDbObjectForProcessIfUnused(object);
+                }
+                else
+                {
+                    NTSTATUS status = STATUS_ACCESS_DENIED;
+                    BOOLEAN efficiencyModeEnabled = FALSE;
+
+                    if (processItem->QueryHandle)
+                    {
+                        POWER_THROTTLING_PROCESS_STATE powerThrottlingState;
+
+                        status = PhGetProcessPowerThrottlingState(processItem->QueryHandle, &powerThrottlingState);
+
+                        if (NT_SUCCESS(status))
+                        {
+                            if (FlagOn(powerThrottlingState.ControlMask, POWER_THROTTLING_PROCESS_EXECUTION_SPEED) &&
+                                FlagOn(powerThrottlingState.StateMask, POWER_THROTTLING_PROCESS_EXECUTION_SPEED))
+                            {
+                                efficiencyModeEnabled = TRUE;
+                            }
+                        }
+                    }
+
+                    if (NT_SUCCESS(status))
+                    {
+                        object = CreateDbObject(COMMAND_LINE_TAG, &processItem->CommandLine->sr, NULL);
+                        object->Efficiency = efficiencyModeEnabled;
+                    }
+                    else
+                    {
+                        PhShowStatus(menuItem->OwnerWindow, L"Unable to query process efficiency mode.", status, 0);
                     }
                 }
 
@@ -1505,15 +1670,12 @@ VOID NTAPI MenuItemCallback(
 }
 
 VOID NTAPI MenuHookCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_PLUGIN_MENU_HOOK_INFORMATION menuHookInfo = Parameter;
     ULONG id;
-
-    if (!menuHookInfo)
-        return;
 
     id = menuHookInfo->SelectedItem->Id;
 
@@ -1591,48 +1753,6 @@ VOID NTAPI MenuHookCallback(
 
             if (changed)
                 SaveDb();
-        }
-        break;
-    case PHAPP_ID_PROCESS_AFFINITY:
-        {
-            BOOLEAN changed = FALSE;
-            KAFFINITY affinityMask;
-            PPH_PROCESS_ITEM processItem = PhGetSelectedProcessItem();
-
-            if (!processItem)
-                break;
-
-            PhReferenceObject(processItem);
-
-            // Don't show the default System Informer affinity dialog.
-            menuHookInfo->Handled = TRUE;
-
-            // Show the affinity dialog (with our values).
-            if (PhShowProcessAffinityDialog2(menuHookInfo->MenuInfo->OwnerWindow, processItem, &affinityMask))
-            {
-                PDB_OBJECT object;
-
-                LockDb();
-
-                if (object = FindDbObjectForProcess(processItem, INTENT_PROCESS_AFFINITY))
-                {
-                    // Update the process affinity in our database (if the database values are different).
-                    if (object->AffinityMask != affinityMask)
-                    {
-                        object->AffinityMask = affinityMask;
-                        changed = TRUE;
-                    }
-                }
-
-                UnlockDb();
-
-                if (changed)
-                {
-                    SaveDb();
-                }
-            }
-
-            PhDereferenceObject(processItem);
         }
         break;
     case PHAPP_ID_PAGEPRIORITY_VERYLOW:
@@ -1775,6 +1895,65 @@ VOID UpdateServiceComment(
     }
 }
 
+VOID UpdateProcessAffinity(
+    _In_ PPH_PROCESS_NODE Node,
+    _In_ PPROCESS_EXTENSION Extension
+    )
+{
+    if (!Extension->ValidAffinity)
+    {
+        KAFFINITY affinityMask;
+
+        if (Node->ProcessItem->QueryHandle && NT_SUCCESS(GetProcessAffinity(Node->ProcessItem->QueryHandle, &affinityMask)))
+        {
+            PH_FORMAT format[1];
+            SIZE_T returnLength;
+            WCHAR formatBuffer[0x80];
+
+            PhInitFormatIX(&format[0], affinityMask);
+
+            if (PhFormatToBuffer(format, RTL_NUMBER_OF(format), formatBuffer, sizeof(formatBuffer), &returnLength))
+            {
+                PhMoveReference(&Extension->Affinity, PhCreateStringEx(formatBuffer, returnLength - sizeof(UNICODE_NULL)));
+            }
+            else
+            {
+                PhClearReference(&Extension->Affinity);
+            }
+        }
+        else
+        {
+            PhClearReference(&Extension->Affinity);
+        }
+
+        Extension->ValidAffinity = TRUE;
+    }
+}
+
+VOID InvalidateProcessAffinity(
+    VOID
+    )
+{
+    PLIST_ENTRY listEntry;
+
+    PhAcquireQueuedLockExclusive(&ProcessListLock);
+
+    listEntry = ProcessListHead.Flink;
+
+    while (listEntry != &ProcessListHead)
+    {
+        PPROCESS_EXTENSION extension;
+
+        extension = CONTAINING_RECORD(listEntry, PROCESS_EXTENSION, ListEntry);
+
+        extension->ValidAffinity = FALSE;
+
+        listEntry = listEntry->Flink;
+    }
+
+    PhReleaseQueuedLockExclusive(&ProcessListLock);
+}
+
 VOID TreeNewMessageCallback(
     _In_opt_ PVOID Parameter,
     _In_opt_ PVOID Context
@@ -1803,12 +1982,22 @@ VOID TreeNewMessageCallback(
                     {
                         PPROCESS_EXTENSION extension;
 
-                        extension = PhPluginGetObjectExtension(PluginInstance, node->ProcessItem, EmProcessItemType);
+                        extension = GetProcessObjectExtension(node->ProcessItem);
                         UpdateProcessComment(node, extension);
                         getCellText->Text = PhGetStringRef(extension->Comment);
                     }
                     break;
+                case AFFINITY_COLUMN_ID:
+                    {
+                        PPROCESS_EXTENSION extension;
+
+                        extension = GetProcessObjectExtension(node->ProcessItem);
+                        UpdateProcessAffinity(node, extension);
+                        getCellText->Text = PhGetStringRef(extension->Affinity);
+                    }
+                    break;
                 }
+    
             }
             else if (message->TreeNewHandle == ServiceTreeNewHandle)
             {
@@ -1822,7 +2011,7 @@ VOID TreeNewMessageCallback(
                     {
                         PSERVICE_EXTENSION extension;
 
-                        extension = PhPluginGetObjectExtension(PluginInstance, node->ServiceItem, EmServiceItemType);
+                        extension = GetServiceObjectExtension(node->ServiceItem);
                         UpdateServiceComment(node, extension);
                         getCellText->Text = PhGetStringRef(extension->Comment);
                     }
@@ -1839,21 +2028,18 @@ VOID MainWindowShowingCallback(
     _In_opt_ PVOID Context
     )
 {
-    if (ToolStatusInterface)
+    if (ToolStatusInterface = PhGetPluginInterfaceZ(TOOLSTATUS_PLUGIN_NAME, TOOLSTATUS_INTERFACE_VERSION))
     {
         PhRegisterCallback(ToolStatusInterface->SearchChangedEvent, SearchChangedHandler, NULL, &SearchChangedRegistration);
     }
 }
 
 VOID ProcessPropertiesInitializingCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_PLUGIN_PROCESS_PROPCONTEXT propContext = Parameter;
-
-    if (!propContext)
-        return;
 
     PhAddProcessPropPage(
         propContext->PropContext,
@@ -1868,8 +2054,10 @@ VOID AddSavePriorityMenuItemsAndHook(
     )
 {
     PPH_EMENU_ITEM affinityMenuItem;
-    PPH_EMENU_ITEM boostMenuItem;
+    PPH_EMENU_ITEM boostMenuItem = NULL;
     PPH_EMENU_ITEM boostPluginMenuItem;
+    PPH_EMENU_ITEM efficiencyMenuItem;
+    PPH_EMENU_ITEM efficiencyPluginMenuItem;
     PPH_EMENU_ITEM priorityMenuItem;
     PPH_EMENU_ITEM ioPriorityMenuItem;
     PPH_EMENU_ITEM pagePriorityMenuItem;
@@ -1881,15 +2069,16 @@ VOID AddSavePriorityMenuItemsAndHook(
 
     if (affinityMenuItem = PhFindEMenuItem(MenuInfo->Menu, 0, NULL, PHAPP_ID_PROCESS_AFFINITY))
     {
-        // HACK: Change default Affinity menu-item into a drop-down list
-        PhInsertEMenuItem(affinityMenuItem, PhCreateEMenuItem(0, affinityMenuItem->Id, L"Set &affinity", NULL, NULL), ULONG_MAX);
-        //PhInsertEMenuItem(affinityMenuItem, PhPluginCreateEMenuItem(PluginInstance, 0, PHAPP_ID_PROCESS_AFFINITY, L"Set &affinity", NULL), PhIndexOfEMenuItem(MenuInfo->Menu, affinityMenuItem) + 1);
-        //PhRemoveEMenuItem(affinityMenuItem, affinityMenuItem, 0);
+        // HACK: Change the affinity menu into a drop-down list.
+        ULONG index = PhIndexOfEMenuItem(MenuInfo->Menu, affinityMenuItem);
+        PhRemoveEMenuItem(MenuInfo->Menu, affinityMenuItem, 0);
 
-        // Insert standard menu-items
+        affinityMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, 0, L"&Affinity", NULL);
+        PhInsertEMenuItem(affinityMenuItem, PhPluginCreateEMenuItem(PluginInstance, 0, PROCESS_AFFINITY_ID, L"Set &affinity", NULL), ULONG_MAX);
         PhInsertEMenuItem(affinityMenuItem, PhCreateEMenuSeparator(), ULONG_MAX);
         PhInsertEMenuItem(affinityMenuItem, saveMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, PROCESS_AFFINITY_SAVE_ID, PhaFormatString(L"&Save for %s", ProcessItem->ProcessName->Buffer)->Buffer, NULL), ULONG_MAX);
         PhInsertEMenuItem(affinityMenuItem, saveForCommandLineMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, PROCESS_AFFINITY_SAVE_FOR_THIS_COMMAND_LINE_ID, L"Save &for this command line", NULL), ULONG_MAX);
+        PhInsertEMenuItem(MenuInfo->Menu, affinityMenuItem, index);
 
         if (!ProcessItem->CommandLine)
             saveForCommandLineMenuItem->Flags |= PH_EMENU_DISABLED;
@@ -1905,18 +2094,14 @@ VOID AddSavePriorityMenuItemsAndHook(
     }
 
     // Boost
-    if (boostMenuItem = PhFindEMenuItem(MenuInfo->Menu, 0, NULL, PHAPP_ID_PROCESS_BOOST))
+    if (affinityMenuItem)
     {
-        // HACK: Change default Boost menu-item into a drop-down list.
-        ULONG index = PhIndexOfEMenuItem(MenuInfo->Menu, boostMenuItem);
-        PhRemoveEMenuItem(MenuInfo->Menu, boostMenuItem, 0);
-
         boostMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, 0, L"&Boost", NULL);
         PhInsertEMenuItem(boostMenuItem, boostPluginMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, PROCESS_BOOST_PRIORITY_ID, L"Set &boost", NULL), ULONG_MAX);
         PhInsertEMenuItem(boostMenuItem, PhCreateEMenuSeparator(), ULONG_MAX);
         PhInsertEMenuItem(boostMenuItem, saveMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, PROCESS_BOOST_PRIORITY_SAVE_ID, PhaFormatString(L"&Save for %s", ProcessItem->ProcessName->Buffer)->Buffer, NULL), ULONG_MAX);
         PhInsertEMenuItem(boostMenuItem, saveForCommandLineMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, PROCESS_BOOST_PRIORITY_SAVE_FOR_THIS_COMMAND_LINE_ID, L"Save &for this command line", NULL), ULONG_MAX);
-        PhInsertEMenuItem(MenuInfo->Menu, boostMenuItem, index);
+        PhInsertEMenuItem(MenuInfo->Menu, boostMenuItem, PhIndexOfEMenuItem(MenuInfo->Menu, affinityMenuItem) + 1);
 
         if (!ProcessItem->CommandLine)
             saveForCommandLineMenuItem->Flags |= PH_EMENU_DISABLED;
@@ -1932,11 +2117,48 @@ VOID AddSavePriorityMenuItemsAndHook(
 
         if (ProcessItem->QueryHandle)
         {
-            BOOLEAN priorityBoost = FALSE;
+            BOOLEAN priorityBoostDisabled = FALSE;
 
-            if (NT_SUCCESS(PhGetProcessPriorityBoost(ProcessItem->QueryHandle, &priorityBoost)) && priorityBoost)
+            if (NT_SUCCESS(PhGetProcessPriorityBoost(ProcessItem->QueryHandle, &priorityBoostDisabled)) && !priorityBoostDisabled)
             {
                 boostPluginMenuItem->Flags |= PH_EMENU_CHECKED;
+            }
+        }
+    }
+
+    // Efficiency
+    if (boostMenuItem)
+    {
+        efficiencyMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, 0, L"&Efficiency", NULL);
+        PhInsertEMenuItem(efficiencyMenuItem, efficiencyPluginMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, PROCESS_EFFICIENCY_ID, L"Set &efficiency mode", NULL), ULONG_MAX);
+        PhInsertEMenuItem(efficiencyMenuItem, PhCreateEMenuSeparator(), ULONG_MAX);
+        PhInsertEMenuItem(efficiencyMenuItem, saveMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, PROCESS_EFFICIENCY_SAVE_ID, PhaFormatString(L"&Save for %s", ProcessItem->ProcessName->Buffer)->Buffer, NULL), ULONG_MAX);
+        PhInsertEMenuItem(efficiencyMenuItem, saveForCommandLineMenuItem = PhPluginCreateEMenuItem(PluginInstance, 0, PROCESS_EFFICIENCY_SAVE_FOR_THIS_COMMAND_LINE_ID, L"Save &for this command line", NULL), ULONG_MAX);
+        PhInsertEMenuItem(MenuInfo->Menu, efficiencyMenuItem, PhIndexOfEMenuItem(MenuInfo->Menu, boostMenuItem) + 1);
+
+        if (!ProcessItem->CommandLine)
+            PhSetDisabledEMenuItem(saveForCommandLineMenuItem);
+
+        LockDb();
+
+        if ((object = FindDbObject(FILE_TAG, &ProcessItem->ProcessName->sr)) && object->Efficiency)
+            SetFlag(saveMenuItem->Flags, PH_EMENU_CHECKED);
+        if (ProcessItem->CommandLine && (object = FindDbObject(COMMAND_LINE_TAG, &ProcessItem->CommandLine->sr)) && object->Efficiency)
+            SetFlag(saveForCommandLineMenuItem->Flags, PH_EMENU_CHECKED);
+
+        UnlockDb();
+
+        if (ProcessItem->QueryHandle)
+        {
+            POWER_THROTTLING_PROCESS_STATE powerThrottlingState;
+
+            if (NT_SUCCESS(PhGetProcessPowerThrottlingState(ProcessItem->QueryHandle, &powerThrottlingState)))
+            {
+                if (FlagOn(powerThrottlingState.ControlMask, POWER_THROTTLING_PROCESS_EXECUTION_SPEED) &&
+                    FlagOn(powerThrottlingState.StateMask, POWER_THROTTLING_PROCESS_EXECUTION_SPEED))
+                {
+                    SetFlag(efficiencyPluginMenuItem->Flags, PH_EMENU_CHECKED);
+                }
             }
         }
     }
@@ -2023,8 +2245,8 @@ VOID AddSavePriorityMenuItemsAndHook(
 }
 
 VOID ProcessMenuInitializingCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     BOOLEAN highlightPresent = FALSE;
@@ -2034,9 +2256,6 @@ VOID ProcessMenuInitializingCallback(
     PPH_EMENU_ITEM collapseMenuItem;
     PPH_EMENU_ITEM highlightMenuItem;
     PDB_OBJECT object;
-
-    if (!Parameter)
-        return;
 
     if (menuInfo->u.Process.NumberOfProcesses != 1)
         return;
@@ -2060,7 +2279,7 @@ VOID ProcessMenuInitializingCallback(
 
     LockDb();
 
-    if ((object = FindDbObject(FILE_TAG, &menuInfo->u.Process.Processes[0]->ProcessName->sr)) && object->Collapse)
+    if ((object = FindDbObject(FILE_TAG, &processItem->ProcessName->sr)) && object->Collapse)
         collapseMenuItem->Flags |= PH_EMENU_CHECKED;
     if (highlightPresent)
         highlightMenuItem->Flags |= PH_EMENU_CHECKED;
@@ -2078,8 +2297,8 @@ static LONG NTAPI ProcessCommentSortFunction(
 {
     PPH_PROCESS_NODE node1 = Node1;
     PPH_PROCESS_NODE node2 = Node2;
-    PPROCESS_EXTENSION extension1 = PhPluginGetObjectExtension(PluginInstance, node1->ProcessItem, EmProcessItemType);
-    PPROCESS_EXTENSION extension2 = PhPluginGetObjectExtension(PluginInstance, node2->ProcessItem, EmProcessItemType);
+    PPROCESS_EXTENSION extension1 = GetProcessObjectExtension(node1->ProcessItem);
+    PPROCESS_EXTENSION extension2 = GetProcessObjectExtension(node2->ProcessItem);
 
     UpdateProcessComment(node1, extension1);
     UpdateProcessComment(node2, extension2);
@@ -2087,16 +2306,33 @@ static LONG NTAPI ProcessCommentSortFunction(
     return PhCompareStringWithNull(extension1->Comment, extension2->Comment, TRUE);
 }
 
+static LONG NTAPI ProcessAffinitySortFunction(
+    _In_ PVOID Node1,
+    _In_ PVOID Node2,
+    _In_ ULONG SubId,
+    _In_ PH_SORT_ORDER SortOrder,
+    _In_ PVOID Context
+    )
+{
+    PPH_PROCESS_NODE node1 = Node1;
+    PPH_PROCESS_NODE node2 = Node2;
+    PPROCESS_EXTENSION extension1 = GetProcessObjectExtension(node1->ProcessItem);
+    PPROCESS_EXTENSION extension2 = GetProcessObjectExtension(node2->ProcessItem);
+
+    UpdateProcessAffinity(node1, extension1);
+    UpdateProcessAffinity(node2, extension2);
+
+    return PhCompareStringWithNull(extension1->Affinity, extension2->Affinity, TRUE);
+}
+
 VOID ProcessTreeNewInitializingCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_PLUGIN_TREENEW_INFORMATION info = Parameter;
     PH_TREENEW_COLUMN column;
-
-    if (!Parameter)
-        return;
+    PH_TREENEW_COLUMN affinity;
 
     ProcessTreeNewHandle = info->TreeNewHandle;
 
@@ -2105,20 +2341,23 @@ VOID ProcessTreeNewInitializingCallback(
     column.Width = 120;
     column.Alignment = PH_ALIGN_LEFT;
 
+    memset(&affinity, 0, sizeof(PH_TREENEW_COLUMN));
+    affinity.Text = L"Affinity";
+    affinity.Width = 120;
+    affinity.Alignment = PH_ALIGN_LEFT;
+        
     PhPluginAddTreeNewColumn(PluginInstance, info->CmData, &column, COMMENT_COLUMN_ID, NULL, ProcessCommentSortFunction);
+    PhPluginAddTreeNewColumn(PluginInstance, info->CmData, &affinity, AFFINITY_COLUMN_ID, NULL, ProcessAffinitySortFunction);
 }
 
 VOID GetProcessHighlightingColorCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_PLUGIN_GET_HIGHLIGHTING_COLOR getHighlightingColor = Parameter;
     PPH_PROCESS_ITEM processItem;
     PDB_OBJECT object;
-
-    if (!Parameter)
-        return;
 
     processItem = (PPH_PROCESS_ITEM)getHighlightingColor->Parameter;
 
@@ -2138,15 +2377,12 @@ VOID GetProcessHighlightingColorCallback(
 }
 
 VOID ServicePropertiesInitializingCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_PLUGIN_OBJECT_PROPERTIES objectProperties = Parameter;
     PROPSHEETPAGE propSheetPage;
-
-    if (!Parameter)
-        return;
 
     if (objectProperties->NumberOfPages < objectProperties->MaximumNumberOfPages)
     {
@@ -2172,8 +2408,8 @@ LONG NTAPI ServiceCommentSortFunction(
 {
     PPH_SERVICE_NODE node1 = Node1;
     PPH_SERVICE_NODE node2 = Node2;
-    PSERVICE_EXTENSION extension1 = PhPluginGetObjectExtension(PluginInstance, node1->ServiceItem, EmServiceItemType);
-    PSERVICE_EXTENSION extension2 = PhPluginGetObjectExtension(PluginInstance, node2->ServiceItem, EmServiceItemType);
+    PSERVICE_EXTENSION extension1 = GetServiceObjectExtension(node1->ServiceItem);
+    PSERVICE_EXTENSION extension2 = GetServiceObjectExtension(node2->ServiceItem);
 
     UpdateServiceComment(node1, extension1);
     UpdateServiceComment(node2, extension2);
@@ -2182,15 +2418,12 @@ LONG NTAPI ServiceCommentSortFunction(
 }
 
 VOID ServiceTreeNewInitializingCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_PLUGIN_TREENEW_INFORMATION info = Parameter;
     PH_TREENEW_COLUMN column;
-
-    if (!info)
-        return;
 
     ServiceTreeNewHandle = info->TreeNewHandle;
 
@@ -2203,15 +2436,12 @@ VOID ServiceTreeNewInitializingCallback(
 }
 
 VOID MiListSectionMenuInitializingCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_PLUGIN_MENU_INFORMATION menuInfo = Parameter;
     PPH_PROCESS_ITEM processItem;
-
-    if (!menuInfo)
-        return;
 
     processItem = menuInfo->u.MiListSection.ProcessGroup->Representative;
 
@@ -2222,18 +2452,16 @@ VOID MiListSectionMenuInitializingCallback(
 }
 
 VOID ProcessModifiedCallback(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_PROCESS_ITEM processItem = Parameter;
     PPROCESS_EXTENSION extension;
 
-    if (!processItem)
-        return;
-
-    extension = PhPluginGetObjectExtension(PluginInstance, processItem, EmProcessItemType);
+    extension = GetProcessObjectExtension(processItem);
     extension->Valid = FALSE;
+    extension->ValidAffinity = FALSE;
 }
 
 VOID ProcessesUpdatedCallback(
@@ -2262,20 +2490,18 @@ VOID ProcessesUpdatedCallback(
 
         if (object = FindDbObjectForProcess(processItem, INTENT_PROCESS_PRIORITY_CLASS))
         {
-            if (processItem->PriorityClass != object->PriorityClass)
+            if (processItem->PriorityClass != object->PriorityClass && !extension->SkipPriority)
             {
-                PROCESS_PRIORITY_CLASS priorityClass;
-
-                priorityClass.Foreground = FALSE;
-                priorityClass.PriorityClass = (UCHAR)object->PriorityClass;
-
-                PhSetProcessItemPriority(processItem, priorityClass);
+                if (!NT_SUCCESS(PhSetProcessItemPriority(processItem, (UCHAR)object->PriorityClass)))
+                {
+                    extension->SkipPriority = TRUE;
+                }
             }
         }
 
         if (object = FindDbObjectForProcess(processItem, INTENT_PROCESS_IO_PRIORITY))
         {
-            if (object->IoPriorityPlusOne != 0)
+            if (object->IoPriorityPlusOne != 0 && !extension->SkipIoPriority)
             {
                 IO_PRIORITY_HINT ioPriority;
 
@@ -2283,7 +2509,10 @@ VOID ProcessesUpdatedCallback(
                 {
                     if (ioPriority != object->IoPriorityPlusOne - 1)
                     {
-                        PhSetProcessItemIoPriority(processItem, object->IoPriorityPlusOne - 1);
+                        if (!NT_SUCCESS(PhSetProcessItemIoPriority(processItem, object->IoPriorityPlusOne - 1)))
+                        {
+                            extension->SkipIoPriority = TRUE;
+                        }
                     }
                 }
             }
@@ -2291,7 +2520,7 @@ VOID ProcessesUpdatedCallback(
 
         if (object = FindDbObjectForProcess(processItem, INTENT_PROCESS_AFFINITY))
         {
-            if (object->AffinityMask != 0)
+            if (object->AffinityMask != 0 && !extension->SkipAffinity)
             {
                 KAFFINITY affinityMask;
 
@@ -2299,7 +2528,10 @@ VOID ProcessesUpdatedCallback(
                 {
                     if (affinityMask != object->AffinityMask)
                     {
-                        PhSetProcessItemAffinityMask(processItem, object->AffinityMask);
+                        if (!NT_SUCCESS(PhSetProcessItemAffinityMask(processItem, object->AffinityMask)))
+                        {
+                            extension->SkipAffinity = TRUE;
+                        }
                     }
                 }
             }
@@ -2307,7 +2539,7 @@ VOID ProcessesUpdatedCallback(
 
         if (object = FindDbObjectForProcess(processItem, INTENT_PROCESS_PAGEPRIORITY))
         {
-            if (object->PagePriorityPlusOne != 0)
+            if (object->PagePriorityPlusOne != 0 && !extension->SkipPagePriority)
             {
                 ULONG pagePriority;
 
@@ -2315,7 +2547,10 @@ VOID ProcessesUpdatedCallback(
                 {
                     if (pagePriority != object->PagePriorityPlusOne - 1)
                     {
-                        PhSetProcessItemPagePriority(processItem, object->PagePriorityPlusOne - 1);
+                        if (!NT_SUCCESS(PhSetProcessItemPagePriority(processItem, object->PagePriorityPlusOne - 1)))
+                        {
+                            extension->SkipPagePriority = TRUE;
+                        }
                     }
                 }
             }
@@ -2323,15 +2558,44 @@ VOID ProcessesUpdatedCallback(
 
         if (object = FindDbObjectForProcess(processItem, INTENT_PROCESS_BOOST))
         {
-            if (object->Boost)
+            if (object->Boost && !extension->SkipBoostPriority)
             {
-                BOOLEAN priorityBoost = FALSE;
+                BOOLEAN priorityBoostDisabled = FALSE;
 
-                if (processItem->QueryHandle && NT_SUCCESS(PhGetProcessPriorityBoost(processItem->QueryHandle, &priorityBoost)))
+                if (processItem->QueryHandle && NT_SUCCESS(PhGetProcessPriorityBoost(processItem->QueryHandle, &priorityBoostDisabled)))
                 {
-                    if (priorityBoost != object->Boost)
+                    if (priorityBoostDisabled != object->Boost)
                     {
-                        PhSetProcessItemPriorityBoost(processItem, object->Boost);
+                        if (!NT_SUCCESS(PhSetProcessItemPriorityBoost(processItem, object->Boost)))
+                        {
+                            extension->SkipBoostPriority = TRUE;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (object = FindDbObjectForProcess(processItem, INTENT_PROCESS_EFFICIENCY))
+        {
+            if (object->Efficiency && !extension->SkipEfficiency)
+            {
+                POWER_THROTTLING_PROCESS_STATE powerThrottlingState;
+                BOOLEAN efficiencyModeEnabled = FALSE;
+
+                if (processItem->QueryHandle && NT_SUCCESS(PhGetProcessPowerThrottlingState(processItem->QueryHandle, &powerThrottlingState)))
+                {
+                    if (FlagOn(powerThrottlingState.ControlMask, POWER_THROTTLING_PROCESS_EXECUTION_SPEED) &&
+                        FlagOn(powerThrottlingState.StateMask, POWER_THROTTLING_PROCESS_EXECUTION_SPEED))
+                    {
+                        efficiencyModeEnabled = TRUE;
+                    }
+
+                    if (efficiencyModeEnabled != object->Efficiency)
+                    {
+                        if (!NT_SUCCESS(PhSetProcessItemThrottlingState(processItem, efficiencyModeEnabled)))
+                        {
+                            extension->SkipEfficiency = TRUE;
+                        }
                     }
                 }
             }
@@ -2349,9 +2613,9 @@ VOID SearchChangedHandler(
     _In_opt_ PVOID Context
     )
 {
-    PPH_STRING searchText = Parameter;
+    ULONG_PTR matchHandle = (ULONG_PTR)Parameter;
 
-    if (PhIsNullOrEmptyString(searchText))
+    if (!matchHandle)
     {
         // ToolStatus expanded all nodes for searching, but the search text just became empty. We
         // should re-collapse processes.
@@ -2408,6 +2672,8 @@ VOID ProcessItemDeleteCallback(
     PPROCESS_EXTENSION extension = Extension;
 
     PhClearReference(&extension->Comment);
+    PhClearReference(&extension->Affinity);
+
     PhAcquireQueuedLockExclusive(&ProcessListLock);
     RemoveEntryList(&extension->ListEntry);
     PhReleaseQueuedLockExclusive(&ProcessListLock);
@@ -2426,23 +2692,7 @@ VOID ProcessNodeCreateCallback(
 
     if ((object = FindDbObjectForProcess(processNode->ProcessItem, INTENT_PROCESS_COLLAPSE)) && object->Collapse)
     {
-        BOOLEAN visible = TRUE;
-
-        for (PPH_PROCESS_NODE parent = processNode->Parent; parent; parent = parent->Parent)
-        {
-            if (!parent->Node.Visible)
-            {
-                // Don't change the Expanded state when the node is already hidden by
-                // main window -> View -> Hide Processes from other users menu (dmex)
-                visible = FALSE;
-                break;
-            }
-        }
-
-        if (visible)
-        {
-            processNode->Node.Expanded = FALSE;
-        }
+        processNode->Node.Expanded = FALSE;
     }
 
     UnlockDb();
@@ -2489,8 +2739,8 @@ LOGICAL DllMain(
         PPH_PLUGIN_INFORMATION info;
         PH_SETTING_CREATE settings[] =
         {
-            { StringSettingType, SETTING_NAME_DATABASE_PATH, L"%APPDATA%\\Process Hacker\\usernotesdb.xml" },
-            { StringSettingType, SETTING_NAME_CUSTOM_COLOR_LIST, L"" }
+            { StringSettingType, SETTING_NAME_CUSTOM_COLOR_LIST, L"" },
+            { StringSettingType, SETTING_NAME_OPTIONS_DB_COLUMNS, L"" },
         };
 
         PluginInstance = PhRegisterPlugin(PLUGIN_NAME, Instance, &info);
@@ -2508,12 +2758,12 @@ LOGICAL DllMain(
             NULL,
             &PluginLoadCallbackRegistration
             );
-        PhRegisterCallback(
-            PhGetPluginCallback(PluginInstance, PluginCallbackUnload),
-            UnloadCallback,
-            NULL,
-            &PluginUnloadCallbackRegistration
-            );
+        //PhRegisterCallback(
+        //    PhGetPluginCallback(PluginInstance, PluginCallbackUnload),
+        //    UnloadCallback,
+        //    NULL,
+        //    &PluginUnloadCallbackRegistration
+        //    );
         PhRegisterCallback(
             PhGetGeneralCallback(GeneralCallbackMainMenuInitializing),
             MainMenuInitializingCallback,
@@ -2631,506 +2881,4 @@ LOGICAL DllMain(
     }
 
     return TRUE;
-}
-
-BOOLEAN IsCollapseServicesOnStartEnabled(
-    VOID
-    )
-{
-    static PH_STRINGREF servicesBaseName = PH_STRINGREF_INIT(L"services.exe");
-    PDB_OBJECT object;
-
-    object = FindDbObject(FILE_TAG, &servicesBaseName);
-
-    if (object && object->Collapse)
-    {
-        return TRUE;
-    }
-
-    return FALSE;
-}
-
-VOID AddOrRemoveCollapseServicesOnStart(
-    _In_ BOOLEAN CollapseServicesOnStart
-    )
-{
-    // This is for backwards compat with PhCsCollapseServicesOnStart (dmex)
-    // https://github.com/processhacker/processhacker/issues/519
-
-    if (CollapseServicesOnStart)
-    {
-        static PH_STRINGREF servicesBaseName = PH_STRINGREF_INIT(L"services.exe");
-        PDB_OBJECT object;
-
-        if (object = FindDbObject(FILE_TAG, &servicesBaseName))
-        {
-            object->Collapse = TRUE;
-        }
-        else
-        {
-            object = CreateDbObject(FILE_TAG, &servicesBaseName, NULL);
-            object->Collapse = TRUE;
-        }
-    }
-    else
-    {
-        static PH_STRINGREF servicesBaseName = PH_STRINGREF_INIT(L"services.exe");
-        PDB_OBJECT object;
-
-        object = FindDbObject(FILE_TAG, &servicesBaseName);
-
-        if (object && object->Collapse)
-        {
-            object->Collapse = FALSE;
-            DeleteDbObjectForProcessIfUnused(object);
-        }
-    }
-}
-
-INT_PTR CALLBACK OptionsDlgProc(
-    _In_ HWND hwndDlg,
-    _In_ UINT uMsg,
-    _In_ WPARAM wParam,
-    _In_ LPARAM lParam
-    )
-{
-    static PH_LAYOUT_MANAGER LayoutManager;
-
-    switch (uMsg)
-    {
-    case WM_INITDIALOG:
-        {
-            PhSetDialogItemText(hwndDlg, IDC_DATABASE, PhaGetStringSetting(SETTING_NAME_DATABASE_PATH)->Buffer);
-
-            PhInitializeLayoutManager(&LayoutManager, hwndDlg);
-            PhAddLayoutItem(&LayoutManager, GetDlgItem(hwndDlg, IDC_DATABASE), NULL, PH_ANCHOR_TOP | PH_ANCHOR_LEFT | PH_ANCHOR_RIGHT);
-            PhAddLayoutItem(&LayoutManager, GetDlgItem(hwndDlg, IDC_BROWSE), NULL, PH_ANCHOR_TOP | PH_ANCHOR_RIGHT);
-
-            Button_SetCheck(GetDlgItem(hwndDlg, IDC_COLLAPSE_SERVICES_CHECK),
-                IsCollapseServicesOnStartEnabled());
-        }
-        break;
-    case WM_DESTROY:
-        {
-            PhSetStringSetting2(SETTING_NAME_DATABASE_PATH, &PhaGetDlgItemText(hwndDlg, IDC_DATABASE)->sr);
-
-            PhDeleteLayoutManager(&LayoutManager);
-        }
-        break;
-    case WM_SIZE:
-        {
-            PhLayoutManagerLayout(&LayoutManager);
-        }
-        break;
-    case WM_COMMAND:
-        {
-            switch (GET_WM_COMMAND_ID(wParam, lParam))
-            {
-            case IDC_BROWSE:
-                {
-                    static PH_FILETYPE_FILTER filters[] =
-                    {
-                        { L"XML files (*.xml)", L"*.xml" },
-                        { L"All files (*.*)", L"*.*" }
-                    };
-                    PVOID fileDialog;
-                    PPH_STRING fileName;
-
-                    fileDialog = PhCreateOpenFileDialog();
-                    PhSetFileDialogFilter(fileDialog, filters, sizeof(filters) / sizeof(PH_FILETYPE_FILTER));
-
-                    fileName = PH_AUTO(PhGetFileName(PhaGetDlgItemText(hwndDlg, IDC_DATABASE)));
-                    PhSetFileDialogFileName(fileDialog, fileName->Buffer);
-
-                    if (PhShowFileDialog(hwndDlg, fileDialog))
-                    {
-                        fileName = PH_AUTO(PhGetFileDialogFileName(fileDialog));
-                        PhSetDialogItemText(hwndDlg, IDC_DATABASE, fileName->Buffer);
-                    }
-
-                    PhFreeFileDialog(fileDialog);
-                }
-                break;
-            case IDC_COLLAPSE_SERVICES_CHECK:
-                {
-                    AddOrRemoveCollapseServicesOnStart(
-                        Button_GetCheck(GET_WM_COMMAND_HWND(wParam, lParam)) == BST_CHECKED);
-
-                    // uncomment for realtime toggle
-                    //LoadCollapseServicesOnStart();
-                    //PhExpandAllProcessNodes(TRUE);
-                    //if (ToolStatusInterface)
-                    //    PhInvokeCallback(ToolStatusInterface->SearchChangedEvent, PH_AUTO(PhReferenceEmptyString()));
-                }
-                break;
-            }
-        }
-        break;
-    case WM_CTLCOLORBTN:
-        return HANDLE_WM_CTLCOLORBTN(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
-    case WM_CTLCOLORDLG:
-        return HANDLE_WM_CTLCOLORDLG(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
-    case WM_CTLCOLORSTATIC:
-        return HANDLE_WM_CTLCOLORSTATIC(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
-    }
-
-    return FALSE;
-}
-
-INT_PTR CALLBACK ProcessCommentPageDlgProc(
-    _In_ HWND hwndDlg,
-    _In_ UINT uMsg,
-    _In_ WPARAM wParam,
-    _In_ LPARAM lParam
-    )
-{
-    LPPROPSHEETPAGE propSheetPage;
-    PPH_PROCESS_PROPPAGECONTEXT propPageContext;
-    PPH_PROCESS_ITEM processItem;
-    PPROCESS_COMMENT_PAGE_CONTEXT context;
-
-    if (PhPropPageDlgProcHeader(hwndDlg, uMsg, lParam, &propSheetPage, &propPageContext, &processItem))
-    {
-        context = propPageContext->Context;
-    }
-    else
-    {
-        return FALSE;
-    }
-
-    switch (uMsg)
-    {
-    case WM_INITDIALOG:
-        {
-            PDB_OBJECT object;
-            PPH_STRING comment;
-
-            context = propPageContext->Context = PhAllocate(sizeof(PROCESS_COMMENT_PAGE_CONTEXT));
-            context->CommentHandle = GetDlgItem(hwndDlg, IDC_COMMENT);
-            context->RevertHandle = GetDlgItem(hwndDlg, IDC_REVERT);
-            context->MatchCommandlineHandle = GetDlgItem(hwndDlg, IDC_MATCHCOMMANDLINE);
-
-            // Load the comment.
-            Edit_LimitText(context->CommentHandle, UNICODE_STRING_MAX_CHARS);
-
-            LockDb();
-
-            if (object = FindDbObjectForProcess(processItem, INTENT_PROCESS_COMMENT))
-            {
-                PhSetReference(&comment, object->Comment);
-
-                if (processItem->CommandLine && (object = FindDbObject(COMMAND_LINE_TAG, &processItem->CommandLine->sr)) && object->Comment->Length != 0)
-                {
-                    Button_SetCheck(context->MatchCommandlineHandle, BST_CHECKED);
-                }
-            }
-            else
-            {
-                comment = PhReferenceEmptyString();
-            }
-
-            UnlockDb();
-
-            Edit_SetText(context->CommentHandle, comment->Buffer);
-            context->OriginalComment = comment;
-
-            if (!processItem->CommandLine)
-                EnableWindow(context->MatchCommandlineHandle, FALSE);
-
-            PhInitializeWindowTheme(hwndDlg, !!PhGetIntegerSetting(L"EnableThemeSupport"));
-        }
-        break;
-    case WM_DESTROY:
-        {
-            PDB_OBJECT object;
-            PPH_STRING comment;
-            BOOLEAN matchCommandLine;
-            BOOLEAN done = FALSE;
-
-            comment = PH_AUTO(PhGetWindowText(context->CommentHandle));
-            matchCommandLine = Button_GetCheck(context->MatchCommandlineHandle) == BST_CHECKED;
-
-            if (!processItem->CommandLine)
-                matchCommandLine = FALSE;
-
-            LockDb();
-
-            if (processItem->CommandLine && !matchCommandLine)
-            {
-                PDB_OBJECT objectForProcessName;
-                PPH_STRING message = NULL;
-
-                object = FindDbObject(COMMAND_LINE_TAG, &processItem->CommandLine->sr);
-                objectForProcessName = FindDbObject(FILE_TAG, &processItem->ProcessName->sr);
-
-                if (object && objectForProcessName && object->Comment->Length != 0 && objectForProcessName->Comment->Length != 0 &&
-                    !PhEqualString(comment, objectForProcessName->Comment, FALSE))
-                {
-                    message = PhaFormatString(
-                        L"Do you want to replace the comment for %s which is currently\n    \"%s\"\n"
-                        L"with\n    \"%s\"?",
-                        processItem->ProcessName->Buffer,
-                        objectForProcessName->Comment->Buffer,
-                        comment->Buffer
-                        );
-                }
-
-                if (object)
-                {
-                    PhMoveReference(&object->Comment, PhReferenceEmptyString());
-                    DeleteDbObjectForProcessIfUnused(object);
-                }
-
-                if (message)
-                {
-                    // Prevent deadlocks.
-                    UnlockDb();
-
-                    if (MessageBox(hwndDlg, message->Buffer, L"Comment", MB_ICONQUESTION | MB_YESNO) == IDNO)
-                    {
-                        done = TRUE;
-                    }
-
-                    LockDb();
-                }
-            }
-
-            if (!done)
-            {
-                if (comment->Length != 0)
-                {
-                    if (matchCommandLine)
-                        CreateDbObject(COMMAND_LINE_TAG, &processItem->CommandLine->sr, comment);
-                    else
-                        CreateDbObject(FILE_TAG, &processItem->ProcessName->sr, comment);
-                }
-                else
-                {
-                    if (
-                        (!matchCommandLine && (object = FindDbObject(FILE_TAG, &processItem->ProcessName->sr))) ||
-                        (matchCommandLine && (object = FindDbObject(COMMAND_LINE_TAG, &processItem->CommandLine->sr)))
-                        )
-                    {
-                        PhMoveReference(&object->Comment, PhReferenceEmptyString());
-                        DeleteDbObjectForProcessIfUnused(object);
-                    }
-                }
-            }
-
-            UnlockDb();
-
-            PhDereferenceObject(context->OriginalComment);
-            PhFree(context);
-
-            SaveDb();
-            InvalidateProcessComments();
-        }
-        break;
-    case WM_SHOWWINDOW:
-        {
-            PPH_LAYOUT_ITEM dialogItem;
-
-            if (dialogItem = PhBeginPropPageLayout(hwndDlg, propPageContext))
-            {
-                PhAddPropPageLayoutItem(hwndDlg, context->CommentHandle, dialogItem, PH_ANCHOR_ALL);
-                PhAddPropPageLayoutItem(hwndDlg, context->RevertHandle, dialogItem, PH_ANCHOR_LEFT | PH_ANCHOR_BOTTOM);
-                PhAddPropPageLayoutItem(hwndDlg, context->MatchCommandlineHandle, dialogItem, PH_ANCHOR_RIGHT | PH_ANCHOR_BOTTOM);
-                PhEndPropPageLayout(hwndDlg, propPageContext);
-            }
-        }
-        break;
-    case WM_COMMAND:
-        {
-            switch (GET_WM_COMMAND_ID(wParam, lParam))
-            {
-            case IDC_COMMENT:
-                {
-                    if (GET_WM_COMMAND_CMD(wParam, lParam) == EN_CHANGE)
-                        EnableWindow(context->RevertHandle, TRUE);
-                }
-                break;
-            case IDC_REVERT:
-                {
-                    Edit_SetText(context->CommentHandle, context->OriginalComment->Buffer);
-                    SendMessage(context->CommentHandle, EM_SETSEL, 0, -1);
-                    PhSetDialogFocus(hwndDlg, context->CommentHandle);
-                    EnableWindow(context->RevertHandle, FALSE);
-                }
-                break;
-            }
-        }
-        break;
-    case WM_NOTIFY:
-        {
-            LPNMHDR header = (LPNMHDR)lParam;
-
-            switch (header->code)
-            {
-            case PSN_QUERYINITIALFOCUS:
-                {
-                    SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, (LONG_PTR)context->MatchCommandlineHandle);
-                }
-                return TRUE;
-            }
-        }
-        break;
-    }
-
-    return FALSE;
-}
-
-INT_PTR CALLBACK ServiceCommentPageDlgProc(
-    _In_ HWND hwndDlg,
-    _In_ UINT uMsg,
-    _In_ WPARAM wParam,
-    _In_ LPARAM lParam
-    )
-{
-    PSERVICE_COMMENT_PAGE_CONTEXT context;
-
-    if (uMsg == WM_INITDIALOG)
-    {
-        context = PhAllocate(sizeof(SERVICE_COMMENT_PAGE_CONTEXT));
-        memset(context, 0, sizeof(SERVICE_COMMENT_PAGE_CONTEXT));
-
-        PhSetWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT, context);
-    }
-    else
-    {
-        context = PhGetWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
-
-        if (uMsg == WM_DESTROY)
-            PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
-    }
-
-    if (!context)
-        return FALSE;
-
-    switch (uMsg)
-    {
-    case WM_INITDIALOG:
-        {
-            LPPROPSHEETPAGE propSheetPage = (LPPROPSHEETPAGE)lParam;
-            PPH_SERVICE_ITEM serviceItem = (PPH_SERVICE_ITEM)propSheetPage->lParam;
-            PDB_OBJECT object;
-            PPH_STRING comment;
-
-            context->ServiceItem = serviceItem;
-
-            PhInitializeLayoutManager(&context->LayoutManager, hwndDlg);
-            PhAddLayoutItem(&context->LayoutManager, GetDlgItem(hwndDlg, IDC_COMMENT), NULL, PH_ANCHOR_ALL);
-
-            // Load the comment.
-
-            SendMessage(GetDlgItem(hwndDlg, IDC_COMMENT), EM_SETLIMITTEXT, UNICODE_STRING_MAX_CHARS, 0);
-
-            LockDb();
-
-            if (object = FindDbObject(SERVICE_TAG, &serviceItem->Name->sr))
-                comment = object->Comment;
-            else
-                comment = PH_AUTO(PhReferenceEmptyString());
-
-            UnlockDb();
-
-            PhSetDialogItemText(hwndDlg, IDC_COMMENT, comment->Buffer);
-
-            PhInitializeWindowTheme(hwndDlg, !!PhGetIntegerSetting(L"EnableThemeSupport"));
-        }
-        break;
-    case WM_DESTROY:
-        {
-            PhDeleteLayoutManager(&context->LayoutManager);
-            PhFree(context);
-        }
-        break;
-    case WM_SIZE:
-        {
-            PhLayoutManagerLayout(&context->LayoutManager);
-        }
-        break;
-    case WM_COMMAND:
-        {
-            switch (GET_WM_COMMAND_ID(wParam, lParam))
-            {
-            case IDC_COMMENT:
-                {
-                    if (GET_WM_COMMAND_CMD(wParam, lParam) == EN_CHANGE)
-                        EnableWindow(GetDlgItem(hwndDlg, IDC_REVERT), TRUE);
-                }
-                break;
-            }
-        }
-        break;
-    case WM_NOTIFY:
-        {
-            LPNMHDR header = (LPNMHDR)lParam;
-
-            switch (header->code)
-            {
-            case PSN_KILLACTIVE:
-                {
-                    SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, FALSE);
-                }
-                return TRUE;
-            case PSN_APPLY:
-                {
-                    PDB_OBJECT object;
-                    PPH_STRING comment;
-
-                    comment = PH_AUTO(PhGetWindowText(GetDlgItem(hwndDlg, IDC_COMMENT)));
-
-                    LockDb();
-
-                    if (comment->Length != 0)
-                    {
-                        CreateDbObject(SERVICE_TAG, &context->ServiceItem->Name->sr, comment);
-                    }
-                    else
-                    {
-                        if (object = FindDbObject(SERVICE_TAG, &context->ServiceItem->Name->sr))
-                            DeleteDbObject(object);
-                    }
-
-                    UnlockDb();
-
-                    SaveDb();
-                    InvalidateServiceComments();
-
-                    SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, PSNRET_NOERROR);
-                }
-                return TRUE;
-            }
-        }
-        break;
-    case WM_CTLCOLORBTN:
-        return HANDLE_WM_CTLCOLORBTN(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
-    case WM_CTLCOLORDLG:
-        return HANDLE_WM_CTLCOLORDLG(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
-    case WM_CTLCOLORSTATIC:
-        return HANDLE_WM_CTLCOLORSTATIC(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
-    }
-
-    return FALSE;
-}
-
-UINT_PTR CALLBACK ColorDlgHookProc(
-    _In_ HWND hwndDlg,
-    _In_ UINT uMsg,
-    _In_ WPARAM wParam,
-    _In_ LPARAM lParam
-    )
-{
-    switch (uMsg)
-    {
-    case WM_INITDIALOG:
-        {
-            PhCenterWindow(hwndDlg, GetParent(hwndDlg));
-
-            PhInitializeWindowTheme(hwndDlg, !!PhGetIntegerSetting(L"EnableThemeSupport"));
-        }
-        break;
-    }
-
-    return FALSE;
 }

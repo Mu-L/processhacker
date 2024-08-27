@@ -1,3 +1,15 @@
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     wj32    2011-2016
+ *     dmex    2017-2023
+ *
+ */
+
 #ifndef PH_NOTIFICOP_H
 #define PH_NOTIFICOP_H
 
@@ -15,19 +27,31 @@ typedef struct _PH_NF_WORKQUEUE_DATA
         {
             ULONG Add : 1;
             ULONG Delete : 1;
-            ULONG Spare : 30;
+            ULONG Update : 1;
+            ULONG ShowBalloon : 1;
+            ULONG Spare : 28;
         };
     };
+
+    PPH_STRING BalloonTitle;
+    PPH_STRING BalloonText;
+    ULONG BalloonTimeout;
 } PH_NF_WORKQUEUE_DATA, *PPH_NF_WORKQUEUE_DATA;
 
 typedef struct _PH_NF_BITMAP
 {
     BOOLEAN Initialized;
     HDC Hdc;
-    BITMAPINFOHEADER Header;
     HBITMAP Bitmap;
     PVOID Bits;
+    LONG Width;
+    LONG Height;
+    LONG TaskbarDpi;
 } PH_NF_BITMAP, *PPH_NF_BITMAP;
+
+HICON PhNfGetApplicationIcon(
+    _In_opt_ LONG DpiValue
+    );
 
 HICON PhNfpGetBlackIcon(
     VOID
@@ -81,35 +105,35 @@ VOID PhNfpBeginBitmap2(
     );
 
 VOID PhNfpCpuHistoryIconUpdateCallback(
-    _In_ struct _PH_NF_ICON *Icon,
+    _In_ PPH_NF_ICON Icon,
     _Out_ PVOID *NewIconOrBitmap,
     _Out_ PULONG Flags,
     _Out_ PPH_STRING *NewText,
     _In_opt_ PVOID Context
     );
 VOID PhNfpIoHistoryIconUpdateCallback(
-    _In_ struct _PH_NF_ICON *Icon,
+    _In_ PPH_NF_ICON Icon,
     _Out_ PVOID *NewIconOrBitmap,
     _Out_ PULONG Flags,
     _Out_ PPH_STRING *NewText,
     _In_opt_ PVOID Context
     );
 VOID PhNfpCommitHistoryIconUpdateCallback(
-    _In_ struct _PH_NF_ICON *Icon,
+    _In_ PPH_NF_ICON Icon,
     _Out_ PVOID *NewIconOrBitmap,
     _Out_ PULONG Flags,
     _Out_ PPH_STRING *NewText,
     _In_opt_ PVOID Context
     );
 VOID PhNfpPhysicalHistoryIconUpdateCallback(
-    _In_ struct _PH_NF_ICON *Icon,
+    _In_ PPH_NF_ICON Icon,
     _Out_ PVOID *NewIconOrBitmap,
     _Out_ PULONG Flags,
     _Out_ PPH_STRING *NewText,
     _In_opt_ PVOID Context
     );
 VOID PhNfpCpuUsageIconUpdateCallback(
-    _In_ struct _PH_NF_ICON *Icon,
+    _In_ PPH_NF_ICON Icon,
     _Out_ PVOID *NewIconOrBitmap,
     _Out_ PULONG Flags,
     _Out_ PPH_STRING *NewText,
@@ -119,28 +143,28 @@ VOID PhNfpCpuUsageIconUpdateCallback(
 // Text icons
 
 VOID PhNfpCpuUsageTextIconUpdateCallback(
-    _In_ struct _PH_NF_ICON *Icon,
+    _In_ PPH_NF_ICON Icon,
     _Out_ PVOID *NewIconOrBitmap,
     _Out_ PULONG Flags,
     _Out_ PPH_STRING *NewText,
     _In_opt_ PVOID Context
     );
 VOID PhNfpIoUsageTextIconUpdateCallback(
-    _In_ struct _PH_NF_ICON *Icon,
+    _In_ PPH_NF_ICON Icon,
     _Out_ PVOID *NewIconOrBitmap,
     _Out_ PULONG Flags,
     _Out_ PPH_STRING *NewText,
     _In_opt_ PVOID Context
     );
 VOID PhNfpCommitTextIconUpdateCallback(
-    _In_ struct _PH_NF_ICON *Icon,
+    _In_ PPH_NF_ICON Icon,
     _Out_ PVOID *NewIconOrBitmap,
     _Out_ PULONG Flags,
     _Out_ PPH_STRING *NewText,
     _In_opt_ PVOID Context
     );
 VOID PhNfpPhysicalUsageTextIconUpdateCallback(
-    _In_ struct _PH_NF_ICON *Icon,
+    _In_ PPH_NF_ICON Icon,
     _Out_ PVOID *NewIconOrBitmap,
     _Out_ PULONG Flags,
     _Out_ PPH_STRING *NewText,
@@ -149,7 +173,7 @@ VOID PhNfpPhysicalUsageTextIconUpdateCallback(
 
 // plain icon
 VOID PhNfpPlainIconUpdateCallback(
-    _In_ struct _PH_NF_ICON *Icon,
+    _In_ PPH_NF_ICON Icon,
     _Out_ PVOID *NewIconOrBitmap,
     _Out_ PULONG Flags,
     _Out_ PPH_STRING *NewText,
@@ -178,6 +202,17 @@ VOID PhNfpDisableHover(
     );
 
 VOID PhNfpIconRestoreHoverTimerProc(
+    _In_ HWND hwnd,
+    _In_ UINT uMsg,
+    _In_ UINT_PTR idEvent,
+    _In_ ULONG dwTime
+    );
+
+VOID PhNfpIconDisablePopupHoverWin11Workaround(
+    VOID
+    );
+
+VOID PhNfpIconShowPopupHoverTimerProc(
     _In_ HWND hwnd,
     _In_ UINT uMsg,
     _In_ UINT_PTR idEvent,

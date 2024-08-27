@@ -21,7 +21,7 @@
 #include <procprv.h>
 
 VOID PhInsertHandleObjectPropertiesEMenuItems(
-    _In_ struct _PH_EMENU_ITEM *Menu,
+    _In_ PPH_EMENU_ITEM Menu,
     _In_ ULONG InsertBeforeId,
     _In_ BOOLEAN EnableShortcut,
     _In_ PPH_HANDLE_ITEM_INFO Info
@@ -140,7 +140,7 @@ VOID PhShowHandleObjectProperties1(
 
         processId = NULL;
 
-        if (KphIsConnected())
+        if (KsiLevel() >= KphLevelMed)
         {
             if (NT_SUCCESS(PhOpenProcess(
                 &processHandle,
@@ -246,7 +246,7 @@ VOID PhShowHandleObjectProperties1(
                     0,
                     NULL,
                     &viewSize,
-                    ViewShare,
+                    ViewUnmap,
                     0,
                     readOnly ? PAGE_READONLY : PAGE_READWRITE
                     );
@@ -261,7 +261,7 @@ VOID PhShowHandleObjectProperties1(
                         0,
                         NULL,
                         &viewSize,
-                        ViewShare,
+                        ViewUnmap,
                         0,
                         PAGE_READONLY
                         );
@@ -310,7 +310,7 @@ VOID PhShowHandleObjectProperties1(
         clientId.UniqueProcess = NULL;
         clientId.UniqueThread = NULL;
 
-        if (KphIsConnected())
+        if (KsiLevel() >= KphLevelMed)
         {
             if (NT_SUCCESS(PhOpenProcess(
                 &processHandle,

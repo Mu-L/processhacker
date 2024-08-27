@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010
- *     dmex    2017-2021
+ *     dmex    2017-2023
  *
  */
 
@@ -30,6 +30,28 @@ BOOLEAN NTAPI PvpCommandLineCallback(
     return TRUE;
 }
 
+NTSTATUS PvpConnectKph(
+    VOID
+    )
+{
+    NTSTATUS status;
+    PPH_STRING portName = NULL;
+
+    status = KphInitialize();
+    if (!NT_SUCCESS(status))
+        return status;
+
+    // TODO: get the current configured port name from the main binary, settings aren't shared.
+    //if (PhIsNullOrEmptyString(portName = PhGetStringSetting(L"KsiPortName")))
+        PhMoveReference(&portName, PhCreateString(KPH_PORT_NAME));
+
+    status = KphCommsStart(&portName->sr, NULL);
+
+    PhDereferenceObject(portName);
+
+    return status;
+}
+
 INT WINAPI wWinMain(
     _In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
@@ -41,9 +63,9 @@ INT WINAPI wWinMain(
     {
         { 0, L"h", NoArgumentType }
     };
-    PPH_STRING commandLine;
+    PH_STRINGREF commandLine;
 
-    if (!NT_SUCCESS(PhInitializePhLibEx(L"PE Viewer", ULONG_MAX, hInstance, 0, 0)))
+    if (!NT_SUCCESS(PhInitializePhLib(L"PE Viewer", hInstance)))
         return 1;
     if (!PvInitializeExceptionPolicy())
         return 1;
@@ -51,20 +73,36 @@ INT WINAPI wWinMain(
     // Create a mutant for the installer.
     {
         HANDLE mutantHandle;
-        PPH_STRING objectName;
         OBJECT_ATTRIBUTES objectAttributes;
-        UNICODE_STRING objectNameUs;
+        UNICODE_STRING objectName;
+        PH_STRINGREF objectNameSr;
+        SIZE_T returnLength;
+        WCHAR formatBuffer[PH_INT64_STR_LEN_1];
         PH_FORMAT format[2];
 
-        PhInitFormatS(&format[0], L"PeViewerMutant_");
+        PhInitFormatS(&format[0], L"SiViewerMutant_");
         PhInitFormatU(&format[1], HandleToUlong(NtCurrentProcessId()));
 
-        objectName = PhFormat(format, 2, 0x40);
-        PhStringRefToUnicodeString(&objectName->sr, &objectNameUs);
+        if (!PhFormatToBuffer(
+            format,
+            RTL_NUMBER_OF(format),
+            formatBuffer,
+            sizeof(formatBuffer),
+            &returnLength
+            ))
+        {
+            return FALSE;
+        }
+
+        objectNameSr.Length = returnLength - sizeof(UNICODE_NULL);
+        objectNameSr.Buffer = formatBuffer;
+
+        if (!PhStringRefToUnicodeString(&objectNameSr, &objectName))
+            return FALSE;
 
         InitializeObjectAttributes(
             &objectAttributes,
-            &objectNameUs,
+            &objectName,
             OBJ_CASE_INSENSITIVE,
             PhGetNamespaceHandle(),
             NULL
@@ -76,8 +114,6 @@ INT WINAPI wWinMain(
             &objectAttributes,
             TRUE
             );
-
-        PhDereferenceObject(objectName);
     }
 
 #ifndef DEBUG
@@ -96,22 +132,23 @@ INT WINAPI wWinMain(
 
     PhGuiSupportInitialization();
     PhSettingsInitialization();
-    PeInitializeSettings();
+    PvInitializeSettings();
     PvPropInitialization();
     PhTreeNewInitialization();
+    PvInitializeSuperclassControls();
+    PvpConnectKph();
 
-    if (!NT_SUCCESS(PhGetProcessCommandLine(NtCurrentProcess(), &commandLine)))
+    if (!NT_SUCCESS(PhGetProcessCommandLineStringRef(&commandLine)))
         return 1;
 
     PhParseCommandLine(
-        &commandLine->sr,
+        &commandLine,
         options,
         RTL_NUMBER_OF(options),
         PH_COMMAND_LINE_IGNORE_FIRST_PART,
         PvpCommandLineCallback,
         NULL
         );
-    PhDereferenceObject(commandLine);
 
     if (!PvFileName)
     {
@@ -136,21 +173,22 @@ INT WINAPI wWinMain(
 #ifndef DEBUG
                 PPH_STRING applicationFileName;
 
-                if (applicationFileName = PhGetApplicationFileName())
+                if (applicationFileName = PhGetApplicationFileNameWin32())
                 {
                     PhMoveReference(&PvFileName, PhConcatStrings(3, L"\"", PvFileName->Buffer, L"\""));
 
                     AllowSetForegroundWindow(ASFW_ANY);
 
-                    if (PhShellExecuteEx(
+                    if (NT_SUCCESS(PhShellExecuteEx(
                         NULL,
                         PhGetString(applicationFileName),
                         PvFileName->Buffer,
+                        NULL,
                         SW_SHOWNORMAL,
-                        PH_SHELL_EXECUTE_NOZONECHECKS,
+                        PH_SHELL_EXECUTE_DEFAULT,
                         0,
                         NULL
-                        ))
+                        )))
                     {
                         PhExitApplication(STATUS_SUCCESS);
                     }
@@ -167,8 +205,11 @@ INT WINAPI wWinMain(
     if (PhIsNullOrEmptyString(PvFileName))
         return 1;
 
+    // Note: Resolve the filename when we're passed a native device prefix (dmex)
+    PhMoveReference(&PvFileName, PhGetFileName(PvFileName));
+
 #ifdef DEBUG
-    if (!PhDoesFileExistsWin32(PhGetString(PvFileName)))
+    if (!PhDoesFileExistWin32(PhGetString(PvFileName)))
     {
         PPH_STRING fileName;
 
@@ -259,10 +300,9 @@ INT WINAPI wWinMain(
                     status = STATUS_IMAGE_SUBSYSTEM_NOT_PRESENT;
                     break;
                 }
-            }
 
-            if (NT_SUCCESS(status))
                 PhUnloadMappedImage(&PvMappedImage);
+            }
         }
 
         if (!NT_SUCCESS(status))
@@ -274,7 +314,7 @@ INT WINAPI wWinMain(
         }
     }
 
-    PeSaveSettings();
+    PvSaveSettings();
 
     return 0;
 }
@@ -288,7 +328,7 @@ ULONG CALLBACK PvUnhandledExceptionCallback(
     PPH_STRING message;
 
     if (NT_NTWIN32(ExceptionInfo->ExceptionRecord->ExceptionCode))
-        errorMessage = PhGetStatusMessage(0, WIN32_FROM_NTSTATUS(ExceptionInfo->ExceptionRecord->ExceptionCode));
+        errorMessage = PhGetStatusMessage(0, PhNtStatusToDosError(ExceptionInfo->ExceptionRecord->ExceptionCode));
     else
         errorMessage = PhGetStatusMessage(ExceptionInfo->ExceptionRecord->ExceptionCode, 0);
 
@@ -320,10 +360,10 @@ BOOLEAN PvInitializeExceptionPolicy(
 {
 #ifndef DEBUG
     ULONG errorMode;
-    
+
     if (NT_SUCCESS(PhGetProcessErrorMode(NtCurrentProcess(), &errorMode)))
     {
-        errorMode &= ~(SEM_NOOPENFILEERRORBOX | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        ClearFlag(errorMode, SEM_NOOPENFILEERRORBOX | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
         PhSetProcessErrorMode(NtCurrentProcess(), errorMode);
     }
 

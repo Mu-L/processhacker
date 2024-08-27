@@ -1,8 +1,19 @@
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     dmex    2020-2022
+ *
+ */
+
 #ifndef _PH_EXPRODID_H
 #define _PH_EXPRODID_H
 
 /*
- * This file contains the required types for the RICH header. 
+ * This file contains the required types for the RICH header.
  *
  * References:
  * http://bytepointer.com/articles/the_microsoft_rich_header.htm

@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010-2016
- *     dmex    2017-2021
+ *     dmex    2017-2024
  *
  */
 
@@ -19,8 +19,10 @@
 #include <modprv.h>
 #include <netprv.h>
 #include <phappres.h>
+#include <phintrnl.h>
 #include <phsettings.h>
 #include <procprv.h>
+#include <settings.h>
 #include <srvprv.h>
 #include <thrdprv.h>
 
@@ -37,31 +39,16 @@ static INT_PTR CALLBACK PhpAboutDlgProc(
     {
     case WM_INITDIALOG:
         {
-            PPH_STRING appName;
+            PPH_STRING versionString;
 
             PhSetApplicationWindowIcon(hwndDlg);
 
             PhCenterWindow(hwndDlg, PhMainWndHandle);
 
-#if (PHAPP_VERSION_REVISION != 0)
-            appName = PhFormatString(
-                L"System Informer %lu.%lu.%lu (<a href=\"https://github.com/processhacker/processhacker/commit/%hs\">%hs</a>)",
-                PHAPP_VERSION_MAJOR,
-                PHAPP_VERSION_MINOR,
-                PHAPP_VERSION_REVISION,
-                PHAPP_VERSION_COMMIT,
-                PHAPP_VERSION_COMMIT
-                );
-#else
-            appName = PhFormatString(
-                L"System Informer %lu.%lu",
-                PHAPP_VERSION_MAJOR,
-                PHAPP_VERSION_MINOR
-                );
-#endif
-
-            PhSetDialogItemText(hwndDlg, IDC_ABOUT_NAME, appName->Buffer);
-            PhDereferenceObject(appName);
+            versionString = PhGetApplicationVersionString(TRUE);
+            PhMoveReference(&versionString, PhConcatStringRefZ(&versionString->sr, L"\r\n"));
+            PhSetDialogItemText(hwndDlg, IDC_ABOUT_NAME, versionString->Buffer);
+            PhDereferenceObject(versionString);
 
             PhSetDialogItemText(hwndDlg, IDC_CREDITS,
                 L"Thanks to:\n"
@@ -73,20 +60,17 @@ static INT_PTR CALLBACK PhpAboutDlgProc(
                 L"    <a href=\"https://github.com/winsiderss/systeminformer/graphs/contributors\">Contributors</a> - thank you for your additions!\n"
                 L"    Donors - thank you for your support!\n\n"
                 L"System Informer uses the following components:\n"
+                L"    <a href=\"https://github.com/GameTechDev/PresentMon\">PresentMon</a> by Intel Corporation\n"
                 L"    <a href=\"https://github.com/michaelrsweet/mxml\">Mini-XML</a> by Michael Sweet\n"
-                L"    <a href=\"https://www.pcre.org\">PCRE</a>\n"
-                L"    <a href=\"https://github.com/json-c/json-c\">json-c</a>\n"
+                L"    <a href=\"https://github.com/PCRE2Project/pcre2\">PCRE2</a> by Philip Hazel\n"
+                L"    <a href=\"https://github.com/json-c/json-c\">json-c</a> by Michael Clark\n"
                 L"    MD5 code by Jouni Malinen\n"
                 L"    SHA1 code by Filip Navara, based on code by Steve Reid\n"
-                L"    <a href=\"http://www.famfamfam.com/lab/icons/silk\">Silk icons</a>\n"
-                L"    <a href=\"https://www.fatcow.com/free-icons\">Farm-fresh web icons</a>\n"
                 );
 
             PhSetDialogFocus(hwndDlg, GetDlgItem(hwndDlg, IDOK));
             PhRegisterWindowCallback(hwndDlg, PH_PLUGIN_WINDOW_EVENT_TYPE_TOPMOST, NULL);
 
-            if (PhEnableThemeSupport)
-                PhInitializeWindowThemeStaticControl(GetDlgItem(hwndDlg, IDC_FILEICON));
             PhInitializeWindowTheme(hwndDlg, PhEnableThemeSupport);
         }
         break;
@@ -184,27 +168,17 @@ PPH_STRING PhGetDiagnosticsString(
     VOID
     )
 {
+    PPH_STRING versionString;
     PH_STRING_BUILDER stringBuilder;
 
     PhInitializeStringBuilder(&stringBuilder, 50);
 
-#if (PHAPP_VERSION_REVISION != 0)
-    PhAppendFormatStringBuilder(&stringBuilder,
-        L"System Informer\r\nVersion: %lu.%lu.%lu (%hs)\r\n\r\n",
-        PHAPP_VERSION_MAJOR,
-        PHAPP_VERSION_MINOR,
-        PHAPP_VERSION_REVISION,
-        PHAPP_VERSION_COMMIT
-        );
-#else
-    PhAppendFormatStringBuilder(&stringBuilder,
-        L"System Informer\r\nVersion: %lu.%lu\r\n\r\n",
-        PHAPP_VERSION_MAJOR,
-        PHAPP_VERSION_MINOR
-        );
-#endif
+    versionString = PhGetApplicationVersionString(FALSE);
+    PhAppendStringBuilder(&stringBuilder, &versionString->sr);
+    PhAppendStringBuilder2(&stringBuilder, L"\r\n");
+    PhDereferenceObject(versionString);
 
-    PhAppendFormatStringBuilder(&stringBuilder, L"OBJECT INFORMATION\r\n");
+    PhAppendStringBuilder2(&stringBuilder, L"OBJECT INFORMATION\r\n");
 
 #define OBJECT_TYPE_COUNT(Type) PhAppendFormatStringBuilder(&stringBuilder, \
     TEXT(#Type) L": %lu objects\r\n", PhpGetObjectTypeObjectCount(Type))
@@ -234,5 +208,105 @@ PPH_STRING PhGetDiagnosticsString(
     OBJECT_TYPE_COUNT(PhMemoryItemType);
     OBJECT_TYPE_COUNT(PhImageListItemType);
 
+#ifdef DEBUG
+    PhAppendStringBuilder2(&stringBuilder, L"STATISTIC INFORMATION\r\n");
+
+#define PRINT_STATISTIC(Name) PhAppendFormatStringBuilder(&stringBuilder, \
+    TEXT(#Name) L": %u\r\n", PhLibStatisticsBlock.Name)
+
+    PRINT_STATISTIC(BaseThreadsCreated);
+    PRINT_STATISTIC(BaseThreadsCreateFailed);
+    PRINT_STATISTIC(BaseStringBuildersCreated);
+    PRINT_STATISTIC(BaseStringBuildersResized);
+    PRINT_STATISTIC(RefObjectsCreated);
+    PRINT_STATISTIC(RefObjectsDestroyed);
+    PRINT_STATISTIC(RefObjectsAllocated);
+    PRINT_STATISTIC(RefObjectsFreed);
+    PRINT_STATISTIC(RefObjectsAllocatedFromSmallFreeList);
+    PRINT_STATISTIC(RefObjectsFreedToSmallFreeList);
+    PRINT_STATISTIC(RefObjectsAllocatedFromTypeFreeList);
+    PRINT_STATISTIC(RefObjectsFreedToTypeFreeList);
+    PRINT_STATISTIC(RefObjectsDeleteDeferred);
+    PRINT_STATISTIC(RefAutoPoolsCreated);
+    PRINT_STATISTIC(RefAutoPoolsDestroyed);
+    PRINT_STATISTIC(RefAutoPoolsDynamicAllocated);
+    PRINT_STATISTIC(RefAutoPoolsDynamicResized);
+    PRINT_STATISTIC(QlBlockSpins);
+    PRINT_STATISTIC(QlBlockWaits);
+    PRINT_STATISTIC(QlAcquireExclusiveBlocks);
+    PRINT_STATISTIC(QlAcquireSharedBlocks);
+    PRINT_STATISTIC(WqWorkQueueThreadsCreated);
+    PRINT_STATISTIC(WqWorkQueueThreadsCreateFailed);
+    PRINT_STATISTIC(WqWorkItemsQueued);
+#endif
+
     return PhFinalStringBuilderString(&stringBuilder);
+}
+
+PPH_STRING PhGetApplicationVersionString(
+    _In_ BOOLEAN LinkToCommit
+    )
+{
+    PCWSTR channelName = PhGetPhReleaseChannelString();
+
+#if (PHAPP_VERSION_REVISION != 0)
+    if (LinkToCommit)
+    {
+        PH_FORMAT format[14];
+
+        // "System Informer %lu.%lu.%lu (<a href=\"https://github.com/winsiderss/systeminformer/commit/%hs\">%hs</a>) %ls"
+        PhInitFormatS(&format[0], L"System Informer ");
+        PhInitFormatU(&format[1], PHAPP_VERSION_MAJOR);
+        PhInitFormatC(&format[2], L'.');
+        PhInitFormatU(&format[3], PHAPP_VERSION_MINOR);
+        PhInitFormatC(&format[4], L'.');
+        PhInitFormatU(&format[5], PHAPP_VERSION_BUILD);
+        PhInitFormatC(&format[6], L'.');
+        PhInitFormatU(&format[7], PHAPP_VERSION_REVISION);
+        PhInitFormatS(&format[8], L" (<a href=\"https://systeminformer.sourceforge.io/fwlink?commit=");
+        PhInitFormatMultiByteS(&format[9], PHAPP_VERSION_COMMIT);
+        PhInitFormatS(&format[10], L"\">");
+        PhInitFormatMultiByteS(&format[11], PHAPP_VERSION_COMMIT);
+        PhInitFormatS(&format[12], L"</a>) ");
+        PhInitFormatS(&format[13], (PWSTR)channelName);
+
+        return PhFormat(format, RTL_NUMBER_OF(format), 0);
+    }
+    else
+    {
+        PH_FORMAT format[12];
+
+        // "System Informer %lu.%lu.%lu (%hs) %ls"
+        PhInitFormatS(&format[0], L"System Informer ");
+        PhInitFormatU(&format[1], PHAPP_VERSION_MAJOR);
+        PhInitFormatC(&format[2], L'.');
+        PhInitFormatU(&format[3], PHAPP_VERSION_MINOR);
+        PhInitFormatC(&format[4], L'.');
+        PhInitFormatU(&format[5], PHAPP_VERSION_BUILD);
+        PhInitFormatC(&format[6], L'.');
+        PhInitFormatU(&format[7], PHAPP_VERSION_REVISION);
+        PhInitFormatS(&format[8], L" (");
+        PhInitFormatMultiByteS(&format[9], PHAPP_VERSION_COMMIT);
+        PhInitFormatS(&format[10], L") ");
+        PhInitFormatS(&format[11], (PWSTR)channelName);
+
+        return PhFormat(format, RTL_NUMBER_OF(format), 0);
+    }
+#else
+    PH_FORMAT format[10];
+
+    // "System Informer %lu.%lu %ls"
+    PhInitFormatS(&format[0], L"System Informer ");
+    PhInitFormatU(&format[1], PHAPP_VERSION_MAJOR);
+    PhInitFormatC(&format[2], L'.');
+    PhInitFormatU(&format[3], PHAPP_VERSION_MINOR);
+    PhInitFormatC(&format[4], L'.');
+    PhInitFormatU(&format[5], PHAPP_VERSION_BUILD);
+    PhInitFormatC(&format[6], L'.');
+    PhInitFormatU(&format[7], PHAPP_VERSION_REVISION);
+    PhInitFormatC(&format[8], L' ');
+    PhInitFormatS(&format[9], (PWSTR)channelName);
+
+    return PhFormat(format, RTL_NUMBER_OF(format), 0);
+#endif
 }

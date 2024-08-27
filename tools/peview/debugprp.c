@@ -5,7 +5,7 @@
  *
  * Authors:
  *
- *     dmex    2021-2022
+ *     dmex    2021-2023
  *
  */
 
@@ -64,6 +64,8 @@ PWSTR PvpGetDebugTypeString(
         return L"PDB_CHECKSUM";
     case IMAGE_DEBUG_TYPE_EX_DLLCHARACTERISTICS:
         return L"EX_DLLCHARACTERISTICS";
+    case IMAGE_DEBUG_TYPE_PERFMAP:
+        return L"PERFMAP";
     }
 
     return PhaFormatString(L"%lu", Type)->Buffer;
@@ -103,7 +105,6 @@ INT_PTR CALLBACK PvpPeDebugDlgProc(
         {
             PH_MAPPED_IMAGE_DEBUG debug;
             PH_IMAGE_DEBUG_ENTRY entry;
-            HIMAGELIST listViewImageList;
             ULONG count = 0;
             ULONG i;
             INT lvItemIndex;
@@ -122,12 +123,10 @@ INT_PTR CALLBACK PvpPeDebugDlgProc(
             PhSetExtendedListView(context->ListViewHandle);
             PhLoadListViewColumnsFromSetting(L"ImageDebugListViewColumns", context->ListViewHandle);
             PvConfigTreeBorders(context->ListViewHandle);
+            PvSetListViewImageList(context->WindowHandle, context->ListViewHandle);
 
             PhInitializeLayoutManager(&context->LayoutManager, hwndDlg);
             PhAddLayoutItem(&context->LayoutManager, context->ListViewHandle, NULL, PH_ANCHOR_ALL);
-
-            if (listViewImageList = PhImageListCreate(2, 20, ILC_MASK | ILC_COLOR, 1, 1))
-                ListView_SetImageList(context->ListViewHandle, listViewImageList, LVSIL_SMALL);
 
             if (NT_SUCCESS(PhGetMappedImageDebug(&PvMappedImage, &debug)))
             {
@@ -148,34 +147,16 @@ INT_PTR CALLBACK PvpPeDebugDlgProc(
 
                     if (entry.AddressOfRawData && entry.SizeOfData)
                     {
-                        __try
-                        {
-                            PVOID imageSectionData;
-                            PH_HASH_CONTEXT hashContext;
-                            PPH_STRING hashString;
-                            UCHAR hash[32];
+                        PVOID imageSectionData;
+                        PPH_STRING hashString;
 
-                            if (imageSectionData = PhMappedImageRvaToVa(&PvMappedImage, entry.AddressOfRawData, NULL))
+                        if (imageSectionData = PhMappedImageRvaToVa(&PvMappedImage, entry.AddressOfRawData, NULL))
+                        {
+                            if (hashString = PvHashBuffer(imageSectionData, entry.SizeOfData))
                             {
-                                PhInitializeHash(&hashContext, Md5HashAlgorithm); // PhGetIntegerSetting(L"HashAlgorithm")
-                                PhUpdateHash(&hashContext, imageSectionData, entry.SizeOfData);
-
-                                if (PhFinalHash(&hashContext, hash, 16, NULL))
-                                {
-                                    hashString = PhBufferToHexString(hash, 16);
-                                    PhSetListViewSubItem(context->ListViewHandle, lvItemIndex, 5, hashString->Buffer);
-                                    PhDereferenceObject(hashString);
-                                }
+                                PhSetListViewSubItem(context->ListViewHandle, lvItemIndex, 5, hashString->Buffer);
+                                PhDereferenceObject(hashString);
                             }
-                        }
-                        __except (EXCEPTION_EXECUTE_HANDLER)
-                        {
-                            PPH_STRING message;
-
-                            //message = PH_AUTO(PhGetNtMessage(GetExceptionCode()));
-                            message = PH_AUTO(PhGetWin32Message(PhNtStatusToDosError(GetExceptionCode()))); // WIN32_FROM_NTSTATUS
-
-                            PhSetListViewSubItem(context->ListViewHandle, lvItemIndex, 5, PhGetStringOrEmpty(message));
                         }
                     }
                 }
@@ -183,14 +164,20 @@ INT_PTR CALLBACK PvpPeDebugDlgProc(
                 PhFree(debug.DebugEntries);
             }
 
-            PhInitializeWindowTheme(hwndDlg, PeEnableThemeSupport);
+            PhInitializeWindowTheme(hwndDlg, PhEnableThemeSupport);
         }
         break;
     case WM_DESTROY:
         {
             PhSaveListViewColumnsToSetting(L"ImageDebugListViewColumns", context->ListViewHandle);
             PhDeleteLayoutManager(&context->LayoutManager);
+            PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
             PhFree(context);
+        }
+        break;
+    case WM_DPICHANGED:
+        {
+            PvSetListViewImageList(context->WindowHandle, context->ListViewHandle);
         }
         break;
     case WM_SHOWWINDOW:

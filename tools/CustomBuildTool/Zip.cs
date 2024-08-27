@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
  *
  * This file is part of System Informer.
@@ -9,10 +9,6 @@
  *
  */
 
-using System;
-using System.IO;
-using System.IO.Compression;
-
 namespace CustomBuildTool
 {
     public static class Zip
@@ -21,7 +17,7 @@ namespace CustomBuildTool
         private static string[] GetEntryNames(string[] names, string sourceFolder, bool includeBaseName)
         {
             if (names == null || names.Length == 0)
-                return new string[0];
+                return Array.Empty<string>();
 
             if (includeBaseName)
                 sourceFolder = Path.GetDirectoryName(sourceFolder);
@@ -44,11 +40,8 @@ namespace CustomBuildTool
             string[] filesToAdd = Directory.GetFiles(sourceDirectoryName, "*", SearchOption.AllDirectories);
             string[] entryNames = GetEntryNames(filesToAdd, sourceDirectoryName, false);
 
-            if (File.Exists(destinationArchiveFileName))
-                File.Delete(destinationArchiveFileName);
-
             using (FileStream zipFileStream = new FileStream(destinationArchiveFileName, FileMode.Create))
-            using (ZipArchive archive = new ZipArchive(zipFileStream, ZipArchiveMode.Create, true))
+            using (ZipArchive archive = new ZipArchive(zipFileStream, ZipArchiveMode.Create))
             {
                 for (int i = 0; i < filesToAdd.Length; i++)
                 {
@@ -68,9 +61,11 @@ namespace CustomBuildTool
                     }
 
                     if (name.StartsWith("Release32\\", StringComparison.OrdinalIgnoreCase))
-                        name = name.Replace("Release32\\", "32bit\\", StringComparison.OrdinalIgnoreCase);
+                        name = name.Replace("Release32\\", "i386\\", StringComparison.OrdinalIgnoreCase);
                     if (name.StartsWith("Release64\\", StringComparison.OrdinalIgnoreCase))
-                        name = name.Replace("Release64\\", "64bit\\", StringComparison.OrdinalIgnoreCase);
+                        name = name.Replace("Release64\\", "amd64\\", StringComparison.OrdinalIgnoreCase);
+                    if (name.StartsWith("ReleaseARM64\\", StringComparison.OrdinalIgnoreCase))
+                        name = name.Replace("ReleaseARM64\\", "arm64\\", StringComparison.OrdinalIgnoreCase);
 
                     archive.CreateEntryFromFile(file, name, CompressionLevel.Optimal);
                 }
@@ -113,11 +108,8 @@ namespace CustomBuildTool
             string[] filesToAdd = Directory.GetFiles(sourceDirectoryName, "*", SearchOption.AllDirectories);
             string[] entryNames = GetEntryNames(filesToAdd, sourceDirectoryName, false);
 
-            if (File.Exists(destinationArchiveFileName))
-                File.Delete(destinationArchiveFileName);
-
             using (FileStream zipFileStream = new FileStream(destinationArchiveFileName, FileMode.Create))
-            using (ZipArchive archive = new ZipArchive(zipFileStream, ZipArchiveMode.Create, true))
+            using (ZipArchive archive = new ZipArchive(zipFileStream, ZipArchiveMode.Create))
             {
                 for (int i = 0; i < filesToAdd.Length; i++)
                 {
@@ -127,8 +119,7 @@ namespace CustomBuildTool
 
             //string[] filesToAdd = Directory.GetFiles(sourceDirectoryName, "*", SearchOption.AllDirectories);
             //
-            //if (File.Exists(destinationArchiveFileName))
-            //    File.Delete(destinationArchiveFileName);
+            //Win32.DeleteFile(destinationArchiveFileName);
             //
             //using (var filestream = File.Create(destinationArchiveFileName))
             //using (var archive = new SevenZipArchive(filestream, FileAccess.Write))
@@ -155,11 +146,8 @@ namespace CustomBuildTool
             string[] filesToAdd = Directory.GetFiles(sourceDirectoryName, "*", SearchOption.AllDirectories);
             string[] entryNames = GetEntryNames(filesToAdd, sourceDirectoryName, false);
 
-            if (File.Exists(destinationArchiveFileName))
-                File.Delete(destinationArchiveFileName);
-
             using (FileStream zipFileStream = new FileStream(destinationArchiveFileName, FileMode.Create))
-            using (ZipArchive archive = new ZipArchive(zipFileStream, ZipArchiveMode.Create, true))
+            using (ZipArchive archive = new ZipArchive(zipFileStream, ZipArchiveMode.Create))
             {
                 for (int i = 0; i < filesToAdd.Length; i++)
                 {

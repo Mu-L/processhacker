@@ -5,7 +5,7 @@
  *
  * Authors:
  *
- *     dmex    2021-2022
+ *     dmex    2021-2023
  *
  */
 
@@ -17,6 +17,7 @@
 #include <procprv.h>
 #include <settings.h>
 #include <emenu.h>
+#include <mapldr.h>
 
 #include <vdmdbg.h>
 
@@ -59,20 +60,14 @@ PVOID PhpGetVdmDbgDllBase(
 
     if (PhBeginInitOnce(&initOnce))
     {
-        PPH_STRING systemDirectory;
         PPH_STRING systemFileName;
 
-        if (systemDirectory = PhGetSystemDirectory())
+        if (systemFileName = PhGetSystemDirectoryWin32Z(L"\\vdmdbg.dll"))
         {
-            if (systemFileName = PhConcatStringRefZ(&systemDirectory->sr, L"\\vdmdbg.dll"))
-            {
-                if (!(imageBaseAddress = PhGetLoaderEntryStringRefDllBase(&systemFileName->sr, NULL)))
-                    imageBaseAddress = PhLoadLibrary(PhGetString(systemFileName));
+            if (!(imageBaseAddress = PhGetLoaderEntryDllBase(&systemFileName->sr, NULL)))
+                imageBaseAddress = PhLoadLibrary(PhGetString(systemFileName));
 
-                PhDereferenceObject(systemFileName);
-            }
-
-            PhDereferenceObject(systemDirectory);
+            PhDereferenceObject(systemFileName);
         }
 
         PhEndInitOnce(&initOnce);
@@ -220,7 +215,7 @@ VOID PhpRefreshVdmHostProcess(
 
             lvItemIndex = PhAddListViewItem(
                 Context->ListViewHandle,
-                MAXINT, 
+                MAXINT,
                 PhGetStringOrEmpty(entry->ModuleName),
                 UlongToPtr(Context->VdmHostProcessList->Count + 1)
                 );
@@ -301,7 +296,10 @@ INT_PTR CALLBACK PhpProcessVdmHostProcessDlgProc(
             PhUnregisterCallback(PhGetGeneralCallback(GeneralCallbackProcessProviderUpdatedEvent), &context->ProcessesUpdatedRegistration);
 
             PhSaveListViewColumnsToSetting(L"VdmHostListViewColumns", context->ListViewHandle);
-
+        }
+        break;
+    case WM_NCDESTROY:
+        {
             PhpClearVdmHostProcessItems(context);
             PhDereferenceObject(context->VdmHostProcessList);
 
@@ -348,7 +346,7 @@ INT_PTR CALLBACK PhpProcessVdmHostProcessDlgProc(
                 point.y = GET_Y_LPARAM(lParam);
 
                 if (point.x == -1 && point.y == -1)
-                    PhGetListViewContextMenuPoint((HWND)wParam, &point);
+                    PhGetListViewContextMenuPoint(context->ListViewHandle, &point);
 
                 if (index = PhGetSelectedListViewItemParam(context->ListViewHandle))
                 {
@@ -401,7 +399,7 @@ INT_PTR CALLBACK PhpProcessVdmHostProcessDlgProc(
                             break;
                         case 4:
                             {
-                                if (!PhIsNullOrEmptyString(entry->FileName) && PhDoesFileExistsWin32(PhGetString(entry->FileName)))
+                                if (!PhIsNullOrEmptyString(entry->FileName) && PhDoesFileExistWin32(PhGetString(entry->FileName)))
                                 {
                                     PhShellExecuteUserString(
                                         hwndDlg,
@@ -415,7 +413,7 @@ INT_PTR CALLBACK PhpProcessVdmHostProcessDlgProc(
                             break;
                         case 5:
                             {
-                                if (!PhIsNullOrEmptyString(entry->FileName) && PhDoesFileExistsWin32(PhGetString(entry->FileName)))
+                                if (!PhIsNullOrEmptyString(entry->FileName) && PhDoesFileExistWin32(PhGetString(entry->FileName)))
                                 {
                                     PhShellExecuteUserString(
                                         hwndDlg,

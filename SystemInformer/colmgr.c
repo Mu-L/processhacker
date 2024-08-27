@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2011-2016
- *     dmex    2017-2020
+ *     dmex    2017-2023
  *
  */
 
@@ -67,7 +67,7 @@ PPH_CM_COLUMN PhCmCreateColumn(
     _In_ struct _PH_PLUGIN *Plugin,
     _In_ ULONG SubId,
     _In_opt_ PVOID Context,
-    _In_ PVOID SortFunction
+    _In_opt_ PVOID SortFunction
     )
 {
     PPH_CM_COLUMN column;
@@ -142,8 +142,8 @@ VOID PhCmSetNotifyPlugin(
 BOOLEAN PhCmForwardMessage(
     _In_ HWND hwnd,
     _In_ PH_TREENEW_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2,
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2,
     _In_ PPH_CM_MANAGER Manager
     )
 {
@@ -160,9 +160,6 @@ BOOLEAN PhCmForwardMessage(
             PPH_TREENEW_GET_CELL_TEXT getCellText = Parameter1;
             PH_TREENEW_COLUMN tnColumn;
             PPH_CM_COLUMN column;
-
-            if (!getCellText)
-                return FALSE;
 
             if (getCellText->Id < Manager->MinId)
                 return FALSE;
@@ -334,6 +331,9 @@ BOOLEAN PhCmLoadSettingsEx(
     PPH_KEY_VALUE_PAIR pair;
     LONG orderArray[PH_CM_ORDER_LIMIT];
     LONG maxOrder;
+    LONG dpiValue;
+
+    dpiValue = PhGetWindowDpi(TreeNewHandle);
 
     if (Settings->Length != 0)
     {
@@ -353,7 +353,7 @@ BOOLEAN PhCmLoadSettingsEx(
         }
         else
         {
-            scale = PhGlobalDpi;
+            scale = dpiValue;
         }
 
         while (remainingColumnPart.Length != 0)
@@ -361,7 +361,7 @@ BOOLEAN PhCmLoadSettingsEx(
             PPH_TREENEW_COLUMN column;
             ULONG id;
             ULONG displayIndex;
-            ULONG width;
+            LONG width;
 
             PhSplitStringRefAtChar(&remainingColumnPart, L'|', &columnPart, &remainingColumnPart);
 
@@ -428,8 +428,8 @@ BOOLEAN PhCmLoadSettingsEx(
 
                 width = (ULONG)integer;
 
-                if (scale != PhGlobalDpi && scale != 0)
-                    width = PhMultiplyDivide(width, PhGlobalDpi, scale);
+                if (scale != dpiValue && scale != 0)
+                    width = PhMultiplyDivideSigned(width, dpiValue, scale);
 
                 column = PhAllocate(sizeof(PH_TREENEW_COLUMN));
                 column->Id = id;
@@ -590,6 +590,9 @@ PPH_STRING PhCmSaveSettingsEx(
     ULONG total;
     ULONG increment;
     PH_TREENEW_COLUMN column;
+    LONG dpiValue;
+
+    dpiValue = PhGetWindowDpi(TreeNewHandle);
 
     total = TreeNew_GetColumnCount(TreeNewHandle);
 
@@ -600,7 +603,25 @@ PPH_STRING PhCmSaveSettingsEx(
 
     PhInitializeStringBuilder(&stringBuilder, 100);
 
-    PhAppendFormatStringBuilder(&stringBuilder, L"@%lu|", PhGlobalDpi);
+    {
+        PH_FORMAT format[3];
+        SIZE_T returnLength;
+        WCHAR buffer[PH_INT64_STR_LEN_1];
+
+        // @%lu|
+        PhInitFormatC(&format[0], L'@');
+        PhInitFormatU(&format[1], dpiValue);
+        PhInitFormatC(&format[2], L'|');
+
+        if (PhFormatToBuffer(format, RTL_NUMBER_OF(format), buffer, sizeof(buffer), &returnLength))
+        {
+            PhAppendStringBuilderEx(&stringBuilder, buffer, returnLength - sizeof(UNICODE_NULL));
+        }
+        else
+        {
+            PhAppendFormatStringBuilder(&stringBuilder, L"@%lu|", dpiValue);
+        }
+    }
 
     while (count < total)
     {
@@ -612,27 +633,66 @@ PPH_STRING PhCmSaveSettingsEx(
                 {
                     if (!Manager || i < Manager->MinId)
                     {
-                        PhAppendFormatStringBuilder(
-                            &stringBuilder,
-                            L"%lu,%lu,%ld|",
-                            i,
-                            column.Fixed ? 0 : column.DisplayIndex + increment,
-                            column.Width
-                            );
+                        PH_FORMAT format[6];
+                        SIZE_T returnLength;
+                        WCHAR buffer[PH_INT64_STR_LEN_1];
+
+                        // %lu,%lu,%ld|
+                        PhInitFormatU(&format[0], i);
+                        PhInitFormatC(&format[1], L',');
+                        PhInitFormatU(&format[2], column.Fixed ? 0 : column.DisplayIndex + increment);
+                        PhInitFormatC(&format[3], L',');
+                        PhInitFormatU(&format[4], column.Width);
+                        PhInitFormatC(&format[5], L'|');
+
+                        if (PhFormatToBuffer(format, RTL_NUMBER_OF(format), buffer, sizeof(buffer), &returnLength))
+                        {
+                            PhAppendStringBuilderEx(&stringBuilder, buffer, returnLength - sizeof(UNICODE_NULL));
+                        }
+                        else
+                        {
+                            PhAppendFormatStringBuilder(
+                                &stringBuilder,
+                                L"%lu,%lu,%ld|",
+                                i,
+                                column.Fixed ? 0 : column.DisplayIndex + increment,
+                                column.Width
+                                );
+                        }
                     }
                     else
                     {
-                        PPH_CM_COLUMN cmColumn;
+                        PPH_CM_COLUMN cmColumn = column.Context;
+                        PH_FORMAT format[9];
+                        SIZE_T returnLength;
+                        WCHAR buffer[PH_INT64_STR_LEN_1];
 
-                        cmColumn = column.Context;
-                        PhAppendFormatStringBuilder(
-                            &stringBuilder,
-                            L"+%s+%lu,%lu,%ld|",
-                            cmColumn->Plugin->Name.Buffer,
-                            cmColumn->SubId,
-                            column.DisplayIndex + increment,
-                            column.Width
-                            );
+                        // +%s+%lu,%lu,%ld|
+                        PhInitFormatC(&format[0], L'+');
+                        PhInitFormatSR(&format[1], cmColumn->Plugin->Name);
+                        PhInitFormatC(&format[2], L'+');
+                        PhInitFormatU(&format[3], cmColumn->SubId);
+                        PhInitFormatC(&format[4], L',');
+                        PhInitFormatU(&format[5], column.DisplayIndex + increment);
+                        PhInitFormatC(&format[6], L',');
+                        PhInitFormatD(&format[7], column.Width);
+                        PhInitFormatC(&format[8], L'|');
+
+                        if (PhFormatToBuffer(format, RTL_NUMBER_OF(format), buffer, sizeof(buffer), &returnLength))
+                        {
+                            PhAppendStringBuilderEx(&stringBuilder, buffer, returnLength - sizeof(UNICODE_NULL));
+                        }
+                        else
+                        {
+                            PhAppendFormatStringBuilder(
+                                &stringBuilder,
+                                L"+%s+%lu,%lu,%ld|",
+                                cmColumn->Plugin->Name.Buffer,
+                                cmColumn->SubId,
+                                column.DisplayIndex + increment,
+                                column.Width
+                                );
+                        }
                     }
                 }
             }
@@ -693,8 +753,6 @@ PPH_STRING PhCmSaveSettingsEx(
                 }
                 else
                 {
-                    PH_TREENEW_COLUMN column;
-
                     if (TreeNew_GetColumn(TreeNewHandle, sortColumn, &column))
                     {
                         PPH_CM_COLUMN cmColumn;

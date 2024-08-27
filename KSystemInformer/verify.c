@@ -6,758 +6,750 @@
  * Authors:
  *
  *     wj32    2016
- *     jxy-s   2020
+ *     jxy-s   2020-2024
  *
  */
 
 #include <kph.h>
-#include <dyndata.h>
-#include <ntimage.h>
 
-#define FILE_BUFFER_SIZE (2 * PAGE_SIZE)
-#define FILE_MAX_SIZE (32 * 1024 * 1024) // 32 MB
-#define CALLER_CHECK_MAX_FRAMES 60
-#ifdef _WIN64
-#define PROC_VERIFY_COHERENCY_VALUE 990 // 99.9%
-#else
-#define PROC_VERIFY_COHERENCY_VALUE 9   // 90.0% - 32bit will have more relocations 
-#endif
+#include <trace.h>
 
-VOID KphpBackoffKey(
-    _In_ PKPH_CLIENT Client
-    );
+#define KPH_KEY_MATERIAL_SIZE        ((ULONG)0x21B)
+#define KPH_KEY_ALG_HANDLE           BCRYPT_RSA_ALG_HANDLE
+#define KPH_KEY_ALGORITHM            BCRYPT_RSA_ALGORITHM
+#define KPH_KEY_HASH_ALGORITHM       BCRYPT_SHA512_ALGORITHM
+#define KPH_KEY_HASH_ALGORITHM_BYTES (512 / 8)
+#define KPH_KEY_BLOB_PUBLIC          BCRYPT_RSAPUBLIC_BLOB
+#define KPH_KEY_PADDING_FLAGS        BCRYPT_PAD_PSS
+#define KPH_KEY_PADDING_INFO         (PVOID)&KphpKeyPaddingInfo
 
-static UCHAR KphpTrustedPublicKey[] =
+#define KPH_VERIFY_SIGNATURE_MAX_LENGTH 1024
+
+typedef enum _KPH_KEY_TYPE
 {
-    0x45, 0x43, 0x53, 0x31, 0x20, 0x00, 0x00, 0x00, 0x5f, 0xe8, 0xab, 0xac, 0x01, 0xad, 0x6b, 0x48,
-    0xfd, 0x84, 0x7f, 0x43, 0x70, 0xb6, 0x57, 0xb0, 0x76, 0xe3, 0x10, 0x07, 0x19, 0xbd, 0x0e, 0xd4,
-    0x10, 0x5c, 0x1f, 0xfc, 0x40, 0x91, 0xb6, 0xed, 0x94, 0x37, 0x76, 0xb7, 0x86, 0x88, 0xf7, 0x34,
-    0x12, 0x91, 0xf6, 0x65, 0x23, 0x58, 0xc9, 0xeb, 0x2f, 0xcb, 0x96, 0x13, 0x8f, 0xca, 0x57, 0x7a,
-    0xd0, 0x7a, 0xbf, 0x22, 0xde, 0xd2, 0x15, 0xfc
+    KphKeyTypeTest,
+    KphKeyTypeProd,
+} KPH_KEY_TYPE, *PKPH_KEY_TYPE;
+
+typedef struct _KPH_KEY
+{
+    KPH_KEY_TYPE Type;
+    BYTE Material[KPH_KEY_MATERIAL_SIZE];
+} KPH_KEY, *PKPH_KEY;
+typedef const KPH_KEY* PCKPH_KEY;
+
+KPH_PROTECTED_DATA_SECTION_RO_PUSH();
+static const KPH_KEY KphpPublicKeys[] =
+{
+    {
+        KphKeyTypeProd, // kph
+        {
+            0x52, 0x53, 0x41, 0x31, 0x00, 0x10, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+            0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x01, 0xE5, 0xF2, 0xEF, 0xE0, 0xE0, 0x02, 0x05, 0xEA, 0x55,
+            0xF8, 0x4C, 0x26, 0xED, 0xF9, 0x55, 0xE3, 0xBD, 0x38, 0x06, 0x5D, 0xF6,
+            0x26, 0xA4, 0xFF, 0x69, 0xFC, 0x4D, 0x8C, 0x02, 0x7E, 0x82, 0x96, 0x3D,
+            0x90, 0xE8, 0xB7, 0xEB, 0x1A, 0xE3, 0x02, 0x57, 0x0F, 0x1C, 0xE9, 0x93,
+            0xD0, 0x61, 0xFC, 0x75, 0xF1, 0xF3, 0xC6, 0x49, 0xF9, 0xBC, 0x39, 0x6F,
+            0x80, 0x40, 0xC3, 0xF9, 0xB3, 0xDC, 0xFD, 0x21, 0x28, 0x25, 0x1B, 0x91,
+            0x42, 0xB0, 0x29, 0xA4, 0x76, 0x4D, 0x71, 0x4D, 0x38, 0x3C, 0x9F, 0x80,
+            0xD9, 0x11, 0xFD, 0xD5, 0x80, 0xB1, 0xFC, 0xB9, 0xC8, 0xCB, 0xE4, 0x6C,
+            0x1A, 0x11, 0x8E, 0xE4, 0x9D, 0x3C, 0x24, 0x58, 0x70, 0x64, 0x88, 0x08,
+            0x53, 0x7F, 0x8A, 0x30, 0x67, 0x59, 0x91, 0x2E, 0x77, 0xD5, 0x1F, 0x21,
+            0x9C, 0x8E, 0x7B, 0x5E, 0xC0, 0x3E, 0x52, 0x26, 0x69, 0x0F, 0x95, 0x14,
+            0x72, 0xE5, 0xE9, 0xA2, 0xF7, 0xFC, 0x22, 0x43, 0xB5, 0x1A, 0xB1, 0xDB,
+            0x01, 0xC4, 0x6A, 0x13, 0x99, 0xBE, 0x0F, 0x82, 0x59, 0xC8, 0x8F, 0xCA,
+            0xF2, 0x86, 0x54, 0x34, 0xF5, 0x4D, 0xD9, 0xD2, 0xA7, 0x4A, 0xDF, 0x94,
+            0x9E, 0x13, 0x53, 0xEA, 0xD0, 0x98, 0xB1, 0x15, 0x2D, 0x59, 0xD7, 0xFF,
+            0x9B, 0x9C, 0x78, 0x81, 0xDE, 0x90, 0xAF, 0x7E, 0xF4, 0x7D, 0x14, 0xAC,
+            0x40, 0x46, 0x13, 0x45, 0x16, 0x0A, 0x22, 0x51, 0xEC, 0x4F, 0x4F, 0xCF,
+            0x63, 0x0F, 0x6B, 0xF3, 0xFC, 0x7C, 0x85, 0x1C, 0x1E, 0xBB, 0xF1, 0x80,
+            0x34, 0x9F, 0x13, 0x57, 0xB5, 0x02, 0x37, 0xF6, 0xE5, 0x3A, 0x77, 0x90,
+            0x1B, 0xB7, 0x6E, 0xA9, 0xA3, 0xF1, 0x33, 0xE2, 0xC7, 0xD8, 0xFF, 0x82,
+            0x44, 0x0E, 0x28, 0x30, 0xD6, 0x25, 0x7D, 0x71, 0x4A, 0x68, 0x1C, 0xCD,
+            0x70, 0x6F, 0xB0, 0x64, 0x46, 0x0E, 0xE0, 0x1D, 0x30, 0x79, 0xE6, 0x69,
+            0x6D, 0x47, 0xF7, 0xEB, 0x09, 0x96, 0x30, 0x40, 0xEF, 0x5C, 0x62, 0xC0,
+            0x18, 0x36, 0xA4, 0x95, 0x85, 0x74, 0x91, 0x50, 0xFE, 0x6D, 0xE2, 0xD5,
+            0x52, 0xE4, 0x1F, 0x4A, 0x28, 0xB6, 0x9D, 0x5E, 0x34, 0xD5, 0x0C, 0x28,
+            0x4D, 0x49, 0xDD, 0x58, 0x40, 0x83, 0x84, 0xA4, 0x0E, 0x1D, 0xE6, 0xF5,
+            0xF0, 0x3B, 0x46, 0xAD, 0x2D, 0x64, 0xFA, 0xAC, 0x44, 0x95, 0x52, 0x31,
+            0x83, 0x43, 0x67, 0x65, 0x84, 0x74, 0xB3, 0xBD, 0x59, 0x2C, 0x13, 0x8A,
+            0x4B, 0xA2, 0xE2, 0x32, 0xF7, 0x42, 0xC6, 0xD6, 0x3D, 0x29, 0x39, 0x1D,
+            0x0F, 0xEC, 0x47, 0xA2, 0xBF, 0xED, 0x69, 0x6B, 0xEC, 0x45, 0x04, 0x32,
+            0x01, 0x8D, 0x50, 0x48, 0x8B, 0x9C, 0x8E, 0x1E, 0xFA, 0x11, 0x03, 0x87,
+            0x47, 0x23, 0x83, 0x98, 0x29, 0x2B, 0xB8, 0x76, 0xD3, 0x64, 0xE7, 0x8C,
+            0x22, 0xAE, 0x68, 0xA3, 0xC3, 0x58, 0xC0, 0xA0, 0xFE, 0x37, 0x90, 0x26,
+            0x27, 0x78, 0x4E, 0xC3, 0x63, 0x87, 0x3E, 0x20, 0xEF, 0x8A, 0xEA, 0x44,
+            0x1E, 0xCC, 0xAD, 0x1F, 0xFC, 0x05, 0x7B, 0x0A, 0x1B, 0x02, 0xFA, 0x1C,
+            0xEB, 0x5D, 0x81, 0x6B, 0x09, 0x2B, 0xDE, 0x49, 0x2A, 0xA6, 0xA1, 0x82,
+            0xE5, 0x08, 0xBF, 0x40, 0x6E, 0x67, 0x03, 0xAC, 0xB0, 0xDB, 0xB4, 0x9B,
+            0x66, 0x38, 0x78, 0x91, 0x79, 0x48, 0x54, 0xCE, 0xC5, 0x32, 0xAE, 0xAB,
+            0x35, 0x8B, 0x9C, 0xE9, 0x00, 0x42, 0xBE, 0x98, 0x2C, 0x00, 0x0F, 0x3C,
+            0xC7, 0x55, 0xA4, 0x45, 0x98, 0x7C, 0xE2, 0x5E, 0xFF, 0xC0, 0xEC, 0x97,
+            0x9C, 0x29, 0x5D, 0x65, 0x00, 0x68, 0x68, 0x97, 0x3B, 0x32, 0x4E, 0x39,
+            0x51, 0x95, 0x59, 0xA3, 0x81, 0xE5, 0xDC, 0xF0, 0xAF, 0x77, 0x34, 0x64,
+            0x6F, 0xD6, 0x88, 0x03, 0x23, 0xFB, 0x82, 0x62, 0x86, 0xFF, 0x59
+        }
+    },
+    {
+        KphKeyTypeTest, // kph-dev
+        {
+            0x52, 0x53, 0x41, 0x31, 0x00, 0x10, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+            0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x01, 0xAB, 0xDB, 0x39, 0x5E, 0xD1, 0xFA, 0x54, 0x35, 0xD7,
+            0x6B, 0x83, 0x62, 0x82, 0x06, 0xC7, 0x20, 0xDB, 0x05, 0x5E, 0x55, 0xF2,
+            0x3C, 0x6A, 0x52, 0x1F, 0x0B, 0xC6, 0xC2, 0xB4, 0x83, 0x13, 0xA9, 0xF2,
+            0xD6, 0xF7, 0x19, 0x99, 0xB5, 0xB3, 0x52, 0xE7, 0x54, 0x55, 0x17, 0x7F,
+            0xE3, 0xA6, 0x6B, 0xD6, 0xB7, 0xDA, 0x38, 0xC8, 0x44, 0xFF, 0x3F, 0x4A,
+            0x59, 0x0C, 0x3C, 0x45, 0xA3, 0x35, 0x8B, 0x34, 0x01, 0x82, 0xBD, 0x25,
+            0x9B, 0xAF, 0xFC, 0x56, 0x1F, 0x6E, 0xFE, 0xE2, 0xF5, 0xE1, 0x2D, 0xFB,
+            0x42, 0x41, 0x46, 0x48, 0x02, 0xEB, 0xEF, 0xEA, 0x41, 0x08, 0x8D, 0x58,
+            0xA5, 0x32, 0xFE, 0x8F, 0xE8, 0xBB, 0xF6, 0x36, 0xD9, 0x48, 0xC3, 0x2C,
+            0x30, 0x70, 0x57, 0xE0, 0x25, 0x1C, 0xA3, 0xE1, 0x72, 0x76, 0x48, 0xF9,
+            0x57, 0x8B, 0x50, 0x67, 0x27, 0x66, 0xD5, 0x70, 0x4F, 0x02, 0x94, 0x9F,
+            0xB3, 0xDE, 0x74, 0xF7, 0x7C, 0xD4, 0xEE, 0xFD, 0x95, 0x5D, 0x47, 0xF6,
+            0x0A, 0xDE, 0xA1, 0x76, 0x99, 0x52, 0x40, 0x0D, 0xB1, 0x63, 0x1C, 0x65,
+            0xA0, 0x04, 0xC8, 0x48, 0xE3, 0xC6, 0x3C, 0x6D, 0x26, 0x10, 0xB9, 0x22,
+            0x7D, 0x67, 0x5D, 0x81, 0x44, 0xAF, 0xE0, 0x85, 0xC3, 0xB3, 0x13, 0x27,
+            0xB8, 0xA3, 0xC2, 0x28, 0x2A, 0x57, 0xE2, 0xAE, 0x2D, 0xB7, 0x95, 0xC4,
+            0x13, 0x65, 0xB9, 0x5C, 0xF5, 0x29, 0x9D, 0x0E, 0x85, 0x37, 0x34, 0x34,
+            0xFF, 0x04, 0x17, 0x39, 0x0A, 0x5C, 0x31, 0xD8, 0x59, 0x11, 0xDA, 0x82,
+            0x1B, 0x18, 0x0C, 0x8E, 0x24, 0x24, 0x9B, 0x7F, 0x02, 0xB6, 0x5D, 0x31,
+            0x6D, 0xB5, 0x15, 0xB6, 0x54, 0x67, 0x1C, 0x6F, 0xF5, 0x2C, 0x42, 0x4B,
+            0x7F, 0x6F, 0xAC, 0xD7, 0x56, 0x8A, 0x18, 0xB7, 0x31, 0x02, 0x36, 0xF3,
+            0xB6, 0x8B, 0x47, 0x03, 0xFA, 0x84, 0xB5, 0x33, 0x90, 0xD7, 0x33, 0xF8,
+            0x32, 0x89, 0x7C, 0x0C, 0x31, 0xB8, 0xA3, 0xF3, 0xAF, 0x46, 0x3F, 0x77,
+            0x1A, 0x38, 0x8B, 0x82, 0xBD, 0x4A, 0xAD, 0x93, 0xC6, 0xFC, 0x24, 0x9F,
+            0xD4, 0xFF, 0xBB, 0x27, 0xE2, 0x6B, 0x5A, 0x99, 0x5F, 0x70, 0x08, 0xDB,
+            0xC9, 0x3A, 0xE8, 0x73, 0x87, 0x63, 0x09, 0x7F, 0x5D, 0x2A, 0x91, 0x24,
+            0xFA, 0xEE, 0x9D, 0xC5, 0x81, 0x97, 0x83, 0xC6, 0xD2, 0x6C, 0x5C, 0xFE,
+            0x45, 0x5A, 0xA4, 0xA9, 0x9C, 0xEA, 0xEF, 0x98, 0x52, 0xAE, 0x3A, 0xD0,
+            0x12, 0x54, 0x75, 0x9E, 0xD0, 0x1E, 0xF7, 0x9D, 0x03, 0x7E, 0xD5, 0x89,
+            0x3B, 0xE6, 0x87, 0x75, 0xB3, 0x7B, 0x7C, 0x45, 0x58, 0x1F, 0x8E, 0xE8,
+            0x59, 0x78, 0x54, 0xC3, 0xD5, 0x9B, 0x0F, 0xC7, 0x05, 0x34, 0xF2, 0x6C,
+            0xCF, 0x19, 0x40, 0x92, 0xDD, 0xF0, 0x1E, 0x5F, 0xA7, 0x04, 0xA2, 0x4D,
+            0x2E, 0x7C, 0x57, 0x43, 0x3C, 0xCC, 0xA0, 0x68, 0x0A, 0xEC, 0x47, 0x3D,
+            0x27, 0x16, 0x8C, 0x62, 0x33, 0x7F, 0x7D, 0x2D, 0xAA, 0x9D, 0x2F, 0x39,
+            0xF7, 0x44, 0xD7, 0x66, 0xE8, 0x1A, 0x38, 0x0C, 0x68, 0x9E, 0x37, 0x3E,
+            0x8F, 0xCF, 0x20, 0xBF, 0x9D, 0x3F, 0x4D, 0xA4, 0xFA, 0xFA, 0x67, 0xA8,
+            0xAD, 0xB5, 0x04, 0xFF, 0x29, 0x72, 0x4A, 0x87, 0xFD, 0x95, 0xC6, 0x1B,
+            0xE2, 0xA7, 0xB3, 0x7F, 0xC7, 0xCB, 0x4A, 0x5A, 0x7A, 0x02, 0x0B, 0x24,
+            0xBD, 0x27, 0xC1, 0xED, 0x94, 0x12, 0x5E, 0x7F, 0x45, 0x6E, 0xE5, 0x24,
+            0x38, 0x24, 0xA4, 0xF4, 0x93, 0xE6, 0xF6, 0x3F, 0x12, 0xD7, 0x9D, 0x2E,
+            0x15, 0xAC, 0x29, 0x2D, 0x83, 0xB2, 0x95, 0x5D, 0x7A, 0x1A, 0xCB, 0x9F,
+            0x23, 0xF3, 0x80, 0x3E, 0x8C, 0x72, 0x5F, 0x0F, 0xB2, 0x93, 0x1E, 0x15,
+            0xC5, 0xC0, 0x8B, 0xC3, 0xF8, 0x0A, 0xCA, 0x88, 0x07, 0x7F, 0x79
+        }
+    },
+    {
+        KphKeyTypeTest, // kph-test
+        {
+            0x52, 0x53, 0x41, 0x31, 0x00, 0x10, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+            0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x01, 0xC7, 0x95, 0x12, 0x92, 0x18, 0x6F, 0xA2, 0x01, 0x6C,
+            0x9A, 0x5F, 0xC1, 0x70, 0x7B, 0xF9, 0xE3, 0x57, 0x75, 0x28, 0x13, 0xC9,
+            0xBF, 0xBC, 0x93, 0xCD, 0x55, 0x5C, 0xA9, 0xC2, 0x80, 0x23, 0xA2, 0xEF,
+            0xF4, 0xB6, 0x3A, 0xBF, 0x6E, 0x39, 0xC6, 0x23, 0xC1, 0x3B, 0x04, 0xBE,
+            0xB5, 0x9B, 0x5C, 0x8A, 0x64, 0xAA, 0x7A, 0x1C, 0x20, 0x7E, 0x2D, 0x52,
+            0x55, 0xEC, 0x3E, 0x5C, 0x40, 0xD5, 0x76, 0xC8, 0x2F, 0xFF, 0x14, 0xD7,
+            0xA1, 0xE7, 0x1D, 0xF1, 0x3C, 0x73, 0x89, 0x6B, 0xF5, 0xA4, 0xC6, 0x01,
+            0x20, 0xB1, 0xD8, 0x21, 0x70, 0xF9, 0x61, 0x76, 0x87, 0x1D, 0x24, 0x0F,
+            0x79, 0xEF, 0x5A, 0xE9, 0x91, 0xB0, 0x97, 0x33, 0xB5, 0x6C, 0x9F, 0x91,
+            0xED, 0x56, 0x80, 0x6B, 0x40, 0x3C, 0xEF, 0x46, 0xB0, 0xC5, 0xD7, 0xA7,
+            0xB5, 0x9D, 0x45, 0x7F, 0x03, 0xEA, 0x70, 0xA1, 0x64, 0xE2, 0x29, 0xB4,
+            0x08, 0x69, 0x09, 0xC0, 0xD0, 0x57, 0x38, 0xF7, 0x4B, 0x33, 0x9D, 0xF4,
+            0x36, 0x28, 0x15, 0xBF, 0xB1, 0x62, 0x04, 0x10, 0x4D, 0xAB, 0x47, 0x03,
+            0x15, 0xAB, 0xC4, 0x78, 0x0E, 0x78, 0x9D, 0x8A, 0x28, 0x74, 0x54, 0xEB,
+            0x66, 0xE8, 0x89, 0x45, 0x45, 0x70, 0x2E, 0xB9, 0x03, 0x1C, 0xCB, 0x83,
+            0xA0, 0x7C, 0x0B, 0xC5, 0xB2, 0x93, 0x6A, 0x7F, 0x65, 0x4E, 0x35, 0xFB,
+            0xF1, 0x58, 0x21, 0xC7, 0x2D, 0x44, 0x53, 0x69, 0x9B, 0x46, 0x23, 0x10,
+            0x51, 0xAE, 0x4C, 0x36, 0x18, 0xC4, 0x62, 0xBE, 0x4E, 0x44, 0xFB, 0x98,
+            0x42, 0x46, 0x0B, 0x33, 0x48, 0x45, 0x86, 0xEA, 0x7F, 0x75, 0x32, 0xD2,
+            0x6B, 0x49, 0x5A, 0x0A, 0x18, 0x37, 0xB1, 0xC3, 0x3E, 0xB0, 0x94, 0xE8,
+            0x46, 0x01, 0x07, 0x59, 0x5F, 0xCD, 0xFF, 0x25, 0xE6, 0xB1, 0x23, 0x34,
+            0xD5, 0x3A, 0xBA, 0xB9, 0x96, 0xB8, 0xCA, 0xA5, 0x15, 0xD5, 0x07, 0xE3,
+            0xE1, 0x63, 0x6F, 0x97, 0x4F, 0x11, 0xA5, 0x49, 0x8E, 0x29, 0x3F, 0xC9,
+            0xAF, 0x59, 0x56, 0x4B, 0x11, 0x04, 0x6C, 0xBE, 0x3F, 0xAE, 0x3F, 0x72,
+            0xD1, 0x81, 0x15, 0xDE, 0xDB, 0x5B, 0x21, 0xA7, 0x02, 0xE6, 0x50, 0x6D,
+            0xB0, 0x9E, 0x98, 0x23, 0x44, 0x9D, 0x1D, 0x21, 0x12, 0x7C, 0x28, 0x1F,
+            0x37, 0x6D, 0xCB, 0xCB, 0x1B, 0x01, 0x63, 0xF3, 0xAC, 0xAF, 0x30, 0x41,
+            0xBD, 0xA8, 0x39, 0xD7, 0x37, 0x59, 0x56, 0xCC, 0x3B, 0x73, 0x5C, 0xF1,
+            0x21, 0x9C, 0xD2, 0x75, 0xEA, 0xE7, 0xBD, 0x82, 0xDF, 0x3D, 0x5A, 0x0E,
+            0x9D, 0x7A, 0x41, 0x16, 0x26, 0x72, 0x12, 0xA0, 0x89, 0xFF, 0xAC, 0x83,
+            0x87, 0xB5, 0x9F, 0xF0, 0x56, 0xAA, 0x36, 0x9A, 0x1B, 0x41, 0x3C, 0xDF,
+            0x75, 0x07, 0x0E, 0xC6, 0xF5, 0xB4, 0x41, 0xF6, 0xCA, 0xB6, 0xE8, 0xF0,
+            0x38, 0x98, 0x4C, 0xB1, 0x56, 0xBC, 0xFD, 0xD4, 0xD9, 0xB5, 0x7E, 0x80,
+            0x0D, 0xB2, 0xD0, 0x2F, 0x2E, 0x6F, 0x7D, 0xFF, 0xB0, 0xF7, 0x8C, 0xE2,
+            0x90, 0xDC, 0x3B, 0x15, 0xF6, 0x07, 0xBC, 0x36, 0x2C, 0x40, 0x93, 0x05,
+            0xEF, 0xF3, 0x02, 0xEB, 0x4D, 0xB0, 0xE8, 0xC9, 0x38, 0x4B, 0xBE, 0xA1,
+            0xBF, 0xEE, 0x9F, 0x8A, 0x31, 0xE0, 0x76, 0xE1, 0x79, 0x94, 0xB7, 0x4D,
+            0x7C, 0xF4, 0x65, 0xF6, 0x8C, 0x35, 0xF5, 0x78, 0x5E, 0xFE, 0x13, 0x72,
+            0xC6, 0x13, 0x4C, 0x3A, 0x5E, 0x2C, 0x2B, 0x68, 0x68, 0x59, 0x02, 0x06,
+            0xD5, 0x7F, 0x02, 0xA6, 0xF2, 0xB6, 0x16, 0xCA, 0xE8, 0x14, 0x75, 0xDA,
+            0x3D, 0xF5, 0x85, 0x3D, 0x6B, 0x2D, 0x03, 0xA4, 0xC1, 0x5F, 0x5D, 0x68,
+            0xCC, 0xB1, 0xDE, 0xC1, 0x69, 0x22, 0x99, 0x00, 0x4A, 0x5C, 0x61, 0x14,
+            0xAD, 0x50, 0x05, 0xCF, 0x6E, 0xEE, 0x4C, 0xC9, 0x58, 0xA4, 0xE5
+        }
+    }
 };
-
-_IRQL_requires_max_(PASSIVE_LEVEL)
-_Must_inspect_result_
-NTSTATUS KpiVerifyProcess(
-    _In_ PUNICODE_STRING ProcessFileName,
-    _Out_ PKPH_EXTENTS TrustedExtents
-    );
-
-_IRQL_requires_max_(PASSIVE_LEVEL)
-_Must_inspect_result_
-NTSTATUS KpiVerifyProcessSections(
-    _In_ PVOID BaseAddress,
-    _In_ HANDLE FileHandle,
-    _In_ PIMAGE_SECTION_HEADER SectionHeaders,
-    _In_ WORD NumberOfSections,
-    _Out_ PKPH_EXTENTS TrustedExtents
-    );
-
-_IRQL_requires_max_(PASSIVE_LEVEL)
-_Must_inspect_result_
-NTSTATUS KpiVerifyCallerTrustedExtents(
-    _In_ PKPH_CLIENT Client
-    );
-
-#ifdef ALLOC_PRAGMA
-#pragma alloc_text(PAGE, KphHashFile)
-#pragma alloc_text(PAGE, KphVerifyFile)
-#pragma alloc_text(PAGE, KpiVerifyProcessSections)
-#pragma alloc_text(PAGE, KpiVerifyProcess)
-#pragma alloc_text(PAGE, KphVerifyClient)
-#pragma alloc_text(PAGE, KpiVerifyClient)
-#pragma alloc_text(PAGE, KphGenerateKeysClient)
-#pragma alloc_text(PAGE, KphRetrieveKeyViaApc)
-#pragma alloc_text(PAGE, KphValidateKey)
-#pragma alloc_text(PAGE, KphpBackoffKey)
-#pragma alloc_text(PAGE, KphDominationCheck)
-#pragma alloc_text(PAGE, KphVerifyCaller)
-#pragma alloc_text(PAGE, KpiVerifyCallerTrustedExtents)
-#endif
-
-NTSTATUS KphHashFile(
-    _In_ PUNICODE_STRING FileName,
-    _Out_ PVOID *Hash,
-    _Out_ PULONG HashSize
-    )
+static const BCRYPT_PSS_PADDING_INFO KphpKeyPaddingInfo =
 {
-    NTSTATUS status;
-    BCRYPT_ALG_HANDLE hashAlgHandle = NULL;
-    ULONG querySize;
-    ULONG hashObjectSize;
-    ULONG hashSize;
-    PVOID hashObject = NULL;
-    PVOID hash = NULL;
-    BCRYPT_HASH_HANDLE hashHandle = NULL;
-    OBJECT_ATTRIBUTES objectAttributes;
-    IO_STATUS_BLOCK iosb;
-    HANDLE fileHandle = NULL;
-    FILE_STANDARD_INFORMATION standardInfo;
-    ULONG remainingBytes;
-    ULONG bytesToRead;
-    PVOID buffer = NULL;
+    KPH_KEY_HASH_ALGORITHM,
+    KPH_KEY_HASH_ALGORITHM_BYTES
+};
+static const UNICODE_STRING KphpSigExtension = RTL_CONSTANT_STRING(L".sig");
+KPH_PROTECTED_DATA_SECTION_RO_POP();
+KPH_PROTECTED_DATA_SECTION_PUSH();
+static BCRYPT_KEY_HANDLE KphpPublicKeyHandles[ARRAYSIZE(KphpPublicKeys)] = { 0 };
+static ULONG KphpPublicKeyHandlesCount = 0;
+C_ASSERT(ARRAYSIZE(KphpPublicKeyHandles) == ARRAYSIZE(KphpPublicKeys));
+KPH_PROTECTED_DATA_SECTION_POP();
 
-    PAGED_CODE();
-
-    // Open the hash algorithm and allocate memory for the hash object.
-
-    if (!NT_SUCCESS(status = BCryptOpenAlgorithmProvider(&hashAlgHandle, KPH_HASH_ALGORITHM, NULL, 0)))
-        goto CleanupExit;
-
-    if (!NT_SUCCESS(status = BCryptGetProperty(
-        hashAlgHandle,
-        BCRYPT_OBJECT_LENGTH,
-        (PUCHAR)&hashObjectSize,
-        sizeof(ULONG),
-        &querySize,
-        0
-        )))
-    {
-        goto CleanupExit;
-    }
-
-    if (!NT_SUCCESS(status = BCryptGetProperty(
-        hashAlgHandle,
-        BCRYPT_HASH_LENGTH,
-        (PUCHAR)&hashSize,
-        sizeof(ULONG),
-        &querySize,
-        0
-        )))
-    {
-        goto CleanupExit;
-    }
-
-    if (!(hashObject = ExAllocatePoolZero(PagedPool, hashObjectSize, 'vhpK')))
-    {
-        status = STATUS_INSUFFICIENT_RESOURCES;
-        goto CleanupExit;
-    }
-
-    if (!(hash = ExAllocatePoolZero(PagedPool, hashSize, 'vhpK')))
-    {
-        status = STATUS_INSUFFICIENT_RESOURCES;
-        goto CleanupExit;
-    }
-
-    if (!NT_SUCCESS(status = BCryptCreateHash(
-        hashAlgHandle,
-        &hashHandle,
-        hashObject,
-        hashObjectSize,
-        NULL,
-        0,
-        0
-        )))
-    {
-        goto CleanupExit;
-    }
-
-    // Open the file and compute the hash.
-
-    InitializeObjectAttributes(
-        &objectAttributes,
-        FileName,
-        OBJ_KERNEL_HANDLE,
-        NULL,
-        NULL
-        );
-
-    if (!NT_SUCCESS(status = ZwCreateFile(
-        &fileHandle,
-        FILE_GENERIC_READ,
-        &objectAttributes,
-        &iosb,
-        NULL,
-        FILE_ATTRIBUTE_NORMAL,
-        FILE_SHARE_READ,
-        FILE_OPEN,
-        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
-        NULL,
-        0
-        )))
-    {
-        fileHandle = NULL;
-        goto CleanupExit;
-    }
-
-    if (!NT_SUCCESS(status = ZwQueryInformationFile(
-        fileHandle,
-        &iosb,
-        &standardInfo,
-        sizeof(FILE_STANDARD_INFORMATION),
-        FileStandardInformation
-        )))
-    {
-        goto CleanupExit;
-    }
-
-    if (standardInfo.EndOfFile.QuadPart <= 0)
-    {
-        status = STATUS_UNSUCCESSFUL;
-        goto CleanupExit;
-    }
-    if (standardInfo.EndOfFile.QuadPart > FILE_MAX_SIZE)
-    {
-        status = STATUS_FILE_TOO_LARGE;
-        goto CleanupExit;
-    }
-
-    if (!(buffer = ExAllocatePoolZero(PagedPool, FILE_BUFFER_SIZE, 'vhpK')))
-    {
-        status = STATUS_INSUFFICIENT_RESOURCES;
-        goto CleanupExit;
-    }
-
-    remainingBytes = (ULONG)standardInfo.EndOfFile.QuadPart;
-
-    while (remainingBytes != 0)
-    {
-        bytesToRead = FILE_BUFFER_SIZE;
-
-        if (bytesToRead > remainingBytes)
-            bytesToRead = remainingBytes;
-
-        if (!NT_SUCCESS(status = ZwReadFile(
-            fileHandle,
-            NULL,
-            NULL,
-            NULL,
-            &iosb,
-            buffer,
-            bytesToRead,
-            NULL,
-            NULL
-            )))
-        {
-            goto CleanupExit;
-        }
-
-        if ((ULONG)iosb.Information != bytesToRead)
-        {
-            status = STATUS_INTERNAL_ERROR;
-            goto CleanupExit;
-        }
-
-        if (!NT_SUCCESS(status = BCryptHashData(hashHandle, buffer, bytesToRead, 0)))
-            goto CleanupExit;
-
-        remainingBytes -= bytesToRead;
-    }
-
-    if (!NT_SUCCESS(status = BCryptFinishHash(hashHandle, hash, hashSize, 0)))
-        goto CleanupExit;
-
-    if (NT_SUCCESS(status))
-    {
-        *Hash = hash;
-        *HashSize = hashSize;
-
-        hash = NULL; // Don't free this in the cleanup section
-    }
-
-CleanupExit:
-    if (buffer)
-        ExFreePoolWithTag(buffer, 'vhpK');
-    if (fileHandle)
-        ZwClose(fileHandle);
-    if (hashHandle)
-        BCryptDestroyHash(hashHandle);
-    if (hash)
-        ExFreePoolWithTag(hash, 'vhpK');
-    if (hashObject)
-        ExFreePoolWithTag(hashObject, 'vhpK');
-    if (hashAlgHandle)
-        BCryptCloseAlgorithmProvider(hashAlgHandle, 0);
-
-    return status;
-}
-
-NTSTATUS KphVerifyFile(
-    _In_ PUNICODE_STRING FileName,
-    _In_reads_bytes_(SignatureSize) PUCHAR Signature,
-    _In_ ULONG SignatureSize
-    )
-{
-    NTSTATUS status;
-    BCRYPT_ALG_HANDLE signAlgHandle = NULL;
-    BCRYPT_KEY_HANDLE keyHandle = NULL;
-    PVOID hash = NULL;
-    ULONG hashSize;
-
-    PAGED_CODE();
-
-    // Import the trusted public key.
-
-    if (!NT_SUCCESS(status = BCryptOpenAlgorithmProvider(&signAlgHandle, KPH_SIGN_ALGORITHM, NULL, 0)))
-        goto CleanupExit;
-
-    if (!NT_SUCCESS(status = BCryptImportKeyPair(
-        signAlgHandle,
-        NULL,
-        KPH_BLOB_PUBLIC,
-        &keyHandle,
-        KphpTrustedPublicKey,
-        sizeof(KphpTrustedPublicKey),
-        0
-        )))
-    {
-        goto CleanupExit;
-    }
-
-    // Hash the file.
-
-    if (!NT_SUCCESS(status = KphHashFile(FileName, &hash, &hashSize)))
-        goto CleanupExit;
-
-    // Verify the hash.
-
-    if (!NT_SUCCESS(status = BCryptVerifySignature(keyHandle, NULL, hash, hashSize, Signature, SignatureSize, 0)))
-        goto CleanupExit;
-
-CleanupExit:
-    if (hash)
-        ExFreePoolWithTag(hash, 'vhpK');
-    if (keyHandle)
-        BCryptDestroyKey(keyHandle);
-    if (signAlgHandle)
-        BCryptCloseAlgorithmProvider(signAlgHandle, 0);
-
-    return status;
-}
+PAGED_FILE();
 
 /**
- * Verifies the process sections are expected and meet coherency requirements.
+ * \brief Verifies that the specified signature matches the specified hash by
+ * using one of the known public keys.
  *
- * \details This function assumes the current attached process is the one to
- * inspect and BaseAddress is the base address of the current process.
+ * \param[in] KeyHandle The key handle to use for verification, if NULL the
+ * pinned keys are used to verify the signature.
+ * \param[in] Hash The hash to verify.
+ * \param[in] Signature The signature to check.
+ * \param[in] SignatureLength The length of the signature.
  *
- * \param[in] BaseAddress - Base address of process.
- * \param[in] FileHandle - Handle to the file backing the process image.
- * \param[in] SectionHeaders - Section headers of the process.
- * \param[in] NumberOfSections - Number of sections in the SectionHeaders
- * parameter.
- * \param[out] TrustedExtents - On success, set to the validated module extents.
- *
- * \return Appropriate status.
-*/
+ * \return Successful or errant status.
+ */
 _IRQL_requires_max_(PASSIVE_LEVEL)
 _Must_inspect_result_
-NTSTATUS KpiVerifyProcessSections(
-    _In_ PVOID BaseAddress,
-    _In_ HANDLE FileHandle,
-    _In_ PIMAGE_SECTION_HEADER SectionHeaders,
-    _In_ WORD NumberOfSections,
-    _Out_ PKPH_EXTENTS TrustedExtents
+NTSTATUS KphpVerifyHash(
+    _In_opt_ BCRYPT_KEY_HANDLE KeyHandle,
+    _In_ PKPH_HASH_INFORMATION HashInformation,
+    _In_ PBYTE Signature,
+    _In_ ULONG SignatureLength
     )
 {
     NTSTATUS status;
-    PIMAGE_SECTION_HEADER textSection;
-    ULONG inspectBytes;
-    MEMORY_BASIC_INFORMATION memoryBasicInfo;
-    ULONG remainingBytes;
-    ULONG matchingBytes;
-    LARGE_INTEGER offset;
-    PUCHAR bytes;
-    ULONG bytesToRead;
-    IO_STATUS_BLOCK iosb;
-    PUCHAR inprocBytes;
 
-    PAGED_PASSIVE();
+    PAGED_CODE_PASSIVE();
 
-    status = STATUS_SUCCESS;
-    textSection = NULL;
-    matchingBytes = 0;
-    bytes = NULL;
+    status = STATUS_UNSUCCESSFUL;
 
-    for (WORD i = 0; i < NumberOfSections; i++)
+    if (KeyHandle)
     {
-        if (strcmp(SectionHeaders[i].Name, ".text") == 0)
-        {
-            if (!textSection)
-            {
-                textSection = &SectionHeaders[i];
-            }
-            else
-            {
-                status = STATUS_ACCESS_DENIED;
-                goto CleanupExit;
-            }
-        }
-    }
-
-    if (!textSection)
-    {
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
-    }
-
-    //
-    // Account for any 0 fill by taking the min.
-    //
-    inspectBytes = min(textSection->Misc.VirtualSize, textSection->SizeOfRawData);
-
-    if (inspectBytes == 0)
-    {
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
-    }
-
-    inprocBytes = PTR_ADD_OFFSET(BaseAddress, textSection->VirtualAddress);
-
-    if (!NT_SUCCESS(status = ZwQueryVirtualMemory(
-        ZwCurrentProcess(),
-        inprocBytes,
-        MemoryBasicInformation,
-        &memoryBasicInfo,
-        sizeof(MEMORY_BASIC_INFORMATION),
-        NULL
-        )))
-    {
-        goto CleanupExit;
-    }
-
-    //
-    // Sanity check that the .text section hasn't been screwed with.
-    //
-    if ((memoryBasicInfo.RegionSize < inspectBytes) ||
-        (memoryBasicInfo.AllocationProtect != PAGE_EXECUTE_WRITECOPY) ||
-        (memoryBasicInfo.Protect != PAGE_EXECUTE_READ) ||
-        (memoryBasicInfo.Type != MEM_IMAGE) ||
-        (memoryBasicInfo.State != MEM_COMMIT))
-
-    {
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
-    }
-
-    if (!(bytes = ExAllocatePoolZero(PagedPool, FILE_BUFFER_SIZE, 'pvpK')))
-    {
-        status = STATUS_INSUFFICIENT_RESOURCES;
-        goto CleanupExit;
-    }
-
-    remainingBytes = inspectBytes;
-    offset.QuadPart = textSection->PointerToRawData;
-
-    while (remainingBytes != 0)
-    {
-        bytesToRead = FILE_BUFFER_SIZE;
-
-        if (bytesToRead > remainingBytes)
-            bytesToRead = remainingBytes;
-
-        if (!NT_SUCCESS(status = ZwReadFile(
-            FileHandle,
-            NULL,
-            NULL,
-            NULL,
-            &iosb,
-            bytes,
-            bytesToRead,
-            &offset,
-            NULL
-            )))
-        {
-            goto CleanupExit;
-        }
-
-        if (iosb.Information != bytesToRead)
-        {
-            status = STATUS_ACCESS_DENIED;
-            goto CleanupExit;
-        }
-
-        __try
-        {
-            ProbeForRead(inprocBytes, bytesToRead, 1);
-
-            for (ULONG i = 0; i < bytesToRead; i++)
-            {
-                if (inprocBytes[i] == bytes[i])
-                {
-                    matchingBytes++;
-                }
-            }
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            status = STATUS_ACCESS_DENIED;
-            goto CleanupExit;
-        }
-
-        remainingBytes -= bytesToRead;
-        offset.QuadPart += bytesToRead;
-        inprocBytes = PTR_ADD_OFFSET(inprocBytes, bytesToRead);
-    }
-
-    //
-    // Check coherency
-    //
-    if ((matchingBytes <= inspectBytes) &&
-        ((inspectBytes - matchingBytes) <= (inspectBytes / PROC_VERIFY_COHERENCY_VALUE)))
-    {
-        TrustedExtents->BaseAddress = PTR_ADD_OFFSET(BaseAddress, textSection->VirtualAddress);
-        TrustedExtents->EndAddress = PTR_ADD_OFFSET(TrustedExtents->BaseAddress, inspectBytes);
-        status = STATUS_SUCCESS;
+        status = BCryptVerifySignature(KeyHandle,
+                                       KPH_KEY_PADDING_INFO,
+                                       HashInformation->Hash,
+                                       HashInformation->Length,
+                                       Signature,
+                                       SignatureLength,
+                                       KPH_KEY_PADDING_FLAGS);
     }
     else
     {
-        status = STATUS_ACCESS_DENIED;
-    }
-
-CleanupExit:
-    if (bytes)
-    {
-        ExFreePoolWithTag(bytes, 'pvpK');
+        for (ULONG i = 0; i < KphpPublicKeyHandlesCount; i++)
+        {
+            status = BCryptVerifySignature(KphpPublicKeyHandles[i],
+                                           KPH_KEY_PADDING_INFO,
+                                           HashInformation->Hash,
+                                           HashInformation->Length,
+                                           Signature,
+                                           SignatureLength,
+                                           KPH_KEY_PADDING_FLAGS);
+            if (NT_SUCCESS(status))
+            {
+                return status;
+            }
+        }
     }
 
     return status;
 }
 
 /**
- * Verifies the process.
+ * \brief Closes a verification key handle.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+VOID KphVerifyCloseKey(
+    _In_ BCRYPT_KEY_HANDLE KeyHandle
+    )
+{
+    PAGED_CODE_PASSIVE();
+
+    BCryptDestroyKey(KeyHandle);
+}
+
+/**
+ * \brief Creates a verification key handle.
  *
- * \details This function assumes that the process being inspected is the
- * currently attached process.
+ * \param[out] KeyHandle The created key handle.
+ * \param[in] KeyMaterial The key material to use.
+ * \param[in] KeyMaterialLength The length of the key material.
  *
- * \param[in] ProcessFileName - File name of the image backing the process.
- * \param[out] TrustedExtents - On success, set to the validated module extents.
-*/
+ * \return Successful or errant status.
+ */
 _IRQL_requires_max_(PASSIVE_LEVEL)
 _Must_inspect_result_
-NTSTATUS KpiVerifyProcess(
-    _In_ PUNICODE_STRING ProcessFileName,
-    _Out_ PKPH_EXTENTS TrustedExtents
+NTSTATUS KphVerifyCreateKey(
+    _Out_ BCRYPT_KEY_HANDLE* KeyHandle,
+    _In_ PBYTE KeyMaterial,
+    _In_ ULONG KeyMaterialLength
     )
 {
     NTSTATUS status;
-    PVOID baseAddress;
-    MEMORY_REGION_INFORMATION memoryRegionInfo;
-    PVOID inprocHeaders;
-    IMAGE_NT_HEADERS processHeaders;
-    MEMORY_BASIC_INFORMATION memoryBasicInfo;
-    HANDLE fileHandle;
+
+    PAGED_CODE_PASSIVE();
+
+    status = BCryptImportKeyPair(KPH_KEY_ALG_HANDLE,
+                                 NULL,
+                                 KPH_KEY_BLOB_PUBLIC,
+                                 KeyHandle,
+                                 (PUCHAR)KeyMaterial,
+                                 KeyMaterialLength,
+                                 0);
+    if (!NT_SUCCESS(status))
+    {
+        *KeyHandle = NULL;
+    }
+
+    return status;
+}
+
+/**
+ * \brief Verifies a buffer matches the provided signature.
+ *
+ * \param[in] KeyHandle The key handle to use for verification, if NULL the
+ * pinned keys are used to verify the signature.
+ * \param[in] Buffer The buffer to verify.
+ * \param[in] BufferLength The length of the buffer.
+ * \param[in] Signature The signature to check.
+ * \param[in] SignatureLength The length of the signature.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphVerifyBufferEx(
+    _In_opt_ BCRYPT_KEY_HANDLE KeyHandle,
+    _In_ PBYTE Buffer,
+    _In_ ULONG BufferLength,
+    _In_ PBYTE Signature,
+    _In_ ULONG SignatureLength
+    )
+{
+    NTSTATUS status;
+    KPH_HASH_INFORMATION hashInfo;
+
+    PAGED_CODE_PASSIVE();
+
+    status = KphHashBuffer(Buffer,
+                           BufferLength,
+                           KphHashAlgorithmSha512,
+                           &hashInfo);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "KphHashBuffer failed: %!STATUS!",
+                      status);
+
+        return status;
+    }
+
+    status = KphpVerifyHash(KeyHandle, &hashInfo, Signature, SignatureLength);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "KphpVerifyHash failed: %!STATUS!",
+                      status);
+
+        return status;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/**
+ * \brief Verifies a buffer matches the provided signature.
+ *
+ * \param[in] Buffer The buffer to verify.
+ * \param[in] BufferLength The length of the buffer.
+ * \param[in] Signature The signature to check.
+ * \param[in] SignatureLength The length of the signature.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphVerifyBuffer(
+    _In_ PBYTE Buffer,
+    _In_ ULONG BufferLength,
+    _In_ PBYTE Signature,
+    _In_ ULONG SignatureLength
+    )
+{
+    PAGED_CODE_PASSIVE();
+
+    return KphVerifyBufferEx(NULL,
+                             Buffer,
+                             BufferLength,
+                             Signature,
+                             SignatureLength);
+}
+
+#define KphpVerifyValidFileName(FileName)                                      \
+    (((FileName)->Length > KphpSigExtension.Length) &&                         \
+     ((FileName)->Buffer[0] == L'\\'))
+
+/**
+ * \brief Verifies a file object.
+ *
+ * \param[in] FileObject File object to verify.
+ * \param[in] FileName Optional file name to use for verification, if not
+ * provided the file name is looked up from the file object.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphVerifyFileObject(
+    _In_ PFILE_OBJECT FileObject,
+    _In_opt_ PCUNICODE_STRING FileName
+    )
+{
+    NTSTATUS status;
+    PCUNICODE_STRING fileName;
+    PUNICODE_STRING localFileName;
+    UNICODE_STRING signatureFileName;
     OBJECT_ATTRIBUTES objectAttributes;
-    IO_STATUS_BLOCK iosb;
-    IMAGE_DOS_HEADER fileDosHeader;
-    IMAGE_NT_HEADERS fileHeaders;
-    LARGE_INTEGER offset;
-    ULONG sizeOfSectionHeaders;
-    PIMAGE_SECTION_HEADER sectionHeaders;
+    HANDLE signatureFileHandle;
+    IO_STATUS_BLOCK ioStatusBlock;
+    PBYTE signature;
+    ULONG signatureLength;
+    KPH_HASH_INFORMATION hashInfo;
 
-    PAGED_PASSIVE();
+    PAGED_CODE_PASSIVE();
 
-    fileHandle = NULL;
-    sectionHeaders = NULL;
+    localFileName = NULL;
+    RtlZeroMemory(&signatureFileName, sizeof(signatureFileName));
+    signatureFileHandle = NULL;
+    signature = NULL;
 
-    TrustedExtents->BaseAddress = NULL;
-    TrustedExtents->EndAddress = NULL;
-
-    if (!(baseAddress = PsGetProcessSectionBaseAddress(PsGetCurrentProcess())))
+    if (FileName)
     {
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
+        fileName = FileName;
     }
-
-    if (!NT_SUCCESS(status = ZwQueryVirtualMemory(
-        ZwCurrentProcess(),
-        baseAddress,
-        MemoryRegionInformation,
-        &memoryRegionInfo,
-        sizeof(MEMORY_REGION_INFORMATION),
-        NULL
-        )))
+    else
     {
-        goto CleanupExit;
-    }
-
-    __try
-    {
-        status = KphImageNtHeader(
-            baseAddress,
-            memoryRegionInfo.RegionSize,
-            (PIMAGE_NT_HEADERS*)&inprocHeaders
-            );
-
+        status = KphGetNameFileObject(FileObject, &localFileName);
         if (!NT_SUCCESS(status))
-            goto CleanupExit;
+        {
+            KphTracePrint(TRACE_LEVEL_VERBOSE,
+                          VERIFY,
+                          "KphGetNameFileObject failed: %!STATUS!",
+                          status);
 
-        ProbeForRead(inprocHeaders, sizeof(IMAGE_NT_HEADERS), 1);
-        memcpy(&processHeaders, inprocHeaders, sizeof(IMAGE_NT_HEADERS));
+            goto Exit;
+        }
+
+        fileName = localFileName;
     }
-    __except (EXCEPTION_EXECUTE_HANDLER)
+
+    if (!KphpVerifyValidFileName(fileName))
     {
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "File name is invalid \"%wZ\"",
+                      fileName);
+
+        status = STATUS_OBJECT_NAME_INVALID;
+        goto Exit;
     }
 
-    if (!NT_SUCCESS(status = ZwQueryVirtualMemory(
-        ZwCurrentProcess(),
-        inprocHeaders,
-        MemoryBasicInformation,
-        &memoryBasicInfo,
-        sizeof(MEMORY_BASIC_INFORMATION),
-        NULL
-        )))
-    {
-        goto CleanupExit;
-    }
-
-    if ((memoryBasicInfo.AllocationProtect != PAGE_EXECUTE_WRITECOPY) ||
-        (memoryBasicInfo.Protect != PAGE_READONLY) ||
-        (memoryBasicInfo.Type != MEM_IMAGE) ||
-        (memoryBasicInfo.State != MEM_COMMIT))
-    {
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
-    }
-
-    InitializeObjectAttributes(
-        &objectAttributes,
-        ProcessFileName,
-        OBJ_KERNEL_HANDLE,
-        NULL,
-        NULL
-        );
-
-    status = ZwCreateFile(
-        &fileHandle,
-        FILE_GENERIC_READ,
-        &objectAttributes,
-        &iosb,
-        NULL,
-        FILE_ATTRIBUTE_NORMAL,
-        FILE_SHARE_READ,
-        FILE_OPEN,
-        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
-        NULL,
-        0
-        );
-
+    status = RtlDuplicateUnicodeString(0, fileName, &signatureFileName);
     if (!NT_SUCCESS(status))
     {
-        fileHandle = NULL;
-        goto CleanupExit;
-    }
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "RtlDuplicateUnicodeString failed: %!STATUS!",
+                      status);
 
-    status = ZwReadFile(
-        fileHandle,
-        NULL,
-        NULL,
-        NULL,
-        &iosb,
-        &fileDosHeader,
-        sizeof(IMAGE_DOS_HEADER),
-        NULL,
-        NULL
-        );
-
-    if (!NT_SUCCESS(status))
-        goto CleanupExit;
-
-    if (iosb.Information < sizeof(IMAGE_DOS_HEADER))
-    {
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
-    }
-
-    offset.QuadPart = fileDosHeader.e_lfanew;
-    status = ZwReadFile(
-        fileHandle,
-        NULL,
-        NULL,
-        NULL,
-        &iosb,
-        &fileHeaders,
-        sizeof(fileHeaders),
-        &offset,
-        NULL
-        );
-
-    if (!NT_SUCCESS(status))
-        goto CleanupExit;
-
-    if (iosb.Information < sizeof(fileHeaders))
-    {
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
+        RtlZeroMemory(&signatureFileName, sizeof(signatureFileName));
+        goto Exit;
     }
 
     //
-    // These checks are rudimentary but cheap to check.
+    // Replace the file extension with ".sig". Our verification requires that
+    // the signature file be placed alongside the file we're verifying.
     //
-    if ((fileHeaders.Signature != processHeaders.Signature) ||
-        (memcmp(&fileHeaders.FileHeader, &processHeaders.FileHeader, sizeof(IMAGE_FILE_HEADER)) != 0) ||
-        (fileHeaders.OptionalHeader.AddressOfEntryPoint != processHeaders.OptionalHeader.AddressOfEntryPoint) ||
-        (fileHeaders.OptionalHeader.BaseOfCode != processHeaders.OptionalHeader.BaseOfCode) ||
-        (fileHeaders.OptionalHeader.CheckSum != processHeaders.OptionalHeader.CheckSum) ||
-        (fileHeaders.OptionalHeader.Magic != processHeaders.OptionalHeader.Magic) ||
-        (fileHeaders.OptionalHeader.SizeOfCode != processHeaders.OptionalHeader.SizeOfCode) ||
-        (fileHeaders.OptionalHeader.SizeOfImage != processHeaders.OptionalHeader.SizeOfImage) ||
-        (fileHeaders.OptionalHeader.SizeOfUninitializedData != processHeaders.OptionalHeader.SizeOfUninitializedData) ||
-        (fileHeaders.OptionalHeader.SizeOfInitializedData != processHeaders.OptionalHeader.SizeOfInitializedData) ||
-        (fileHeaders.OptionalHeader.SizeOfHeaders != processHeaders.OptionalHeader.SizeOfHeaders) ||
-        (fileHeaders.OptionalHeader.SizeOfImage != processHeaders.OptionalHeader.SizeOfImage) ||
-        (fileHeaders.OptionalHeader.Subsystem != processHeaders.OptionalHeader.Subsystem) ||
-        (fileHeaders.OptionalHeader.DllCharacteristics != processHeaders.OptionalHeader.DllCharacteristics) ||
-        (fileHeaders.OptionalHeader.LoaderFlags != processHeaders.OptionalHeader.LoaderFlags))
+    if (signatureFileName.Length < KphpSigExtension.Length)
     {
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "Signature file name length invalid \"%wZ\"",
+                      &signatureFileName);
+
+        status = STATUS_OBJECT_NAME_INVALID;
+        goto Exit;
     }
 
-    sizeOfSectionHeaders = sizeof(IMAGE_SECTION_HEADER) * fileHeaders.FileHeader.NumberOfSections;
-    if (sizeOfSectionHeaders == 0)
+    signatureFileName.Length -= KphpSigExtension.Length;
+
+    status = RtlAppendUnicodeStringToString(&signatureFileName,
+                                            &KphpSigExtension);
+    if (!NT_SUCCESS(status))
     {
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "RtlAppendUnicodeStringToString failed: %!STATUS!",
+                      status);
+
+        goto Exit;
     }
 
-    if (!(sectionHeaders = ExAllocatePoolZero(PagedPool, sizeOfSectionHeaders, 'pvpK')))
+    InitializeObjectAttributes(&objectAttributes,
+                               &signatureFileName,
+                               OBJ_KERNEL_HANDLE | OBJ_DONT_REPARSE,
+                               NULL,
+                               NULL);
+
+    status = KphCreateFile(&signatureFileHandle,
+                           FILE_READ_ACCESS | SYNCHRONIZE,
+                           &objectAttributes,
+                           &ioStatusBlock,
+                           NULL,
+                           FILE_ATTRIBUTE_NORMAL,
+                           FILE_SHARE_READ,
+                           FILE_OPEN,
+                           (FILE_NON_DIRECTORY_FILE |
+                            FILE_SYNCHRONOUS_IO_NONALERT |
+                            FILE_COMPLETE_IF_OPLOCKED),
+                           NULL,
+                           0,
+                           IO_IGNORE_SHARE_ACCESS_CHECK,
+                           KernelMode);
+    if (!NT_SUCCESS(status))
     {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "Failed to open signature file \"%wZ\": %!STATUS!",
+                      &signatureFileName,
+                      status);
+
+        signatureFileHandle = NULL;
+        goto Exit;
+    }
+    else if (status == STATUS_OPLOCK_BREAK_IN_PROGRESS)
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "Failed to open signature file \"%wZ\": %!STATUS!",
+                      &signatureFileName,
+                      status);
+
+        status = STATUS_SHARING_VIOLATION;
+        goto Exit;
+    }
+
+    signature = KphAllocatePaged(KPH_VERIFY_SIGNATURE_MAX_LENGTH,
+                                 KPH_TAG_VERIFY_SIGNATURE);
+    if (!signature)
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "Failed to allocate signature buffer");
+
         status = STATUS_INSUFFICIENT_RESOURCES;
-        goto CleanupExit;
+        goto Exit;
     }
 
-    offset.QuadPart = fileDosHeader.e_lfanew;
-    offset.QuadPart += FIELD_OFFSET(IMAGE_NT_HEADERS, OptionalHeader);
-    offset.QuadPart += fileHeaders.FileHeader.SizeOfOptionalHeader;
-
-    status = ZwReadFile(
-        fileHandle,
-        NULL,
-        NULL,
-        NULL,
-        &iosb,
-        sectionHeaders,
-        sizeOfSectionHeaders,
-        &offset,
-        NULL
-        );
-
+    status = ZwReadFile(signatureFileHandle,
+                        NULL,
+                        NULL,
+                        NULL,
+                        &ioStatusBlock,
+                        signature,
+                        KPH_VERIFY_SIGNATURE_MAX_LENGTH,
+                        NULL,
+                        NULL);
     if (!NT_SUCCESS(status))
-        goto CleanupExit;
-
-    if (iosb.Information != sizeOfSectionHeaders)
     {
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "Failed to read signature file \"%wZ\": %!STATUS!",
+                      &signatureFileName,
+                      status);
+
+        goto Exit;
     }
 
-    status = KpiVerifyProcessSections(
-        baseAddress,
-        fileHandle,
-        sectionHeaders,
-        fileHeaders.FileHeader.NumberOfSections,
-        TrustedExtents
-        );
+    signatureLength = (ULONG)ioStatusBlock.Information;
 
-CleanupExit:
+    hashInfo.Algorithm = KphHashAlgorithmSha512;
 
-    if (sectionHeaders)
+    status = KphQueryHashInformationFileObject(FileObject,
+                                               &hashInfo,
+                                               sizeof(hashInfo));
+    if (!NT_SUCCESS(status))
     {
-        ExFreePoolWithTag(sectionHeaders, 'pvpK');
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "KphQueryHashInformationFileObject failed: %!STATUS!",
+                      status);
+
+        goto Exit;
+    }
+
+    status = KphpVerifyHash(NULL, &hashInfo, signature, signatureLength);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "KphpVerifyHash failed: %!STATUS!",
+                      status);
+
+        goto Exit;
+    }
+
+    status = STATUS_SUCCESS;
+
+Exit:
+
+    if (signature)
+    {
+        KphFree(signature, KPH_TAG_VERIFY_SIGNATURE);
+    }
+
+    if (signatureFileHandle)
+    {
+        ObCloseHandle(signatureFileHandle, KernelMode);
+    }
+
+    RtlFreeUnicodeString(&signatureFileName);
+
+    if (localFileName)
+    {
+        KphFreeNameFileObject(localFileName);
+    }
+
+    return status;
+}
+
+/**
+ * \brief Verifies a file by name.
+ *
+ * \param[in] FileName File name to verify.
+ * \param[in] FileObject Optional file object to use for verification. If
+ * provided the opened file object is checked to match. This is useful when the
+ * file object is known but not in a state where you can use it directly.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphVerifyFile(
+    _In_ PCUNICODE_STRING FileName,
+    _In_opt_ PFILE_OBJECT FileObject
+    )
+{
+    NTSTATUS status;
+    OBJECT_ATTRIBUTES objectAttributes;
+    IO_STATUS_BLOCK ioStatusBlock;
+    HANDLE fileHandle;
+    PFILE_OBJECT fileObject;
+
+    PAGED_CODE_PASSIVE();
+
+    fileObject = NULL;
+    fileHandle = NULL;
+
+    if (!KphpVerifyValidFileName(FileName))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "File name is invalid \"%wZ\"",
+                      FileName);
+
+        status = STATUS_OBJECT_NAME_INVALID;
+        goto Exit;
+    }
+
+    InitializeObjectAttributes(&objectAttributes,
+                               (PUNICODE_STRING)FileName,
+                               OBJ_KERNEL_HANDLE | OBJ_DONT_REPARSE,
+                               NULL,
+                               NULL);
+
+    status = KphCreateFile(&fileHandle,
+                           FILE_READ_ACCESS | SYNCHRONIZE,
+                           &objectAttributes,
+                           &ioStatusBlock,
+                           NULL,
+                           FILE_ATTRIBUTE_NORMAL,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           FILE_OPEN,
+                           (FILE_NON_DIRECTORY_FILE |
+                            FILE_SYNCHRONOUS_IO_NONALERT |
+                            FILE_COMPLETE_IF_OPLOCKED),
+                           NULL,
+                           0,
+                           IO_IGNORE_SHARE_ACCESS_CHECK,
+                           KernelMode);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      HASH,
+                      "KphCreateFile failed: %!STATUS!",
+                      status);
+
+        fileHandle = NULL;
+        goto Exit;
+    }
+    else if (status == STATUS_OPLOCK_BREAK_IN_PROGRESS)
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      HASH,
+                      "KphCreateFile failed: %!STATUS!",
+                      status);
+
+        status = STATUS_SHARING_VIOLATION;
+        goto Exit;
+    }
+
+    status = ObReferenceObjectByHandle(fileHandle,
+                                       0,
+                                       *IoFileObjectType,
+                                       KernelMode,
+                                       &fileObject,
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "ObReferenceObjectByHandle failed: %!STATUS!",
+                      status);
+
+        fileObject = NULL;
+        goto Exit;
+    }
+
+    if (FileObject && !KphIsSameFile(FileObject, fileObject))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      VERIFY,
+                      "File objects do not match!");
+
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
+    status = KphVerifyFileObject(fileObject, FileName);
+
+Exit:
+
+    if (fileObject)
+    {
+        ObDereferenceObject(fileObject);
     }
 
     if (fileHandle)
@@ -768,551 +760,67 @@ CleanupExit:
     return status;
 }
 
-VOID KphVerifyClient(
-    _Inout_ PKPH_CLIENT Client,
-    _In_ PVOID CodeAddress,
-    _In_reads_bytes_(SignatureSize) PUCHAR Signature,
-    _In_ ULONG SignatureSize
-    )
-{
-    NTSTATUS status;
-    PUNICODE_STRING processFileName = NULL;
-    MEMORY_BASIC_INFORMATION memoryBasicInfo;
-    PUNICODE_STRING mappedFileName = NULL;
-    KPH_EXTENTS processExtents;
-
-    PAGED_CODE();
-
-    if (Client->VerificationPerformed)
-        return;
-
-    if ((ULONG_PTR)CodeAddress > (ULONG_PTR)MmHighestUserAddress)
-    {
-        status = STATUS_ACCESS_VIOLATION;
-        goto CleanupExit;
-    }
-
-    if (!NT_SUCCESS(status = SeLocateProcessImageName(PsGetCurrentProcess(), &processFileName)))
-        goto CleanupExit;
-
-    if (!NT_SUCCESS(status = ZwQueryVirtualMemory(
-        NtCurrentProcess(),
-        CodeAddress,
-        MemoryBasicInformation,
-        &memoryBasicInfo,
-        sizeof(MEMORY_BASIC_INFORMATION),
-        NULL
-        )))
-    {
-        goto CleanupExit;
-    }
-
-    if (memoryBasicInfo.Type != MEM_IMAGE || memoryBasicInfo.State != MEM_COMMIT)
-    {
-        status = STATUS_INVALID_PARAMETER;
-        goto CleanupExit;
-    }
-
-    if (!NT_SUCCESS(status = KphGetProcessMappedFileName(NtCurrentProcess(), CodeAddress, &mappedFileName)))
-        goto CleanupExit;
-
-    if (!RtlEqualUnicodeString(processFileName, mappedFileName, TRUE))
-    {
-        status = STATUS_INVALID_PARAMETER;
-        goto CleanupExit;
-    }
-
-    if (!NT_SUCCESS(status = KphVerifyFile(processFileName, Signature, SignatureSize)))
-        goto CleanupExit;
-
-    if (!NT_SUCCESS(status = KpiVerifyProcess(processFileName, &processExtents)))
-        goto CleanupExit;
-
-    if ((CodeAddress < processExtents.BaseAddress) ||
-        (CodeAddress > processExtents.EndAddress))
-    {
-        status = STATUS_ACCESS_DENIED;
-    }
-
-CleanupExit:
-    if (mappedFileName)
-        ExFreePoolWithTag(mappedFileName, 'ThpK');
-    if (processFileName)
-        ExFreePool(processFileName);
-
-    ExAcquireFastMutex(&Client->StateMutex);
-
-    if (NT_SUCCESS(status))
-    {
-        Client->VerifiedProcess = PsGetCurrentProcess();
-        Client->VerifiedProcessId = PsGetCurrentProcessId();
-        Client->VerifiedRangeBase = memoryBasicInfo.BaseAddress;
-        Client->VerifiedRangeSize = memoryBasicInfo.RegionSize;
-        Client->VerifiedProcessExtents = processExtents;
-    }
-
-    Client->VerificationStatus = status;
-    MemoryBarrier();
-    Client->VerificationSucceeded = NT_SUCCESS(status);
-    Client->VerificationPerformed = TRUE;
-
-    ExReleaseFastMutex(&Client->StateMutex);
-}
-
-NTSTATUS KpiVerifyClient(
-    _In_ PVOID CodeAddress,
-    _In_reads_bytes_(SignatureSize) PUCHAR Signature,
-    _In_ ULONG SignatureSize,
-    _In_ PKPH_CLIENT Client
-    )
-{
-    PUCHAR signature;
-
-    PAGED_CODE();
-
-    __try
-    {
-        ProbeForRead(Signature, SignatureSize, 1);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return GetExceptionCode();
-    }
-
-    if (SignatureSize > KPH_SIGNATURE_MAX_SIZE)
-        return STATUS_INVALID_PARAMETER_3;
-
-    if (!(signature = ExAllocatePoolZero(PagedPool, SignatureSize, 'ThpK')))
-        return STATUS_INSUFFICIENT_RESOURCES;
-
-    __try
-    {
-        memcpy(signature, Signature, SignatureSize);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        ExFreePoolWithTag(signature, 'ThpK');
-        return GetExceptionCode();
-    }
-
-    KphVerifyClient(Client, CodeAddress, signature, SignatureSize);
-
-    ExFreePoolWithTag(signature, 'ThpK');
-
-    return Client->VerificationStatus;
-}
-
-VOID KphGenerateKeysClient(
-    _Inout_ PKPH_CLIENT Client
-    )
-{
-    ULONGLONG interruptTime;
-    ULONG seed;
-    KPH_KEY l1Key;
-    KPH_KEY l2Key;
-
-    PAGED_CODE();
-
-    if (Client->KeysGenerated)
-        return;
-
-    interruptTime = KeQueryInterruptTime();
-    seed = (ULONG)(interruptTime >> 32) | (ULONG)interruptTime | PtrToUlong(Client);
-    l1Key = RtlRandomEx(&seed) | 0x80000000; // Make sure the key is nonzero
-    do
-    {
-        l2Key = RtlRandomEx(&seed) | 0x80000000;
-    } while (l2Key == l1Key);
-
-    ExAcquireFastMutex(&Client->StateMutex);
-
-    if (!Client->KeysGenerated)
-    {
-        Client->L1Key = l1Key;
-        Client->L2Key = l2Key;
-        MemoryBarrier();
-        Client->KeysGenerated = TRUE;
-    }
-
-    ExReleaseFastMutex(&Client->StateMutex);
-}
-
-NTSTATUS KphRetrieveKeyViaApc(
-    _Inout_ PKPH_CLIENT Client,
-    _In_ KPH_KEY_LEVEL KeyLevel,
-    _Inout_ PIRP Irp
-    )
-{
-    PIO_APC_ROUTINE userApcRoutine;
-    KPH_KEY key;
-
-    PAGED_CODE();
-
-    if (!Client->VerificationSucceeded)
-        return STATUS_ACCESS_DENIED;
-
-    MemoryBarrier();
-
-    if (PsGetCurrentProcess() != Client->VerifiedProcess ||
-        PsGetCurrentProcessId() != Client->VerifiedProcessId)
-    {
-        return STATUS_ACCESS_DENIED;
-    }
-
-    if (!(userApcRoutine = Irp->Overlay.AsynchronousParameters.UserApcRoutine))
-        return STATUS_INVALID_PARAMETER;
-
-    if ((ULONG_PTR)userApcRoutine < (ULONG_PTR)Client->VerifiedRangeBase ||
-        (ULONG_PTR)userApcRoutine >= (ULONG_PTR)Client->VerifiedRangeBase + Client->VerifiedRangeSize)
-    {
-        return STATUS_ACCESS_DENIED;
-    }
-
-    KphGenerateKeysClient(Client);
-
-    switch (KeyLevel)
-    {
-    case KphKeyLevel1:
-        key = Client->L1Key;
-        break;
-    case KphKeyLevel2:
-        key = Client->L2Key;
-        break;
-    default:
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    Irp->Overlay.AsynchronousParameters.UserApcContext = UlongToPtr(key);
-
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS KphValidateKey(
-    _In_ KPH_KEY_LEVEL RequiredKeyLevel,
-    _In_opt_ KPH_KEY Key,
-    _In_ PKPH_CLIENT Client,
-    _In_ KPROCESSOR_MODE AccessMode
-    )
-{
-    PAGED_CODE();
-
-    if (AccessMode == KernelMode)
-        return STATUS_SUCCESS;
-
-    if (Key && Client->VerificationSucceeded && Client->KeysGenerated)
-    {
-        MemoryBarrier();
-
-        switch (RequiredKeyLevel)
-        {
-        case KphKeyLevel1:
-            if (Key == Client->L1Key || Key == Client->L2Key)
-                return STATUS_SUCCESS;
-            else
-                KphpBackoffKey(Client);
-            break;
-        case KphKeyLevel2:
-            if (Key == Client->L2Key)
-                return STATUS_SUCCESS;
-            else
-                KphpBackoffKey(Client);
-            break;
-        default:
-            return STATUS_INVALID_PARAMETER;
-        }
-    }
-
-    return STATUS_ACCESS_DENIED;
-}
-
-VOID KphpBackoffKey(
-    _In_ PKPH_CLIENT Client
-    )
-{
-    LARGE_INTEGER backoffTime;
-
-    PAGED_CODE();
-
-    // Serialize to make it impossible for a single client to bypass the backoff by creating
-    // multiple threads.
-    ExAcquireFastMutex(&Client->KeyBackoffMutex);
-
-    backoffTime.QuadPart = -KPH_KEY_BACKOFF_TIME;
-    KeDelayExecutionThread(KernelMode, FALSE, &backoffTime);
-
-    ExReleaseFastMutex(&Client->KeyBackoffMutex);
-}
-
 /**
- * Performs a domination check between a calling process and a target process.
+ * \brief Initializes verification infrastructure.
  *
- * \details A process dominates the other when the protected level of the
- * process exceeds the other. This domination check is not ideal, it is overly
- * strict and lacks enough information from the kernel to fully understand the
- * protected process state.
- *
- * \param[in] Client - Client information.
- * \param[in] Process - Calling process.
- * \param[in] ProcessTarget - Target process to check that the calling process
- * dominates.
- * \param[in] AccessMode - Access mode of the request, if KernelMode the
- * domination check is bypassed.
- *
- * \return Appropriate status:
- * STATUS_SUCCESS - The calling process dominates the target.
- * STATUS_ACCESS_DEINED - The calling process does not dominate the target.
-*/
-_IRQL_requires_max_(APC_LEVEL)
-_Must_inspect_result_
-NTSTATUS KphDominationCheck(
-    _In_ PKPH_CLIENT Client,
-    _In_ PEPROCESS Process,
-    _In_ PEPROCESS ProcessTarget,
-    _In_ KPROCESSOR_MODE AccessMode
-    )
-{
-    PS_PROTECTION processProtection;
-    PS_PROTECTION targetProtection;
-
-    PAGED_CODE();
-
-    if (AccessMode == KernelMode)
-    {
-        //
-        // Give the kernel what it wants...
-        //
-        return STATUS_SUCCESS;
-    }
-
-    if (!Client->VerificationSucceeded ||
-        (Client->VerifiedProcess != Process))
-    {
-        //
-        // The requesting process is not the verified one, deny access...
-        //
-        return STATUS_ACCESS_DENIED;
-    }
-
-    //
-    // Until Microsoft gives us more insight into protected process domination
-    // we'll do a very strict check here:
-    //
-
-    if (NT_SUCCESS(KpiGetProcessProtection(Process, &processProtection)) &&
-        NT_SUCCESS(KpiGetProcessProtection(ProcessTarget, &targetProtection)) &&
-        (targetProtection.Type != PsProtectedTypeNone) &&
-        (targetProtection.Type >= processProtection.Type))
-    {
-        //
-        // Calling process protection does not dominate the other, deny access.
-        // We could do our own domination check/mapping here with the signing
-        // level, but it won't be great and Microsoft might change it, so we'll
-        // do this strict check until Microsoft exports:
-        // PsTestProtectedProcessIncompatibility
-        // RtlProtectedAccess/RtlTestProtectedAccess
-        //
-        return STATUS_ACCESS_DENIED;
-    }
-
-    //
-    // Either the protected process check is not exported or the verified
-    // process dominates the target. Our domination check succeeded.
-    //
-
-    return STATUS_SUCCESS;
-}
-
-/**
- * Verifies the client trusted extents by doing a sanity check on the
- * validated region.
- *
- * \param[in] Client - Client information.
- *
- * \return Appropriate status.
-*/
+ * \return Successful or errant status.
+ */
 _IRQL_requires_max_(PASSIVE_LEVEL)
 _Must_inspect_result_
-NTSTATUS KpiVerifyCallerTrustedExtents(
-    _In_ PKPH_CLIENT Client
-   )
-{
-    NTSTATUS status;
-    BOOLEAN unstackDetach;
-    KAPC_STATE apcState;
-    MEMORY_BASIC_INFORMATION memoryBasicInfo;
-    SIZE_T trustedRegionSize;
-
-    PAGED_PASSIVE();
-
-    unstackDetach = FALSE;
-
-    if (!Client->VerificationSucceeded ||
-        !Client->VerifiedProcessExtents.BaseAddress ||
-        !Client->VerifiedProcessExtents.EndAddress)
-    {
-        //
-        // Not enough info to validate.
-        //
-        status = STATUS_ACCESS_DENIED;
-        goto CleanupExit;
-    }
-
-    if (Client->VerifiedProcess != PsGetCurrentProcess())
-    {
-        KeStackAttachProcess(Client->VerifiedProcess, &apcState);
-        unstackDetach = TRUE;
-    }
-
-    if (!NT_SUCCESS(status = ZwQueryVirtualMemory(
-        ZwCurrentProcess(),
-        Client->VerifiedProcessExtents.BaseAddress,
-        MemoryBasicInformation,
-        &memoryBasicInfo,
-        sizeof(MEMORY_BASIC_INFORMATION),
-        NULL
-        )))
-    {
-        goto CleanupExit;
-    }
-
-    trustedRegionSize = (SIZE_T)PTR_SUB_OFFSET(Client->VerifiedProcessExtents.EndAddress, Client->VerifiedProcessExtents.BaseAddress);
-
-    if ((trustedRegionSize > memoryBasicInfo.RegionSize) ||
-        (memoryBasicInfo.AllocationProtect != PAGE_EXECUTE_WRITECOPY) ||
-        (memoryBasicInfo.Protect != PAGE_EXECUTE_READ) ||
-        (memoryBasicInfo.Type != MEM_IMAGE))
-    {
-        status = STATUS_ACCESS_DENIED;
-    }
-    else
-    {
-        status = STATUS_SUCCESS;
-    }
-
-CleanupExit:
-    if (unstackDetach)
-    {
-        KeUnstackDetachProcess(&apcState);
-    }
-
-    return status;
-}
-
-/**
- * Verifies the caller.
- *
- * \param[in] Client - Client to validate.
- * \param[in] Thread - Calling thread.
- * \param[in] AccessMode - Access mode of the request, if KernelMode the
- * domination check is bypassed.
- *
- * \return Appropriate status, error means the caller is invalid or could not
- * be validated, a success means the caller is valid.
-*/
-_IRQL_requires_max_(PASSIVE_LEVEL)
-_Must_inspect_result_
-NTSTATUS KphVerifyCaller(
-    _In_ PKPH_CLIENT Client,
-    _In_ PETHREAD Thread,
-    _In_ KPROCESSOR_MODE AccessMode
+NTSTATUS KphInitializeVerify(
+    VOID
     )
 {
-    NTSTATUS status;
-    PVOID frames[CALLER_CHECK_MAX_FRAMES];
-    ULONG numberOfFrames;
-    ULONG i;
+    BOOLEAN testSigning;
 
-    PAGED_PASSIVE();
+    PAGED_CODE_PASSIVE();
 
-    if (AccessMode == KernelMode)
+    testSigning = KphTestSigningEnabled();
+
+    for (ULONG i = 0; i < ARRAYSIZE(KphpPublicKeys); i++)
     {
-        //
-        // Give the kernel what it wants...
-        //
-        return STATUS_SUCCESS;
-    }
+        NTSTATUS status;
+        PCKPH_KEY key;
+        BCRYPT_KEY_HANDLE keyHandle;
 
-    if (!Client->VerificationSucceeded ||
-        !NtdllExtents.BaseAddress ||
-        !NtdllExtents.EndAddress ||
-        !Client->VerifiedProcessExtents.BaseAddress ||
-        !Client->VerifiedProcessExtents.EndAddress)
-    {
-        //
-        // Not enough info to validate.
-        //
-        return STATUS_ACCESS_DENIED;
-    }
+        key = &KphpPublicKeys[i];
 
-    //
-    // Check that the trusted extents are still valid.
-    //
-    status = KpiVerifyCallerTrustedExtents(Client);
-
-    if (!NT_SUCCESS(status))
-        return status;
-
-    //
-    // Here we will validate the caller by walking the stack.
-    //
-    status = KphCaptureStackBackTraceThread(
-        Thread,
-        0,
-        CALLER_CHECK_MAX_FRAMES,
-        frames,
-        &numberOfFrames,
-        NULL,
-        KernelMode,
-        KPH_STACK_TRACE_CAPTURE_USER_STACK
-        );
-
-    if (!NT_SUCCESS(status))
-        return STATUS_ACCESS_DENIED;
-
-    i = 0;
-
-    //
-    // Walk past the kernel frames
-    //
-    for (; i < numberOfFrames; i++)
-    {
-        if (frames[i] < MmHighestUserAddress)
+        if (!testSigning && (key->Type == KphKeyTypeTest))
         {
-            break;
+            continue;
         }
-    }
 
-    //
-    // Walk past ntdll
-    //
-    for (; i < numberOfFrames; i++)
-    {
-        if ((frames[i] < NtdllExtents.BaseAddress) ||
-            (frames[i] > NtdllExtents.EndAddress))
+        status = KphVerifyCreateKey(&keyHandle,
+                                    (PBYTE)key->Material,
+                                    KPH_KEY_MATERIAL_SIZE);
+        if (!NT_SUCCESS(status))
         {
-            break;
+            KphTracePrint(TRACE_LEVEL_VERBOSE,
+                          VERIFY,
+                          "KphVerifyCreateKey failed: %!STATUS!",
+                          status);
+
+            return status;
         }
-    }
 
-    if (i >= numberOfFrames)
-    {
-        return STATUS_ACCESS_DENIED;
-    }
-
-    //
-    // At this point we have the first frame before the call into ntdll.
-    // Process hacker will always make a native call rather than calling
-    // through KernelBase so we only need to walk past ntdll, if we see
-    // KernelBase it isn't process hacker.
-    // Verify that this frame lands in the verified client extents.
-    // This isn't perfect but ensures the call was at least made through the
-    // primary image.
-    //
-    if ((frames[i] < Client->VerifiedProcessExtents.BaseAddress) ||
-        (frames[i] > Client->VerifiedProcessExtents.EndAddress))
-    {
-        return STATUS_ACCESS_DENIED;
+        KphpPublicKeyHandles[KphpPublicKeyHandlesCount++] = keyHandle;
     }
 
     return STATUS_SUCCESS;
+}
+
+/**
+ * \brief Cleans up verification infrastructure.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+VOID KphCleanupVerify(
+    VOID
+    )
+{
+    PAGED_CODE_PASSIVE();
+
+    for (ULONG i = 0; i < KphpPublicKeyHandlesCount; i++)
+    {
+        KphVerifyCloseKey(KphpPublicKeyHandles[i]);
+    }
 }

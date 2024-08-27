@@ -1,3 +1,15 @@
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     wj32    2010
+ *     dmex    2025
+ *
+ */
+
 #ifndef _PH_CIRCBUF_H
 #define _PH_CIRCBUF_H
 
@@ -22,5 +34,7 @@
 #undef T
 #define T FLOAT
 #include "circbuf_h.h"
+
+#undef T
 
 #endif

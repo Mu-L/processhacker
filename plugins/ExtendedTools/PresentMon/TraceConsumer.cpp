@@ -85,7 +85,7 @@ void GetPropertySize(
 {
     // We don't handle all flags yet, these are the ones we do:
     auto const& epi = tei.EventPropertyInfoArray[index];
-    //assert((epi.Flags & ~(PropertyStruct | PropertyParamCount | PropertyParamFixedCount)) == 0);
+    assert((epi.Flags & ~(PropertyStruct | PropertyParamCount | PropertyParamFixedCount)) == 0);
 
     // Use the epi length and count by default.  There are cases where the count
     // is valid but (epi.Flags & PropertyParamFixedCount) == 0.
@@ -127,9 +127,9 @@ void GetPropertySize(
         case TDH_INTYPE_WBEMSID:
             {
                 ULONG sidoffset = (eventRecord.EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) ? 8 : 4;
-                PSID sid = reinterpret_cast<PSID>(PTR_ADD_OFFSET(eventRecord.UserData, offset + sidoffset));
+                PSID sid = PTR_ADD_OFFSET(eventRecord.UserData, offset + sidoffset);
 
-                size = sidoffset + GetLengthSid(sid); // dmex
+                size = sidoffset + PhLengthSid(sid); // dmex
 
                 //PROPERTY_DATA_DESCRIPTOR descriptor;
                 //descriptor.PropertyName = (ULONGLONG) &tei + epi.NameOffset;
@@ -230,7 +230,7 @@ void EventMetadata::GetEventData(EVENT_RECORD* eventRecord, EventDataDesc* desc,
     key.desc_ = eventRecord->EventHeader.EventDescriptor;
 
     auto ii = metadata_.find(key);
-    if (ii == metadata_.end()) 
+    if (ii == metadata_.end())
     {
         ULONG bufferSize = 0;
         TDHSTATUS status;
@@ -243,8 +243,8 @@ void EventMetadata::GetEventData(EVENT_RECORD* eventRecord, EventDataDesc* desc,
 
             status = TdhGetEventInformation(eventRecord, 0, nullptr, (TRACE_EVENT_INFO*) ii->second.data(), &bufferSize);
             assert(status == ERROR_SUCCESS);
-        } 
-        else 
+        }
+        else
         {
             // No schema registered with system, nor ETL-embedded metadata.
             ii = metadata_.emplace(key, std::vector<uint8_t>(sizeof(TRACE_EVENT_INFO), 0)).first;
@@ -276,17 +276,16 @@ void EventMetadata::GetEventData(EVENT_RECORD* eventRecord, EventDataDesc* desc,
 
         for (ULONG j = 0; j < descCount; ++j)
         {
-            if (desc[j].status_ == PROP_STATUS_NOT_FOUND && wcscmp(propName, desc[j].name_) == 0) 
+            if (desc[j].status_ == PROP_STATUS_NOT_FOUND && wcscmp(propName, desc[j].name_) == 0)
             {
-                assert(desc[j].arrayIndex_ < count);
-
-                desc[j].data_ = (void*) ((uintptr_t)eventRecord->UserData + (offset + desc[j].arrayIndex_ * size));
+                desc[j].data_ = (void*)((uintptr_t)eventRecord->UserData + offset);
                 desc[j].size_ = size;
+                desc[j].count_ = count;
                 desc[j].status_ = status;
 
                 foundCount += 1;
 
-                if (foundCount == descCount) 
+                if (foundCount == descCount)
                 {
                     return;
                 }

@@ -6,298 +6,178 @@
  * Authors:
  *
  *     wj32    2009-2016
- *     dmex    2018-2020
+ *     dmex    2018-2023
  *
  */
 
 #include <ph.h>
+#include <svcsup.h>
 #include <kphuser.h>
-#include <kphuserp.h>
 
-HANDLE PhKphHandle = NULL;
-BOOLEAN PhKphVerified = FALSE;
-KPH_KEY PhKphL1Key = 0;
+static PH_STRINGREF KphDefaultPortName = PH_STRINGREF_INIT(KPH_PORT_NAME);
 
-NTSTATUS KphConnect(
-    _In_opt_ PWSTR DeviceName
+//static PH_INITONCE KphMessageInitOnce = PH_INITONCE_INIT;
+static PH_FREE_LIST KphMessageFreeList;
+
+NTSTATUS KphInitialize(
+    VOID
     )
 {
-    NTSTATUS status;
-    HANDLE kphHandle;
-    UNICODE_STRING objectName;
-    OBJECT_ATTRIBUTES objectAttributes;
-    IO_STATUS_BLOCK isb;
-    OBJECT_HANDLE_FLAG_INFORMATION handleFlagInfo;
-    WCHAR fullObjectName[256];
+    //if (PhBeginInitOnce(&KphMessageInitOnce))
+    //{
+    //    PhInitializeFreeList(&KphMessageFreeList, sizeof(KPH_MESSAGE), 16);
+    //    PhEndInitOnce(&KphMessageInitOnce);
+    //}
 
-    if (PhKphHandle)
-        return STATUS_ADDRESS_ALREADY_EXISTS;
+    PhInitializeFreeList(&KphMessageFreeList, sizeof(KPH_MESSAGE), 16);
 
-    if (DeviceName)
-    {
-        PH_FORMAT format[2];
-
-        PhInitFormatS(&format[0], L"\\Device\\");
-        PhInitFormatS(&format[1], DeviceName);
-
-        if (!PhFormatToBuffer(format, 2, fullObjectName, sizeof(fullObjectName), NULL))
-            return STATUS_NAME_TOO_LONG;
-
-        RtlInitUnicodeString(&objectName, fullObjectName);
-    }
-    else
-        RtlInitUnicodeString(&objectName, KPH_DEVICE_NAME);
-
-    InitializeObjectAttributes(
-        &objectAttributes,
-        &objectName,
-        OBJ_CASE_INSENSITIVE,
-        NULL,
-        NULL
-        );
-
-    status = NtOpenFile(
-        &kphHandle,
-        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
-        &objectAttributes,
-        &isb,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        FILE_NON_DIRECTORY_FILE
-        );
-
-    if (NT_SUCCESS(status))
-    {
-        // Protect the handle from being closed.
-
-        handleFlagInfo.Inherit = FALSE;
-        handleFlagInfo.ProtectFromClose = TRUE;
-
-        NtSetInformationObject(
-            kphHandle,
-            ObjectHandleFlagInformation,
-            &handleFlagInfo,
-            sizeof(OBJECT_HANDLE_FLAG_INFORMATION)
-            );
-
-        PhKphHandle = kphHandle;
-        PhKphVerified = FALSE;
-        PhKphL1Key = 0;
-    }
-
-    return status;
+    return STATUS_SUCCESS;
 }
 
-NTSTATUS KphConnect2Ex(
-    _In_opt_ PWSTR ServiceName,
-    _In_opt_ PWSTR DeviceName,
-    _In_ PWSTR FileName,
-    _In_opt_ PKPH_PARAMETERS Parameters
+NTSTATUS KphConnect(
+    _In_ PKPH_CONFIG_PARAMETERS Config
     )
 {
     NTSTATUS status;
-    SC_HANDLE scmHandle;
-    SC_HANDLE serviceHandle = NULL;
-    BOOLEAN started = FALSE;
+    SC_HANDLE serviceHandle;
     BOOLEAN created = FALSE;
+    PPH_STRINGREF portName;
 
-    if (!ServiceName)
-        ServiceName = KPH_DEVICE_SHORT_NAME;
-    if (!DeviceName)
-        DeviceName = KPH_DEVICE_SHORT_NAME;
+    status = KphInitialize();
 
-    // Try to open the device.
-    status = KphConnect(DeviceName);
-
-    if (NT_SUCCESS(status) || status == STATUS_ADDRESS_ALREADY_EXISTS)
+    if (!NT_SUCCESS(status))
         return status;
 
-    if (
-        status != STATUS_NO_SUCH_DEVICE &&
-        status != STATUS_NO_SUCH_FILE &&
-        status != STATUS_OBJECT_NAME_NOT_FOUND &&
-        status != STATUS_OBJECT_PATH_NOT_FOUND
-        )
+    portName = (Config->PortName ? Config->PortName : &KphDefaultPortName);
+
+    status = KphCommsStart(portName, Config->Callback);
+
+    if (NT_SUCCESS(status) || (status == STATUS_ALREADY_INITIALIZED))
         return status;
 
     // Load the driver, and try again.
 
+    if (Config->EnableNativeLoad || Config->EnableFilterLoad)
+    {
+        status = KsiLoadUnloadService(Config, TRUE);
+
+        if (NT_SUCCESS(status))
+        {
+            status = KphCommsStart(portName, Config->Callback);
+        }
+
+        return status;
+    }
+
     // Try to start the service, if it exists.
 
-    scmHandle = OpenSCManager(NULL, NULL, SC_MANAGER_CONNECT);
+    status = PhOpenService(&serviceHandle, SERVICE_START, PhGetStringRefZ(Config->ServiceName));
 
-    if (scmHandle)
+    if (NT_SUCCESS(status))
     {
-        serviceHandle = OpenService(scmHandle, ServiceName, SERVICE_START);
+        status = PhStartService(serviceHandle, 0, NULL);
 
-        if (serviceHandle)
-        {
-            if (StartService(serviceHandle, 0, NULL))
-                started = TRUE;
+        PhCloseServiceHandle(serviceHandle);
 
-            CloseServiceHandle(serviceHandle);
-        }
+        if (!NT_SUCCESS(status))
+            goto CreateAndConnectEnd;
 
-        CloseServiceHandle(scmHandle);
+        status = KphCommsStart(portName, Config->Callback);
+
+        goto CreateAndConnectEnd;
     }
 
-    if (!started && PhDoesFileExistsWin32(FileName))
+    if (!PhDoesFileExistWin32(PhGetStringRefZ(Config->FileName)))
     {
-        // Try to create the service.
-
-        scmHandle = OpenSCManager(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
-
-        if (scmHandle)
-        {
-            serviceHandle = CreateService(
-                scmHandle,
-                ServiceName,
-                ServiceName,
-                SERVICE_ALL_ACCESS,
-                SERVICE_KERNEL_DRIVER,
-                SERVICE_DEMAND_START,
-                SERVICE_ERROR_IGNORE,
-                FileName,
-                NULL,
-                NULL,
-                NULL,
-                NULL,
-                L""
-                );
-
-            if (serviceHandle)
-            {
-                created = TRUE;
-
-                KphSetServiceSecurity(serviceHandle);
-
-                // Set parameters if the caller supplied them. Note that we fail the entire function
-                // if this fails, because failing to set parameters like SecurityLevel may result in
-                // security vulnerabilities.
-                if (Parameters)
-                {
-                    status = KphSetParameters(ServiceName, Parameters);
-
-                    if (!NT_SUCCESS(status))
-                    {
-                        // Delete the service and fail.
-                        goto CreateAndConnectEnd;
-                    }
-                }
-
-                if (StartService(serviceHandle, 0, NULL))
-                    started = TRUE;
-                else
-                    status = PhGetLastWin32ErrorAsNtStatus();
-            }
-            else
-            {
-                status = PhGetLastWin32ErrorAsNtStatus();
-            }
-
-            CloseServiceHandle(scmHandle);
-        }
+        status = STATUS_NO_SUCH_FILE;
+        goto CreateAndConnectEnd;
     }
 
-    if (started)
-    {
-        // Try to open the device again.
-        status = KphConnect(DeviceName);
-    }
-
-CreateAndConnectEnd:
-    if (created && serviceHandle)
-    {
-        // "Delete" the service. Since we (may) have a handle to the device, the SCM will delete the
-        // service automatically when it is stopped (upon reboot). If we don't have a handle to the
-        // device, the service will get deleted immediately, which is a good thing anyway.
-        DeleteService(serviceHandle);
-        CloseServiceHandle(serviceHandle);
-    }
-
-    return status;
-}
-
-NTSTATUS KphDisconnect(
-    VOID
-    )
-{
-    NTSTATUS status;
-    OBJECT_HANDLE_FLAG_INFORMATION handleFlagInfo;
-
-    if (!PhKphHandle)
-        return STATUS_ALREADY_DISCONNECTED;
-
-    // Unprotect the handle.
-
-    handleFlagInfo.Inherit = FALSE;
-    handleFlagInfo.ProtectFromClose = FALSE;
-
-    NtSetInformationObject(
-        PhKphHandle,
-        ObjectHandleFlagInformation,
-        &handleFlagInfo,
-        sizeof(OBJECT_HANDLE_FLAG_INFORMATION)
+    // Try to create the service.
+    status = PhCreateService(
+        &serviceHandle,
+        PhGetStringRefZ(Config->ServiceName),
+        PhGetStringRefZ(Config->ServiceName),
+        SERVICE_ALL_ACCESS,
+        SERVICE_KERNEL_DRIVER,
+        SERVICE_DEMAND_START,
+        SERVICE_ERROR_IGNORE,
+        PhGetStringRefZ(Config->FileName),
+        PhGetStringRefZ(Config->ObjectName),
+        NULL
         );
 
-    status = NtClose(PhKphHandle);
-    PhKphHandle = NULL;
-    PhKphVerified = FALSE;
-    PhKphL1Key = 0;
+    if (!NT_SUCCESS(status))
+        goto CreateAndConnectEnd;
+
+    created = TRUE;
+
+    KphSetServiceSecurity(serviceHandle);
+
+    status = KphSetParameters(Config);
+
+    if (!NT_SUCCESS(status))
+        goto CreateAndConnectEnd;
+
+    status = PhStartService(serviceHandle, 0, NULL);
+
+    if (!NT_SUCCESS(status))
+        goto CreateAndConnectEnd;
+
+    status = KphCommsStart(portName, Config->Callback);
+
+CreateAndConnectEnd:
+
+    if (created && serviceHandle)
+    {
+        //
+        // "Delete" the service (mark it for deletion), SCM will retain the
+        // service entry as long as the "ObjectName" exists. We do not use a
+        // device object, SCM will detect that the driver has gone away by the
+        // driver object (the specified "ObjectName").
+        //
+        PhDeleteService(serviceHandle);
+        PhCloseServiceHandle(serviceHandle);
+    }
 
     return status;
 }
 
-BOOLEAN KphIsConnected(
-    VOID
+NTSTATUS KphpSetParametersService(
+    _In_ PKPH_CONFIG_PARAMETERS Config
     )
 {
-    return PhKphHandle != NULL;
-}
-
-BOOLEAN KphIsVerified(
-    VOID
-    )
-{
-    return PhKphVerified;
-}
-
-NTSTATUS KphSetParameters(
-    _In_opt_ PWSTR ServiceName,
-    _In_ PKPH_PARAMETERS Parameters
-    )
-{
+#ifdef _WIN64
     NTSTATUS status;
-    HANDLE parametersKeyHandle = NULL;
+    HANDLE servicesKeyHandle = NULL;
     ULONG disposition;
-    PH_STRINGREF valueNameSr;
     SIZE_T returnLength;
-    PH_STRINGREF parametersKeyNameSr;
-    PH_FORMAT format[3];
-    WCHAR parametersKeyName[MAX_PATH];
+    PH_STRINGREF servicesKeyName;
+    PH_FORMAT format[2];
+    WCHAR servicesKeyNameBuffer[MAX_PATH];
 
     PhInitFormatS(&format[0], L"System\\CurrentControlSet\\Services\\");
-    PhInitFormatS(&format[1], ServiceName ? ServiceName : KPH_DEVICE_SHORT_NAME);
-    PhInitFormatS(&format[2], L"\\Parameters");
+    PhInitFormatSR(&format[1], *Config->ServiceName);
 
     if (!PhFormatToBuffer(
         format,
         RTL_NUMBER_OF(format),
-        parametersKeyName,
-        sizeof(parametersKeyName),
+        servicesKeyNameBuffer,
+        sizeof(servicesKeyNameBuffer),
         &returnLength
         ))
     {
         return STATUS_UNSUCCESSFUL;
     }
 
-    parametersKeyNameSr.Buffer = parametersKeyName;
-    parametersKeyNameSr.Length = returnLength - sizeof(UNICODE_NULL);
+    servicesKeyName.Buffer = servicesKeyNameBuffer;
+    servicesKeyName.Length = returnLength - sizeof(UNICODE_NULL);
 
     status = PhCreateKey(
-        &parametersKeyHandle,
+        &servicesKeyHandle,
         KEY_WRITE | DELETE,
         PH_KEY_LOCAL_MACHINE,
-        &parametersKeyNameSr,
+        &servicesKeyName,
         0,
         0,
         &disposition
@@ -306,44 +186,132 @@ NTSTATUS KphSetParameters(
     if (!NT_SUCCESS(status))
         return status;
 
-    PhInitializeStringRefLongHint(&valueNameSr, L"SecurityLevel");
-    status = PhSetValueKey(
-        parametersKeyHandle,
-        &valueNameSr,
+    status = PhSetValueKeyZ(
+        servicesKeyHandle,
+        L"SupportedFeatures",
         REG_DWORD,
-        &Parameters->SecurityLevel,
+        &Config->FsSupportedFeatures,
         sizeof(ULONG)
         );
 
     if (!NT_SUCCESS(status))
-        goto SetValuesEnd;
+        goto CleanupExit;
 
-    if (Parameters->CreateDynamicConfiguration)
+CleanupExit:
+
+    if (servicesKeyHandle)
+        NtClose(servicesKeyHandle);
+
+    return status;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
+}
+
+NTSTATUS KphSetParameters(
+    _In_ PKPH_CONFIG_PARAMETERS Config
+    )
+{
+#ifdef _WIN64
+    NTSTATUS status;
+    HANDLE parametersKeyHandle = NULL;
+    ULONG disposition;
+    SIZE_T returnLength;
+    PH_STRINGREF parametersKeyName;
+    PH_FORMAT format[3];
+    WCHAR parametersKeyNameBuffer[MAX_PATH];
+
+    // Services key parameters.
+    status = KphpSetParametersService(Config);
+    if (!NT_SUCCESS(status))
+        return status;
+
+    if (!Config->PortName && !Config->Altitude && !Config->Flags.Flags)
     {
-        KPH_DYN_CONFIGURATION configuration;
+        // Don't create parameters key unless we must.
+        return STATUS_SUCCESS;
+    }
 
-        configuration.Version = KPH_DYN_CONFIGURATION_VERSION;
-        configuration.NumberOfPackages = 1;
+    PhInitFormatS(&format[0], L"System\\CurrentControlSet\\Services\\");
+    PhInitFormatSR(&format[1], *Config->ServiceName);
+    PhInitFormatS(&format[2], L"\\Parameters");
 
-        if (NT_SUCCESS(KphInitializeDynamicPackage(&configuration.Packages[0])))
-        {
-            PhInitializeStringRefLongHint(&valueNameSr, L"DynamicConfiguration");
-            status = PhSetValueKey(
-                parametersKeyHandle,
-                &valueNameSr,
-                REG_BINARY,
-                &configuration,
-                sizeof(KPH_DYN_CONFIGURATION)
-                );
+    if (!PhFormatToBuffer(
+        format,
+        RTL_NUMBER_OF(format),
+        parametersKeyNameBuffer,
+        sizeof(parametersKeyNameBuffer),
+        &returnLength
+        ))
+    {
+        return STATUS_UNSUCCESSFUL;
+    }
 
-            if (!NT_SUCCESS(status))
-                goto SetValuesEnd;
-        }
+    parametersKeyName.Buffer = parametersKeyNameBuffer;
+    parametersKeyName.Length = returnLength - sizeof(UNICODE_NULL);
+
+    status = PhCreateKey(
+        &parametersKeyHandle,
+        KEY_WRITE | DELETE,
+        PH_KEY_LOCAL_MACHINE,
+        &parametersKeyName,
+        0,
+        0,
+        &disposition
+        );
+
+    if (!NT_SUCCESS(status))
+        return status;
+
+    if (Config->PortName)
+    {
+        status = PhSetValueKeyZ(
+            parametersKeyHandle,
+            L"PortName",
+            REG_SZ,
+            Config->PortName->Buffer,
+            (ULONG)Config->PortName->Length + sizeof(UNICODE_NULL)
+            );
+
+        if (!NT_SUCCESS(status))
+            goto CleanupExit;
+    }
+
+    if (Config->Altitude)
+    {
+        status = PhSetValueKeyZ(
+            parametersKeyHandle,
+            L"Altitude",
+            REG_SZ,
+            Config->Altitude->Buffer,
+            (ULONG)Config->Altitude->Length + sizeof(UNICODE_NULL)
+            );
+
+        if (!NT_SUCCESS(status))
+            goto CleanupExit;
+    }
+
+    if (Config->Flags.Flags)
+    {
+        C_ASSERT(sizeof(KPH_PARAMETER_FLAGS) == sizeof(ULONG));
+
+        status = PhSetValueKeyZ(
+            parametersKeyHandle,
+            L"Flags",
+            REG_DWORD,
+            &Config->Flags.Flags,
+            sizeof(ULONG)
+            );
+
+        if (!NT_SUCCESS(status))
+            goto CleanupExit;
     }
 
     // Put more parameters here...
 
-SetValuesEnd:
+    status = STATUS_SUCCESS;
+
+CleanupExit:
     if (!NT_SUCCESS(status))
     {
         // Delete the key if we created it.
@@ -354,378 +322,351 @@ SetValuesEnd:
     NtClose(parametersKeyHandle);
 
     return status;
-}
-
-BOOLEAN KphParametersExists(
-    _In_opt_ PWSTR ServiceName
-    )
-{
-    NTSTATUS status;
-    HANDLE parametersKeyHandle = NULL;
-    PH_STRINGREF parametersKeyNameSr;
-    PH_FORMAT format[3];
-    SIZE_T returnLength;
-    WCHAR parametersKeyName[MAX_PATH];
-
-    PhInitFormatS(&format[0], L"System\\CurrentControlSet\\Services\\");
-    PhInitFormatS(&format[1], ServiceName ? ServiceName : KPH_DEVICE_SHORT_NAME);
-    PhInitFormatS(&format[2], L"\\Parameters");
-
-    if (!PhFormatToBuffer(
-        format,
-        RTL_NUMBER_OF(format),
-        parametersKeyName,
-        sizeof(parametersKeyName),
-        &returnLength
-        ))
-    {
-        return FALSE;
-    }
-
-    parametersKeyNameSr.Buffer = parametersKeyName;
-    parametersKeyNameSr.Length = returnLength - sizeof(UNICODE_NULL);
-
-    status = PhOpenKey(
-        &parametersKeyHandle,
-        KEY_READ,
-        PH_KEY_LOCAL_MACHINE,
-        &parametersKeyNameSr,
-        0
-        );
-
-    if (NT_SUCCESS(status) || status == STATUS_ACCESS_DENIED)
-    {
-        if (parametersKeyHandle)
-            NtClose(parametersKeyHandle);
-        return TRUE;
-    }
-
-    if (parametersKeyHandle)
-        NtClose(parametersKeyHandle);
-    return FALSE;
-}
-
-NTSTATUS KphResetParameters(
-    _In_opt_ PWSTR ServiceName
-    )
-{
-    NTSTATUS status = STATUS_UNSUCCESSFUL;
-    HANDLE parametersKeyHandle = NULL;
-    PH_STRINGREF parametersKeyNameSr;
-    PH_FORMAT format[3];
-    SIZE_T returnLength;
-    WCHAR parametersKeyName[MAX_PATH];
-
-    PhInitFormatS(&format[0], L"System\\CurrentControlSet\\Services\\");
-    PhInitFormatS(&format[1], ServiceName ? ServiceName : KPH_DEVICE_SHORT_NAME);
-    PhInitFormatS(&format[2], L"\\Parameters");
-
-    if (!PhFormatToBuffer(
-        format,
-        RTL_NUMBER_OF(format),
-        parametersKeyName,
-        sizeof(parametersKeyName),
-        &returnLength
-        ))
-    {
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    parametersKeyNameSr.Buffer = parametersKeyName;
-    parametersKeyNameSr.Length = returnLength - sizeof(UNICODE_NULL);
-
-    status = KphUninstall(ServiceName);
-    status = WIN32_FROM_NTSTATUS(status);
-
-    if (status == ERROR_SERVICE_DOES_NOT_EXIST)
-        status = STATUS_SUCCESS;
-
-    if (NT_SUCCESS(status))
-    {
-        status = PhOpenKey(
-            &parametersKeyHandle,
-            DELETE,
-            PH_KEY_LOCAL_MACHINE,
-            &parametersKeyNameSr,
-            0
-            );
-    }
-
-    if (NT_SUCCESS(status) && parametersKeyHandle)
-        status = NtDeleteKey(parametersKeyHandle);
-
-    if (status == STATUS_OBJECT_NAME_NOT_FOUND)
-        status = STATUS_SUCCESS;
-
-    if (parametersKeyHandle)
-        NtClose(parametersKeyHandle);
-
-    return status;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 VOID KphSetServiceSecurity(
     _In_ SC_HANDLE ServiceHandle
     )
 {
-    static SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    PSID administratorsSid = PhSeAdministratorsSid();
+    UCHAR securityDescriptorBuffer[SECURITY_DESCRIPTOR_MIN_LENGTH + 0x80];
     PSECURITY_DESCRIPTOR securityDescriptor;
     ULONG sdAllocationLength;
-    UCHAR administratorsSidBuffer[FIELD_OFFSET(SID, SubAuthority) + sizeof(ULONG) * 2];
-    PSID administratorsSid;
     PACL dacl;
-
-    administratorsSid = (PSID)administratorsSidBuffer;
-    RtlInitializeSid(administratorsSid, &ntAuthority, 2);
-    *RtlSubAuthoritySid(administratorsSid, 0) = SECURITY_BUILTIN_DOMAIN_RID;
-    *RtlSubAuthoritySid(administratorsSid, 1) = DOMAIN_ALIAS_RID_ADMINS;
 
     sdAllocationLength = SECURITY_DESCRIPTOR_MIN_LENGTH +
         (ULONG)sizeof(ACL) +
         (ULONG)sizeof(ACCESS_ALLOWED_ACE) +
-        RtlLengthSid(&PhSeServiceSid) +
+        PhLengthSid((PSID)&PhSeServiceSid) +
         (ULONG)sizeof(ACCESS_ALLOWED_ACE) +
-        RtlLengthSid(administratorsSid) +
+        PhLengthSid(administratorsSid) +
         (ULONG)sizeof(ACCESS_ALLOWED_ACE) +
-        RtlLengthSid(&PhSeInteractiveSid);
+        PhLengthSid((PSID)&PhSeInteractiveSid);
 
-    securityDescriptor = PhAllocate(sdAllocationLength);
-    dacl = (PACL)PTR_ADD_OFFSET(securityDescriptor, SECURITY_DESCRIPTOR_MIN_LENGTH);
+    securityDescriptor = (PSECURITY_DESCRIPTOR)securityDescriptorBuffer;
+    dacl = PTR_ADD_OFFSET(securityDescriptor, SECURITY_DESCRIPTOR_MIN_LENGTH);
 
     RtlCreateSecurityDescriptor(securityDescriptor, SECURITY_DESCRIPTOR_REVISION);
     RtlCreateAcl(dacl, sdAllocationLength - SECURITY_DESCRIPTOR_MIN_LENGTH, ACL_REVISION);
-    RtlAddAccessAllowedAce(dacl, ACL_REVISION, SERVICE_ALL_ACCESS, &PhSeServiceSid);
+    RtlAddAccessAllowedAce(dacl, ACL_REVISION, SERVICE_ALL_ACCESS, (PSID)&PhSeServiceSid);
     RtlAddAccessAllowedAce(dacl, ACL_REVISION, SERVICE_ALL_ACCESS, administratorsSid);
-    RtlAddAccessAllowedAce(dacl, ACL_REVISION, 
+    RtlAddAccessAllowedAce(dacl, ACL_REVISION,
         SERVICE_QUERY_CONFIG |
         SERVICE_QUERY_STATUS |
         SERVICE_START |
         SERVICE_STOP |
         SERVICE_INTERROGATE |
         DELETE,
-        &PhSeInteractiveSid
+        (PSID)&PhSeInteractiveSid
         );
     RtlSetDaclSecurityDescriptor(securityDescriptor, TRUE, dacl, FALSE);
 
-    SetServiceObjectSecurity(ServiceHandle, DACL_SECURITY_INFORMATION, securityDescriptor);
+    PhSetServiceObjectSecurity(ServiceHandle, DACL_SECURITY_INFORMATION, securityDescriptor);
 
-    PhFree(securityDescriptor);
+#ifdef DEBUG
+    assert(sdAllocationLength < sizeof(securityDescriptorBuffer));
+    assert(RtlLengthSecurityDescriptor(securityDescriptor) < sizeof(securityDescriptorBuffer));
+#endif
 }
 
-NTSTATUS KphInstall(
-    _In_opt_ PWSTR ServiceName,
-    _In_ PWSTR FileName
+static BOOLEAN NTAPI KsiLoadUnloadServiceCleanupKeyCallback(
+    _In_ HANDLE RootDirectory,
+    _In_ PKEY_BASIC_INFORMATION Information,
+    _In_ PVOID Context
     )
 {
-    return KphInstallEx(ServiceName, FileName, NULL);
-}
+    HANDLE keyHandle;
+    PH_STRINGREF keyName;
 
-NTSTATUS KphInstallEx(
-    _In_opt_ PWSTR ServiceName,
-    _In_ PWSTR FileName,
-    _In_opt_ PKPH_PARAMETERS Parameters
-    )
-{
-    NTSTATUS status = STATUS_SUCCESS;
-    SC_HANDLE scmHandle;
-    SC_HANDLE serviceHandle;
+    keyName.Buffer = Information->Name;
+    keyName.Length = Information->NameLength;
 
-    if (!ServiceName)
-        ServiceName = KPH_DEVICE_SHORT_NAME;
-
-    scmHandle = OpenSCManager(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
-
-    if (!scmHandle)
-        return PhGetLastWin32ErrorAsNtStatus();
-
-    serviceHandle = CreateService(
-        scmHandle,
-        ServiceName,
-        ServiceName,
-        SERVICE_ALL_ACCESS,
-        SERVICE_KERNEL_DRIVER,
-        SERVICE_SYSTEM_START,
-        SERVICE_ERROR_IGNORE,
-        FileName,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        L""
-        );
-
-    if (serviceHandle)
+    if (NT_SUCCESS(PhOpenKey(
+        &keyHandle,
+        KEY_READ | DELETE,
+        RootDirectory,
+        &keyName,
+        0
+        )))
     {
-        KphSetServiceSecurity(serviceHandle);
+        PhEnumerateKey(keyHandle, KeyBasicInformation, KsiLoadUnloadServiceCleanupKeyCallback, NULL);
+        NtDeleteKey(keyHandle);
+        NtClose(keyHandle);
+    }
 
-        // See KphConnect2Ex for more details.
-        if (Parameters)
+    return TRUE;
+}
+
+NTSTATUS KsiLoadUnloadService(
+    _In_ PKPH_CONFIG_PARAMETERS Config,
+    _In_ BOOLEAN LoadDriver
+    )
+{
+#ifdef _WIN64
+    static PH_STRINGREF fullServicesKeyName = PH_STRINGREF_INIT(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\");
+    static PH_STRINGREF parametersKeyName = PH_STRINGREF_INIT(L"Parameters");
+    NTSTATUS status;
+    PPH_STRING fullServiceKeyName;
+    PPH_STRING fullServiceFileName;
+    UNICODE_STRING driverServiceKeyName;
+    HANDLE serviceKeyHandle;
+    HANDLE parametersKeyHandle = NULL;
+    ULONG disposition;
+
+    fullServiceKeyName = PhConcatStringRef2(&fullServicesKeyName, Config->ServiceName);
+
+    if (!PhStringRefToUnicodeString(&fullServiceKeyName->sr, &driverServiceKeyName))
+    {
+        PhDereferenceObject(fullServiceKeyName);
+        return STATUS_NAME_TOO_LONG;
+    }
+
+    if (LoadDriver)
+    {
+        status = PhCreateKey(
+            &serviceKeyHandle,
+            KEY_WRITE,
+            NULL,
+            &fullServiceKeyName->sr,
+            0,
+            0,
+            &disposition
+            );
+
+        if (NT_SUCCESS(status))
         {
-            status = KphSetParameters(ServiceName, Parameters);
-
-            if (!NT_SUCCESS(status))
+            if (disposition == REG_CREATED_NEW_KEY)
             {
-                DeleteService(serviceHandle);
-                goto CreateEnd;
+                fullServiceFileName = PhConcatStringRef2(&PhNtDosDevicesPrefix, Config->FileName);
+                PhSetValueKeyZ(serviceKeyHandle, L"ErrorControl", REG_DWORD, &(ULONG){ SERVICE_ERROR_NORMAL }, sizeof(ULONG));
+                PhSetValueKeyZ(serviceKeyHandle, L"Type", REG_DWORD, &(ULONG){ SERVICE_KERNEL_DRIVER }, sizeof(ULONG));
+                PhSetValueKeyZ(serviceKeyHandle, L"Start", REG_DWORD, &(ULONG){ SERVICE_DISABLED }, sizeof(ULONG));
+                PhSetValueKeyZ(serviceKeyHandle, L"ImagePath", REG_SZ, fullServiceFileName->Buffer, (ULONG)fullServiceFileName->Length + sizeof(UNICODE_NULL));
+                PhSetValueKeyZ(serviceKeyHandle, L"ObjectName", REG_SZ, Config->ObjectName->Buffer, (ULONG)Config->ObjectName->Length + sizeof(UNICODE_NULL));
+                PhDereferenceObject(fullServiceFileName);
+
+                KphSetParameters(Config);
             }
+
+            NtClose(serviceKeyHandle);
         }
 
-        if (!StartService(serviceHandle, 0, NULL))
-            status = PhGetLastWin32ErrorAsNtStatus();
-
-CreateEnd:
-        CloseServiceHandle(serviceHandle);
+        if (Config->EnableFilterLoad)
+            status = KphFilterLoadUnload(Config->ServiceName, TRUE);
+        else
+            status = NtLoadDriver(&driverServiceKeyName);
     }
     else
     {
-        status = PhGetLastWin32ErrorAsNtStatus();
+        if (Config->EnableFilterLoad)
+            status = KphFilterLoadUnload(Config->ServiceName, FALSE);
+        else
+            status = NtUnloadDriver(&driverServiceKeyName);
     }
 
-    CloseServiceHandle(scmHandle);
+    if (!NT_SUCCESS(status) || !LoadDriver)
+    {
+        if (NT_SUCCESS(PhOpenKey(
+            &serviceKeyHandle,
+            KEY_READ | DELETE,
+            NULL,
+            &fullServiceKeyName->sr,
+            0
+            )))
+        {
+            if (NT_SUCCESS(PhOpenKey(
+                &parametersKeyHandle,
+                DELETE,
+                serviceKeyHandle,
+                &parametersKeyName,
+                0
+                )))
+            {
+                NtDeleteKey(parametersKeyHandle);
+                NtClose(parametersKeyHandle);
+            }
+
+            PhEnumerateKey(serviceKeyHandle, KeyBasicInformation, KsiLoadUnloadServiceCleanupKeyCallback, NULL);
+            NtDeleteKey(serviceKeyHandle);
+            NtClose(serviceKeyHandle);
+        }
+    }
+
+    PhDereferenceObject(fullServiceKeyName);
 
     return status;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
-NTSTATUS KphUninstall(
-    _In_opt_ PWSTR ServiceName
-    )
-{
-    NTSTATUS status = STATUS_SUCCESS;
-    SC_HANDLE scmHandle;
-    SC_HANDLE serviceHandle;
-
-    scmHandle = OpenSCManager(NULL, NULL, SC_MANAGER_CONNECT);
-
-    if (!scmHandle)
-        return PhGetLastWin32ErrorAsNtStatus();
-
-    serviceHandle = OpenService(scmHandle, ServiceName ? ServiceName : KPH_DEVICE_SHORT_NAME, SERVICE_STOP | DELETE);
-
-    if (serviceHandle)
-    {
-        SERVICE_STATUS serviceStatus;
-
-        ControlService(serviceHandle, SERVICE_CONTROL_STOP, &serviceStatus);
-
-        if (!DeleteService(serviceHandle))
-            status = PhGetLastWin32ErrorAsNtStatus();
-
-        CloseServiceHandle(serviceHandle);
-    }
-    else
-    {
-        status = PhGetLastWin32ErrorAsNtStatus();
-    }
-
-    CloseServiceHandle(scmHandle);
-
-    return status;
-}
-
-NTSTATUS KphGetFeatures(
-    _Inout_ PULONG Features
-    )
-{
-    struct
-    {
-        PULONG Features;
-    } input = { Features };
-
-    return KphpDeviceIoControl(
-        KPH_GETFEATURES,
-        &input,
-        sizeof(input)
-        );
-}
-
-NTSTATUS KphVerifyClient(
-    _In_reads_bytes_(SignatureSize) PUCHAR Signature,
-    _In_ ULONG SignatureSize
+NTSTATUS KphServiceStop(
+    _In_ PKPH_CONFIG_PARAMETERS Config
     )
 {
     NTSTATUS status;
-    struct
-    {
-        PVOID CodeAddress;
-        PUCHAR Signature;
-        ULONG SignatureSize;
-    } input = { KphpWithKeyApcRoutine, Signature, SignatureSize };
 
-    status = KphpDeviceIoControl(
-        KPH_VERIFYCLIENT,
-        &input,
-        sizeof(input)
-        );
+    //KphCommsStop();
+
+    if (Config->EnableNativeLoad || Config->EnableFilterLoad)
+    {
+        status = KsiLoadUnloadService(Config, FALSE);
+    }
+    else
+    {
+        SC_HANDLE serviceHandle;
+
+        status = PhOpenService(&serviceHandle, SERVICE_STOP, PhGetStringRefZ(Config->ServiceName));
+
+        if (NT_SUCCESS(status))
+        {
+            status = PhStopService(serviceHandle);
+
+            PhCloseServiceHandle(serviceHandle);
+        }
+    }
+
+    return status;
+}
+
+PPH_FREE_LIST KphGetMessageFreeList(
+    VOID
+    )
+{
+    KSI_COMMS_INIT_ASSERT();
+
+    return &KphMessageFreeList;
+}
+
+NTSTATUS KphGetInformerSettings(
+    _Out_ PKPH_INFORMER_SETTINGS Settings
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    RtlZeroMemory(Settings, sizeof(KPH_INFORMER_SETTINGS));
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgGetInformerSettings);
+    status = KphCommsSendMessage(msg);
 
     if (NT_SUCCESS(status))
-        PhKphVerified = TRUE;
+    {
+        status = msg->User.GetInformerSettings.Status;
+        RtlCopyMemory(Settings, &msg->User.GetInformerSettings.Settings, sizeof(KPH_INFORMER_SETTINGS));
+    }
 
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphSetInformerSettings(
+    _In_ PKPH_INFORMER_SETTINGS Settings
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgSetInformerSettings);
+    RtlCopyMemory(&msg->User.SetInformerSettings.Settings, Settings, sizeof(KPH_INFORMER_SETTINGS));
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.SetInformerSettings.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
     return status;
 }
 
 NTSTATUS KphOpenProcess(
-    _Inout_ PHANDLE ProcessHandle,
+    _Out_ PHANDLE ProcessHandle,
     _In_ ACCESS_MASK DesiredAccess,
     _In_ PCLIENT_ID ClientId
     )
 {
-    KPH_OPEN_PROCESS_INPUT input = { ProcessHandle, DesiredAccess, ClientId, 0 };
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
 
-    if ((DesiredAccess & KPH_PROCESS_READ_ACCESS) == DesiredAccess)
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgOpenProcess);
+    msg->User.OpenProcess.ProcessHandle = ProcessHandle;
+    msg->User.OpenProcess.DesiredAccess = DesiredAccess;
+    msg->User.OpenProcess.ClientId = ClientId;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
     {
-        KphpGetL1Key(&input.Key);
-        return KphpDeviceIoControl(
-            KPH_OPENPROCESS,
-            &input,
-            sizeof(input)
-            );
+        status = msg->User.OpenProcess.Status;
     }
-    else
-    {
-        return KphpWithKey(KphKeyLevel2, KphpOpenProcessContinuation, &input);
-    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
 NTSTATUS KphOpenProcessToken(
     _In_ HANDLE ProcessHandle,
     _In_ ACCESS_MASK DesiredAccess,
-    _Inout_ PHANDLE TokenHandle
+    _Out_ PHANDLE TokenHandle
     )
 {
-    KPH_OPEN_PROCESS_TOKEN_INPUT input = { ProcessHandle, DesiredAccess, TokenHandle, 0 };
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
 
-    if ((DesiredAccess & KPH_TOKEN_READ_ACCESS) == DesiredAccess)
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgOpenProcessToken);
+    msg->User.OpenProcessToken.ProcessHandle = ProcessHandle;
+    msg->User.OpenProcessToken.DesiredAccess = DesiredAccess;
+    msg->User.OpenProcessToken.TokenHandle = TokenHandle;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
     {
-        KphpGetL1Key(&input.Key);
-        return KphpDeviceIoControl(
-            KPH_OPENPROCESSTOKEN,
-            &input,
-            sizeof(input)
-            );
+        status = msg->User.OpenProcessToken.Status;
     }
-    else
-    {
-        return KphpWithKey(KphKeyLevel2, KphpOpenProcessTokenContinuation, &input);
-    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
 NTSTATUS KphOpenProcessJob(
     _In_ HANDLE ProcessHandle,
     _In_ ACCESS_MASK DesiredAccess,
-    _Inout_ PHANDLE JobHandle
+    _Out_ PHANDLE JobHandle
     )
 {
-    struct
-    {
-        HANDLE ProcessHandle;
-        ACCESS_MASK DesiredAccess;
-        PHANDLE JobHandle;
-    } input = { ProcessHandle, DesiredAccess, JobHandle };
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
 
-    return KphpDeviceIoControl(
-        KPH_OPENPROCESSJOB,
-        &input,
-        sizeof(input)
-        );
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgOpenProcessJob);
+    msg->User.OpenProcessJob.ProcessHandle = ProcessHandle;
+    msg->User.OpenProcessJob.DesiredAccess = DesiredAccess;
+    msg->User.OpenProcessJob.JobHandle = JobHandle;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.OpenProcessJob.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
 NTSTATUS KphTerminateProcess(
@@ -734,20 +675,26 @@ NTSTATUS KphTerminateProcess(
     )
 {
     NTSTATUS status;
-    KPH_TERMINATE_PROCESS_INPUT input = { ProcessHandle, ExitStatus, 0 };
+    PKPH_MESSAGE msg;
 
-    status = KphpWithKey(KphKeyLevel2, KphpTerminateProcessContinuation, &input);
+    KSI_COMMS_INIT_ASSERT();
 
-    // Check if we're trying to terminate the current process, because kernel-mode can't do it.
-    if (status == STATUS_CANT_TERMINATE_SELF)
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgTerminateProcess);
+    msg->User.TerminateProcess.ProcessHandle = ProcessHandle;
+    msg->User.TerminateProcess.ExitStatus = ExitStatus;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
     {
-        PhExitApplication(ExitStatus);
+        status = msg->User.TerminateProcess.Status;
     }
 
+    PhFreeToFreeList(&KphMessageFreeList, msg);
     return status;
 }
 
-NTSTATUS KphReadVirtualMemoryUnsafe(
+NTSTATUS KphReadVirtualMemory(
     _In_opt_ HANDLE ProcessHandle,
     _In_ PVOID BaseAddress,
     _Out_writes_bytes_(BufferSize) PVOID Buffer,
@@ -755,98 +702,81 @@ NTSTATUS KphReadVirtualMemoryUnsafe(
     _Inout_opt_ PSIZE_T NumberOfBytesRead
     )
 {
-    KPH_READ_VIRTUAL_MEMORY_UNSAFE_INPUT input = { ProcessHandle, BaseAddress, Buffer, BufferSize, NumberOfBytesRead, 0 };
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
 
-    return KphpWithKey(KphKeyLevel2, KphpReadVirtualMemoryUnsafeContinuation, &input);
-}
+    KSI_COMMS_INIT_ASSERT();
 
-NTSTATUS KphQueryInformationProcess(
-    _In_ HANDLE ProcessHandle,
-    _In_ KPH_PROCESS_INFORMATION_CLASS ProcessInformationClass,
-    _Out_writes_bytes_(ProcessInformationLength) PVOID ProcessInformation,
-    _In_ ULONG ProcessInformationLength,
-    _Inout_opt_ PULONG ReturnLength
-    )
-{
-    struct
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgReadVirtualMemory);
+    msg->User.ReadVirtualMemory.ProcessHandle = ProcessHandle;
+    msg->User.ReadVirtualMemory.BaseAddress = BaseAddress;
+    msg->User.ReadVirtualMemory.Buffer = Buffer;
+    msg->User.ReadVirtualMemory.BufferSize = BufferSize;
+    msg->User.ReadVirtualMemory.NumberOfBytesRead = NumberOfBytesRead;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
     {
-        HANDLE ProcessHandle;
-        KPH_PROCESS_INFORMATION_CLASS ProcessInformationClass;
-        PVOID ProcessInformation;
-        ULONG ProcessInformationLength;
-        PULONG ReturnLength;
-    } input = { ProcessHandle, ProcessInformationClass, ProcessInformation, ProcessInformationLength, ReturnLength };
+        status = msg->User.ReadVirtualMemory.Status;
+    }
 
-    return KphpDeviceIoControl(
-        KPH_QUERYINFORMATIONPROCESS,
-        &input,
-        sizeof(input)
-        );
-}
-
-NTSTATUS KphSetInformationProcess(
-    _In_ HANDLE ProcessHandle,
-    _In_ KPH_PROCESS_INFORMATION_CLASS ProcessInformationClass,
-    _In_reads_bytes_(ProcessInformationLength) PVOID ProcessInformation,
-    _In_ ULONG ProcessInformationLength
-    )
-{
-    struct
-    {
-        HANDLE ProcessHandle;
-        KPH_PROCESS_INFORMATION_CLASS ProcessInformationClass;
-        PVOID ProcessInformation;
-        ULONG ProcessInformationLength;
-    } input = { ProcessHandle, ProcessInformationClass, ProcessInformation, ProcessInformationLength };
-
-    return KphpDeviceIoControl(
-        KPH_SETINFORMATIONPROCESS,
-        &input,
-        sizeof(input)
-        );
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
 NTSTATUS KphOpenThread(
-    _Inout_ PHANDLE ThreadHandle,
+    _Out_ PHANDLE ThreadHandle,
     _In_ ACCESS_MASK DesiredAccess,
     _In_ PCLIENT_ID ClientId
     )
 {
-    KPH_OPEN_THREAD_INPUT input = { ThreadHandle, DesiredAccess, ClientId, 0 };
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
 
-    if ((DesiredAccess & KPH_THREAD_READ_ACCESS) == DesiredAccess)
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgOpenThread);
+    msg->User.OpenThread.ThreadHandle = ThreadHandle;
+    msg->User.OpenThread.DesiredAccess = DesiredAccess;
+    msg->User.OpenThread.ClientId = ClientId;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
     {
-        KphpGetL1Key(&input.Key);
-        return KphpDeviceIoControl(
-            KPH_OPENTHREAD,
-            &input,
-            sizeof(input)
-            );
+        status = msg->User.OpenThread.Status;
     }
-    else
-    {
-        return KphpWithKey(KphKeyLevel2, KphpOpenThreadContinuation, &input);
-    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
 NTSTATUS KphOpenThreadProcess(
     _In_ HANDLE ThreadHandle,
     _In_ ACCESS_MASK DesiredAccess,
-    _Inout_ PHANDLE ProcessHandle
+    _Out_ PHANDLE ProcessHandle
     )
 {
-    struct
-    {
-        HANDLE ThreadHandle;
-        ACCESS_MASK DesiredAccess;
-        PHANDLE ProcessHandle;
-    } input = { ThreadHandle, DesiredAccess, ProcessHandle };
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
 
-    return KphpDeviceIoControl(
-        KPH_OPENTHREADPROCESS,
-        &input,
-        sizeof(input)
-        );
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgOpenThreadProcess);
+    msg->User.OpenThreadProcess.ThreadHandle = ThreadHandle;
+    msg->User.OpenThreadProcess.DesiredAccess = DesiredAccess;
+    msg->User.OpenThreadProcess.ProcessHandle = ProcessHandle;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.OpenThreadProcess.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
 NTSTATUS KphCaptureStackBackTraceThread(
@@ -854,71 +784,36 @@ NTSTATUS KphCaptureStackBackTraceThread(
     _In_ ULONG FramesToSkip,
     _In_ ULONG FramesToCapture,
     _Out_writes_(FramesToCapture) PVOID *BackTrace,
-    _Inout_opt_ PULONG CapturedFrames,
-    _Inout_opt_ PULONG BackTraceHash
+    _Out_ PULONG CapturedFrames,
+    _Out_opt_ PULONG BackTraceHash,
+    _In_ ULONG Flags
     )
 {
-    struct
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+    LARGE_INTEGER timeout;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgCaptureStackBackTraceThread);
+    msg->User.CaptureStackBackTraceThread.ThreadHandle = ThreadHandle;
+    msg->User.CaptureStackBackTraceThread.FramesToSkip = FramesToSkip;
+    msg->User.CaptureStackBackTraceThread.FramesToCapture = FramesToCapture;
+    msg->User.CaptureStackBackTraceThread.BackTrace = BackTrace;
+    msg->User.CaptureStackBackTraceThread.CapturedFrames = CapturedFrames;
+    msg->User.CaptureStackBackTraceThread.BackTraceHash = BackTraceHash;
+    msg->User.CaptureStackBackTraceThread.Timeout = PhTimeoutFromMilliseconds(&timeout, 300);
+    msg->User.CaptureStackBackTraceThread.Flags = Flags;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
     {
-        HANDLE ThreadHandle;
-        ULONG FramesToSkip;
-        ULONG FramesToCapture;
-        PVOID *BackTrace;
-        PULONG CapturedFrames;
-        PULONG BackTraceHash;
-    } input = { ThreadHandle, FramesToSkip, FramesToCapture, BackTrace, CapturedFrames, BackTraceHash };
+        status = msg->User.CaptureStackBackTraceThread.Status;
+    }
 
-    return KphpDeviceIoControl(
-        KPH_CAPTURESTACKBACKTRACETHREAD,
-        &input,
-        sizeof(input)
-        );
-}
-
-NTSTATUS KphQueryInformationThread(
-    _In_ HANDLE ThreadHandle,
-    _In_ KPH_THREAD_INFORMATION_CLASS ThreadInformationClass,
-    _Out_writes_bytes_(ThreadInformationLength) PVOID ThreadInformation,
-    _In_ ULONG ThreadInformationLength,
-    _Inout_opt_ PULONG ReturnLength
-    )
-{
-    struct
-    {
-        HANDLE ThreadHandle;
-        KPH_THREAD_INFORMATION_CLASS ThreadInformationClass;
-        PVOID ThreadInformation;
-        ULONG ThreadInformationLength;
-        PULONG ReturnLength;
-    } input = { ThreadHandle, ThreadInformationClass, ThreadInformation, ThreadInformationLength, ReturnLength };
-
-    return KphpDeviceIoControl(
-        KPH_QUERYINFORMATIONTHREAD,
-        &input,
-        sizeof(input)
-        );
-}
-
-NTSTATUS KphSetInformationThread(
-    _In_ HANDLE ThreadHandle,
-    _In_ KPH_THREAD_INFORMATION_CLASS ThreadInformationClass,
-    _In_reads_bytes_(ThreadInformationLength) PVOID ThreadInformation,
-    _In_ ULONG ThreadInformationLength
-    )
-{
-    struct
-    {
-        HANDLE ThreadHandle;
-        KPH_THREAD_INFORMATION_CLASS ThreadInformationClass;
-        PVOID ThreadInformation;
-        ULONG ThreadInformationLength;
-    } input = { ThreadHandle, ThreadInformationClass, ThreadInformation, ThreadInformationLength };
-
-    return KphpDeviceIoControl(
-        KPH_SETINFORMATIONTHREAD,
-        &input,
-        sizeof(input)
-        );
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
 NTSTATUS KphEnumerateProcessHandles(
@@ -928,22 +823,29 @@ NTSTATUS KphEnumerateProcessHandles(
     _Inout_opt_ PULONG ReturnLength
     )
 {
-    struct
-    {
-        HANDLE ProcessHandle;
-        PVOID Buffer;
-        ULONG BufferLength;
-        PULONG ReturnLength;
-    } input = { ProcessHandle, Buffer, BufferLength, ReturnLength };
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
 
-    return KphpDeviceIoControl(
-        KPH_ENUMERATEPROCESSHANDLES,
-        &input,
-        sizeof(input)
-        );
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgEnumerateProcessHandles);
+    msg->User.EnumerateProcessHandles.ProcessHandle = ProcessHandle;
+    msg->User.EnumerateProcessHandles.Buffer = Buffer;
+    msg->User.EnumerateProcessHandles.BufferLength = BufferLength;
+    msg->User.EnumerateProcessHandles.ReturnLength = ReturnLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.EnumerateProcessHandles.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
-NTSTATUS KphEnumerateProcessHandles2(
+NTSTATUS KsiEnumerateProcessHandles(
     _In_ HANDLE ProcessHandle,
     _Out_ PKPH_PROCESS_HANDLE_INFORMATION *Handles
     )
@@ -989,26 +891,77 @@ NTSTATUS KphQueryInformationObject(
     _In_ HANDLE ProcessHandle,
     _In_ HANDLE Handle,
     _In_ KPH_OBJECT_INFORMATION_CLASS ObjectInformationClass,
-    _Out_writes_bytes_(ObjectInformationLength) PVOID ObjectInformation,
+    _Out_writes_bytes_opt_(ObjectInformationLength) PVOID ObjectInformation,
     _In_ ULONG ObjectInformationLength,
-    _Inout_opt_ PULONG ReturnLength
+    _Out_opt_ PULONG ReturnLength
     )
 {
-    struct
-    {
-        HANDLE ProcessHandle;
-        HANDLE Handle;
-        KPH_OBJECT_INFORMATION_CLASS ObjectInformationClass;
-        PVOID ObjectInformation;
-        ULONG ObjectInformationLength;
-        PULONG ReturnLength;
-    } input = { ProcessHandle, Handle, ObjectInformationClass, ObjectInformation, ObjectInformationLength, ReturnLength };
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
 
-    return KphpDeviceIoControl(
-        KPH_QUERYINFORMATIONOBJECT,
-        &input,
-        sizeof(input)
-        );
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgQueryInformationObject);
+    msg->User.QueryInformationObject.ProcessHandle = ProcessHandle;
+    msg->User.QueryInformationObject.Handle = Handle;
+    msg->User.QueryInformationObject.ObjectInformationClass = ObjectInformationClass;
+    msg->User.QueryInformationObject.ObjectInformation = ObjectInformation;
+    msg->User.QueryInformationObject.ObjectInformationLength = ObjectInformationLength;
+    msg->User.QueryInformationObject.ReturnLength = ReturnLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.QueryInformationObject.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphQueryObjectSectionMappingsInfo(
+    _In_ HANDLE ProcessHandle,
+    _In_ HANDLE Handle,
+    _Out_ PKPH_SECTION_MAPPINGS_INFORMATION* Info
+    )
+{
+    NTSTATUS status;
+    PVOID buffer;
+    ULONG bufferSize = MAX_PATH;
+
+    *Info = NULL;
+
+    buffer = PhAllocate(bufferSize);
+
+    while (TRUE)
+    {
+        status = KphQueryInformationObject(ProcessHandle,
+                                           Handle,
+                                           KphObjectSectionMappingsInformation,
+                                           buffer,
+                                           bufferSize,
+                                           &bufferSize);
+        if (status == STATUS_BUFFER_TOO_SMALL)
+        {
+            PhFree(buffer);
+            buffer = PhAllocate(bufferSize);
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (!NT_SUCCESS(status))
+    {
+        PhFree(buffer);
+        return status;
+    }
+
+    *Info = buffer;
+
+    return status;
 }
 
 NTSTATUS KphSetInformationObject(
@@ -1019,256 +972,1075 @@ NTSTATUS KphSetInformationObject(
     _In_ ULONG ObjectInformationLength
     )
 {
-    struct
-    {
-        HANDLE ProcessHandle;
-        HANDLE Handle;
-        KPH_OBJECT_INFORMATION_CLASS ObjectInformationClass;
-        PVOID ObjectInformation;
-        ULONG ObjectInformationLength;
-    } input = { ProcessHandle, Handle, ObjectInformationClass, ObjectInformation, ObjectInformationLength };
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
 
-    return KphpDeviceIoControl(
-        KPH_SETINFORMATIONOBJECT,
-        &input,
-        sizeof(input)
-        );
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgSetInformationObject);
+    msg->User.SetInformationObject.ProcessHandle = ProcessHandle;
+    msg->User.SetInformationObject.Handle = Handle;
+    msg->User.SetInformationObject.ObjectInformationClass = ObjectInformationClass;
+    msg->User.SetInformationObject.ObjectInformation = ObjectInformation;
+    msg->User.SetInformationObject.ObjectInformationLength = ObjectInformationLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.SetInformationObject.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
 NTSTATUS KphOpenDriver(
-    _Inout_ PHANDLE DriverHandle,
+    _Out_ PHANDLE DriverHandle,
     _In_ ACCESS_MASK DesiredAccess,
     _In_ POBJECT_ATTRIBUTES ObjectAttributes
     )
 {
-    struct
-    {
-        PHANDLE DriverHandle;
-        ACCESS_MASK DesiredAccess;
-        POBJECT_ATTRIBUTES ObjectAttributes;
-    } input = { DriverHandle, DesiredAccess, ObjectAttributes };
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
 
-    return KphpDeviceIoControl(
-        KPH_OPENDRIVER,
-        &input,
-        sizeof(input)
-        );
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgOpenDriver);
+    msg->User.OpenDriver.DriverHandle = DriverHandle;
+    msg->User.OpenDriver.DesiredAccess = DesiredAccess;
+    msg->User.OpenDriver.ObjectAttributes = ObjectAttributes;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.OpenDriver.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
 NTSTATUS KphQueryInformationDriver(
     _In_ HANDLE DriverHandle,
-    _In_ DRIVER_INFORMATION_CLASS DriverInformationClass,
-    _Out_writes_bytes_(DriverInformationLength) PVOID DriverInformation,
+    _In_ KPH_DRIVER_INFORMATION_CLASS DriverInformationClass,
+    _Out_writes_bytes_opt_(DriverInformationLength) PVOID DriverInformation,
     _In_ ULONG DriverInformationLength,
     _Inout_opt_ PULONG ReturnLength
     )
 {
-    struct
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgQueryInformationDriver);
+    msg->User.QueryInformationDriver.DriverHandle = DriverHandle;
+    msg->User.QueryInformationDriver.DriverInformationClass = DriverInformationClass;
+    msg->User.QueryInformationDriver.DriverInformation = DriverInformation;
+    msg->User.QueryInformationDriver.DriverInformationLength = DriverInformationLength;
+    msg->User.QueryInformationDriver.ReturnLength = ReturnLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
     {
-        HANDLE DriverHandle;
-        DRIVER_INFORMATION_CLASS DriverInformationClass;
-        PVOID DriverInformation;
-        ULONG DriverInformationLength;
-        PULONG ReturnLength;
-    } input = { DriverHandle, DriverInformationClass, DriverInformation, DriverInformationLength, ReturnLength };
-
-    return KphpDeviceIoControl(
-        KPH_QUERYINFORMATIONDRIVER,
-        &input,
-        sizeof(input)
-        );
-}
-
-NTSTATUS KphpDeviceIoControl(
-    _In_ ULONG KphControlCode,
-    _In_ PVOID InBuffer,
-    _In_ ULONG InBufferLength
-    )
-{
-    IO_STATUS_BLOCK iosb;
-
-    return NtDeviceIoControlFile(
-        PhKphHandle,
-        NULL,
-        NULL,
-        NULL,
-        &iosb,
-        KphControlCode,
-        InBuffer,
-        InBufferLength,
-        NULL,
-        0
-        );
-}
-
-VOID KphpWithKeyApcRoutine(
-    _In_ PVOID ApcContext,
-    _In_ PIO_STATUS_BLOCK IoStatusBlock,
-    _In_ ULONG Reserved
-    )
-{
-    PKPHP_RETRIEVE_KEY_CONTEXT context = CONTAINING_RECORD(IoStatusBlock, KPHP_RETRIEVE_KEY_CONTEXT, Iosb);
-    KPH_KEY key = PtrToUlong(ApcContext);
-
-    if (context->Continuation != KphpGetL1KeyContinuation &&
-        context->Continuation != KphpOpenProcessContinuation &&
-        context->Continuation != KphpOpenProcessTokenContinuation &&
-        context->Continuation != KphpTerminateProcessContinuation &&
-        context->Continuation != KphpReadVirtualMemoryUnsafeContinuation &&
-        context->Continuation != KphpOpenThreadContinuation)
-    {
-        PhRaiseStatus(STATUS_ACCESS_DENIED);
-        context->Status = STATUS_ACCESS_DENIED;
-        return;
+        status = msg->User.QueryInformationDriver.Status;
     }
 
-    context->Status = context->Continuation(key, context->Context);
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
-NTSTATUS KphpWithKey(
-    _In_ KPH_KEY_LEVEL KeyLevel,
-    _In_ PKPHP_WITH_KEY_CONTINUATION Continuation,
-    _In_ PVOID Context
+NTSTATUS KphQueryInformationProcess(
+    _In_ HANDLE ProcessHandle,
+    _In_ KPH_PROCESS_INFORMATION_CLASS ProcessInformationClass,
+    _Out_writes_bytes_opt_(ProcessInformationLength) PVOID ProcessInformation,
+    _In_ ULONG ProcessInformationLength,
+    _Inout_opt_ PULONG ReturnLength
     )
 {
     NTSTATUS status;
-    struct
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgQueryInformationProcess);
+    msg->User.QueryInformationProcess.ProcessHandle = ProcessHandle;
+    msg->User.QueryInformationProcess.ProcessInformationClass = ProcessInformationClass;
+    msg->User.QueryInformationProcess.ProcessInformation = ProcessInformation;
+    msg->User.QueryInformationProcess.ProcessInformationLength = ProcessInformationLength;
+    msg->User.QueryInformationProcess.ReturnLength = ReturnLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
     {
-        KPH_KEY_LEVEL KeyLevel;
-    } input = { KeyLevel };
-    KPHP_RETRIEVE_KEY_CONTEXT context;
-
-    context.Continuation = Continuation;
-    context.Context = Context;
-    context.Status = STATUS_UNSUCCESSFUL;
-
-    status = NtDeviceIoControlFile(
-        PhKphHandle,
-        NULL,
-        KphpWithKeyApcRoutine,
-        NULL,
-        &context.Iosb,
-        KPH_RETRIEVEKEY,
-        &input,
-        sizeof(input),
-        NULL,
-        0
-        );
-
-    NtTestAlert();
-
-    if (!NT_SUCCESS(status))
-        return status;
-
-    return context.Status;
-}
-
-NTSTATUS KphpGetL1KeyContinuation(
-    _In_ KPH_KEY Key,
-    _In_ PVOID Context
-    )
-{
-    PKPHP_GET_L1_KEY_CONTEXT context = Context;
-
-    *context->Key = Key;
-    PhKphL1Key = Key;
-
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS KphpGetL1Key(
-    _Inout_ PKPH_KEY Key
-    )
-{
-    KPHP_GET_L1_KEY_CONTEXT context;
-
-    if (PhKphL1Key)
-    {
-        *Key = PhKphL1Key;
-        return STATUS_SUCCESS;
+        status = msg->User.QueryInformationDriver.Status;
     }
 
-    context.Key = Key;
-
-    return KphpWithKey(KphKeyLevel1, KphpGetL1KeyContinuation, &context);
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }
 
-NTSTATUS KphpOpenProcessContinuation(
-    _In_ KPH_KEY Key,
-    _In_ PVOID Context
+KPH_PROCESS_STATE KphGetProcessState(
+    _In_ HANDLE ProcessHandle
     )
 {
-    PKPH_OPEN_PROCESS_INPUT input = Context;
+    KPH_PROCESS_STATE state;
 
-    input->Key = Key;
+    if (!KphCommsIsConnected())
+        return 0;
 
-    return KphpDeviceIoControl(
-        KPH_OPENPROCESS,
-        input,
-        sizeof(*input)
-        );
+    if (!NT_SUCCESS(KphQueryInformationProcess(
+        ProcessHandle,
+        KphProcessStateInformation,
+        &state,
+        sizeof(state),
+        NULL
+        )))
+        return 0;
+
+    return state;
 }
 
-NTSTATUS KphpOpenProcessTokenContinuation(
-    _In_ KPH_KEY Key,
-    _In_ PVOID Context
+KPH_PROCESS_STATE KphGetCurrentProcessState(
+    VOID
     )
 {
-    PKPH_OPEN_PROCESS_TOKEN_INPUT input = Context;
-
-    input->Key = Key;
-
-    return KphpDeviceIoControl(
-        KPH_OPENPROCESSTOKEN,
-        input,
-        sizeof(*input)
-        );
+    return KphGetProcessState(NtCurrentProcess());
 }
 
-NTSTATUS KphpTerminateProcessContinuation(
-    _In_ KPH_KEY Key,
-    _In_ PVOID Context
+KPH_LEVEL KphProcessLevel(
+    _In_ HANDLE ProcessHandle
     )
 {
-    PKPH_TERMINATE_PROCESS_INPUT input = Context;
+    KPH_PROCESS_STATE state;
 
-    input->Key = Key;
+    //
+    // This corresponds to the API access the client is currently given.
+    // See comms_handlers.c
+    //
+    // Note that process state can change in runtime, so re-checking is
+    // necessary.
+    //
 
-    return KphpDeviceIoControl(
-        KPH_TERMINATEPROCESS,
-        input,
-        sizeof(*input)
-        );
+    state = KphGetProcessState(ProcessHandle);
+
+    if ((state & KPH_PROCESS_STATE_MAXIMUM) == KPH_PROCESS_STATE_MAXIMUM)
+        return KphLevelMax;
+
+    if ((state & KPH_PROCESS_STATE_HIGH) == KPH_PROCESS_STATE_HIGH)
+        return KphLevelHigh;
+
+    if ((state & KPH_PROCESS_STATE_MEDIUM) == KPH_PROCESS_STATE_MEDIUM)
+        return KphLevelMed;
+
+    if ((state & KPH_PROCESS_STATE_LOW) == KPH_PROCESS_STATE_LOW)
+        return KphLevelLow;
+
+    if ((state & KPH_PROCESS_STATE_MINIMUM) == KPH_PROCESS_STATE_MINIMUM)
+        return KphLevelMin;
+
+    return KphLevelNone;
 }
 
-NTSTATUS KphpReadVirtualMemoryUnsafeContinuation(
-    _In_ KPH_KEY Key,
-    _In_ PVOID Context
+KPH_LEVEL KphLevelEx(
+    _In_ BOOLEAN Cached
     )
 {
-    PKPH_READ_VIRTUAL_MEMORY_UNSAFE_INPUT input = Context;
+    static KPH_LEVEL level = KphLevelNone;
 
-    input->Key = Key;
+    if (!Cached)
+        level = KphProcessLevel(NtCurrentProcess());
 
-    return KphpDeviceIoControl(
-        KPH_READVIRTUALMEMORYUNSAFE,
-        input,
-        sizeof(*input)
-        );
+    return level;
 }
 
-NTSTATUS KphpOpenThreadContinuation(
-    _In_ KPH_KEY Key,
-    _In_ PVOID Context
+KPH_LEVEL KsiLevel(
+    VOID
     )
 {
-    PKPH_OPEN_PROCESS_INPUT input = Context;
+    return KphLevelEx(TRUE);
+}
 
-    input->Key = Key;
+NTSTATUS KphSetInformationProcess(
+    _In_ HANDLE ProcessHandle,
+    _In_ KPH_PROCESS_INFORMATION_CLASS ProcessInformationClass,
+    _In_reads_bytes_(ProcessInformationLength) PVOID ProcessInformation,
+    _In_ ULONG ProcessInformationLength
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
 
-    return KphpDeviceIoControl(
-        KPH_OPENTHREAD,
-        input,
-        sizeof(*input)
-        );
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgSetInformationProcess);
+    msg->User.SetInformationProcess.ProcessHandle = ProcessHandle;
+    msg->User.SetInformationProcess.ProcessInformationClass = ProcessInformationClass;
+    msg->User.SetInformationProcess.ProcessInformation = ProcessInformation;
+    msg->User.SetInformationProcess.ProcessInformationLength = ProcessInformationLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.SetInformationProcess.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphSetInformationThread(
+    _In_ HANDLE ThreadHandle,
+    _In_ KPH_THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _In_reads_bytes_(ThreadInformationLength) PVOID ThreadInformation,
+    _In_ ULONG ThreadInformationLength
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgSetInformationThread);
+    msg->User.SetInformationThread.ThreadHandle = ThreadHandle;
+    msg->User.SetInformationThread.ThreadInformationClass = ThreadInformationClass;
+    msg->User.SetInformationThread.ThreadInformation = ThreadInformation;
+    msg->User.SetInformationThread.ThreadInformationLength = ThreadInformationLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.SetInformationThread.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphSystemControl(
+    _In_ KPH_SYSTEM_CONTROL_CLASS SystemControlClass,
+    _In_reads_bytes_(SystemControlInfoLength) PVOID SystemControlInfo,
+    _In_ ULONG SystemControlInfoLength
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgSystemControl);
+    msg->User.SystemControl.SystemControlClass = SystemControlClass;
+    msg->User.SystemControl.SystemControlInfo = SystemControlInfo;
+    msg->User.SystemControl.SystemControlInfoLength = SystemControlInfoLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.SystemControl.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphAlpcQueryInformation(
+    _In_ HANDLE ProcessHandle,
+    _In_ HANDLE PortHandle,
+    _In_ KPH_ALPC_INFORMATION_CLASS AlpcInformationClass,
+    _Out_writes_bytes_opt_(AlpcInformationLength) PVOID AlpcInformation,
+    _In_ ULONG AlpcInformationLength,
+    _Out_opt_ PULONG ReturnLength
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgAlpcQueryInformation);
+    msg->User.AlpcQueryInformation.ProcessHandle = ProcessHandle;
+    msg->User.AlpcQueryInformation.PortHandle = PortHandle;
+    msg->User.AlpcQueryInformation.AlpcInformationClass = AlpcInformationClass;
+    msg->User.AlpcQueryInformation.AlpcInformation = AlpcInformation;
+    msg->User.AlpcQueryInformation.AlpcInformationLength = AlpcInformationLength;
+    msg->User.AlpcQueryInformation.ReturnLength = ReturnLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.AlpcQueryInformation.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphAlpcQueryComminicationsNamesInfo(
+    _In_ HANDLE ProcessHandle,
+    _In_ HANDLE PortHandle,
+    _Out_ PKPH_ALPC_COMMUNICATION_NAMES_INFORMATION* Names
+    )
+{
+    NTSTATUS status;
+    PVOID buffer;
+    ULONG bufferSize = MAX_PATH;
+
+    buffer = PhAllocate(bufferSize);
+
+    while (TRUE)
+    {
+        status = KphAlpcQueryInformation(ProcessHandle,
+                                         PortHandle,
+                                         KphAlpcCommunicationNamesInformation,
+                                         buffer,
+                                         bufferSize,
+                                         &bufferSize);
+        if (status == STATUS_BUFFER_TOO_SMALL)
+        {
+            PhFree(buffer);
+            buffer = PhAllocate(bufferSize);
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (!NT_SUCCESS(status))
+    {
+        PhFree(buffer);
+        return status;
+    }
+
+    *Names = buffer;
+
+    return status;
+}
+
+BOOLEAN KphpFileObjectIsBusy(
+    _In_ HANDLE ProcessHandle,
+    _In_ HANDLE FileHandle
+    )
+{
+    KPH_FILE_OBJECT_INFORMATION fileInfo;
+    if (NT_SUCCESS(KphQueryInformationObject(
+        ProcessHandle,
+        FileHandle,
+        KphObjectFileObjectInformation,
+        &fileInfo,
+        sizeof(fileInfo),
+        NULL
+        )))
+    {
+        return fileInfo.Busy ? TRUE : FALSE;
+    }
+
+    return TRUE;
+}
+
+NTSTATUS KphQueryInformationFile(
+    _In_ HANDLE ProcessHandle,
+    _In_ HANDLE FileHandle,
+    _In_ FILE_INFORMATION_CLASS FileInformationClass,
+    _Out_writes_bytes_(FileInformationLength) PVOID FileInformation,
+    _In_ ULONG FileInformationLength,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    // TODO(jxy-s) safety added to driver (2023-06-19) remove this after next driver release
+    if (KphpFileObjectIsBusy(ProcessHandle, FileHandle))
+        return STATUS_POSSIBLE_DEADLOCK;
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgQueryInformationFile);
+    msg->User.QueryInformationFile.ProcessHandle = ProcessHandle;
+    msg->User.QueryInformationFile.FileHandle = FileHandle;
+    msg->User.QueryInformationFile.FileInformationClass = FileInformationClass;
+    msg->User.QueryInformationFile.FileInformation = FileInformation;
+    msg->User.QueryInformationFile.FileInformationLength = FileInformationLength;
+    msg->User.QueryInformationFile.IoStatusBlock = IoStatusBlock;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.QueryInformationFile.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphQueryVolumeInformationFile(
+    _In_ HANDLE ProcessHandle,
+    _In_ HANDLE FileHandle,
+    _In_ FS_INFORMATION_CLASS FsInformationClass,
+    _Out_writes_bytes_(FsInformationLength) PVOID FsInformation,
+    _In_ ULONG FsInformationLength,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgQueryVolumeInformationFile);
+    msg->User.QueryVolumeInformationFile.ProcessHandle = ProcessHandle;
+    msg->User.QueryVolumeInformationFile.FileHandle = FileHandle;
+    msg->User.QueryVolumeInformationFile.FsInformationClass = FsInformationClass;
+    msg->User.QueryVolumeInformationFile.FsInformation = FsInformation;
+    msg->User.QueryVolumeInformationFile.FsInformationLength = FsInformationLength;
+    msg->User.QueryVolumeInformationFile.IoStatusBlock = IoStatusBlock;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.QueryVolumeInformationFile.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphDuplicateObject(
+    _In_ HANDLE ProcessHandle,
+    _In_ HANDLE SourceHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _Out_ PHANDLE TargetHandle
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgDuplicateObject);
+    msg->User.DuplicateObject.ProcessHandle = ProcessHandle;
+    msg->User.DuplicateObject.SourceHandle = SourceHandle;
+    msg->User.DuplicateObject.DesiredAccess = DesiredAccess;
+    msg->User.DuplicateObject.TargetHandle = TargetHandle;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.DuplicateObject.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphQueryPerformanceCounter(
+    _Out_ PLARGE_INTEGER PerformanceCounter,
+    _Out_opt_ PLARGE_INTEGER PerformanceFrequency
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgQueryPerformanceCounter);
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        *PerformanceCounter = msg->User.QueryPerformanceCounter.PerformanceCounter;
+        if (PerformanceFrequency)
+        {
+            *PerformanceFrequency = msg->User.QueryPerformanceCounter.PerformanceFrequency;
+        }
+    }
+    else
+    {
+        PerformanceCounter->QuadPart = 0;
+        if (PerformanceFrequency)
+        {
+            PerformanceFrequency->QuadPart = 0;
+        }
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphCreateFile(
+    _Out_ PHANDLE FileHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_opt_ PLARGE_INTEGER AllocationSize,
+    _In_ ULONG FileAttributes,
+    _In_ ULONG ShareAccess,
+    _In_ ULONG CreateDisposition,
+    _In_ ULONG CreateOptions,
+    _In_reads_bytes_opt_(EaLength) PVOID EaBuffer,
+    _In_ ULONG EaLength,
+    _In_ ULONG Options
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgCreateFile);
+    msg->User.CreateFile.FileHandle = FileHandle;
+    msg->User.CreateFile.DesiredAccess = DesiredAccess;
+    msg->User.CreateFile.ObjectAttributes = ObjectAttributes;
+    msg->User.CreateFile.IoStatusBlock = IoStatusBlock;
+    msg->User.CreateFile.AllocationSize = AllocationSize;
+    msg->User.CreateFile.FileAttributes = FileAttributes;
+    msg->User.CreateFile.ShareAccess = ShareAccess;
+    msg->User.CreateFile.CreateDisposition = CreateDisposition;
+    msg->User.CreateFile.CreateOptions = CreateOptions;
+    msg->User.CreateFile.EaBuffer = EaBuffer;
+    msg->User.CreateFile.EaLength = EaLength;
+    msg->User.CreateFile.Options = Options;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.CreateFile.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphQueryInformationThread(
+    _In_ HANDLE ThreadHandle,
+    _In_ KPH_THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _Out_writes_bytes_opt_(ThreadInformationLength) PVOID ThreadInformation,
+    _In_ ULONG ThreadInformationLength,
+    _Out_opt_ PULONG ReturnLength
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgQueryInformationThread);
+    msg->User.QueryInformationThread.ThreadHandle = ThreadHandle;
+    msg->User.QueryInformationThread.ThreadInformationClass = ThreadInformationClass;
+    msg->User.QueryInformationThread.ThreadInformation = ThreadInformation;
+    msg->User.QueryInformationThread.ThreadInformationLength = ThreadInformationLength;
+    msg->User.QueryInformationThread.ReturnLength = ReturnLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.QueryInformationThread.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphQuerySection(
+    _In_ HANDLE SectionHandle,
+    _In_ KPH_SECTION_INFORMATION_CLASS SectionInformationClass,
+    _Out_writes_bytes_(SectionInformationLength) PVOID SectionInformation,
+    _In_ ULONG SectionInformationLength,
+    _Out_opt_ PULONG ReturnLength
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgQuerySection);
+    msg->User.QuerySection.SectionHandle = SectionHandle;
+    msg->User.QuerySection.SectionInformationClass = SectionInformationClass;
+    msg->User.QuerySection.SectionInformation = SectionInformation;
+    msg->User.QuerySection.SectionInformationLength = SectionInformationLength;
+    msg->User.QuerySection.ReturnLength = ReturnLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.QuerySection.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphQuerySectionMappingsInfo(
+    _In_ HANDLE SectionHandle,
+    _Out_ PKPH_SECTION_MAPPINGS_INFORMATION* Info
+    )
+{
+    NTSTATUS status;
+    PVOID buffer;
+    ULONG bufferSize = MAX_PATH;
+
+    *Info = NULL;
+
+    buffer = PhAllocate(bufferSize);
+
+    while (TRUE)
+    {
+        status = KphQuerySection(SectionHandle,
+                                 KphSectionMappingsInformation,
+                                 buffer,
+                                 bufferSize,
+                                 &bufferSize);
+        if (status == STATUS_BUFFER_TOO_SMALL)
+        {
+            PhFree(buffer);
+            buffer = PhAllocate(bufferSize);
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (!NT_SUCCESS(status))
+    {
+        PhFree(buffer);
+        return status;
+    }
+
+    *Info = buffer;
+
+    return status;
+}
+
+NTSTATUS KphCompareObjects(
+    _In_ HANDLE ProcessHandle,
+    _In_ HANDLE FirstObjectHandle,
+    _In_ HANDLE SecondObjectHandle
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgCompareObjects);
+    msg->User.CompareObjects.ProcessHandle = ProcessHandle;
+    msg->User.CompareObjects.FirstObjectHandle = FirstObjectHandle;
+    msg->User.CompareObjects.SecondObjectHandle = SecondObjectHandle;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.CompareObjects.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphGetMessageTimeouts(
+    _Out_ PKPH_MESSAGE_TIMEOUTS Timeouts
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgGetMessageTimeouts);
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        RtlCopyMemory(Timeouts, &msg->User.GetMessageTimeouts.Timeouts, sizeof(*Timeouts));
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphSetMessageTimeouts(
+    _In_ PKPH_MESSAGE_TIMEOUTS Timeouts
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgSetMessageTimeouts);
+    RtlCopyMemory(&msg->User.SetMessageTimeouts.Timeouts, Timeouts, sizeof(*Timeouts));
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.SetMessageTimeouts.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphAcquireDriverUnloadProtection(
+    _Out_opt_ PLONG PreviousCount,
+    _Out_opt_ PLONG ClientPreviousCount
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    if (PreviousCount)
+        *PreviousCount = 0;
+
+    if (ClientPreviousCount)
+        *ClientPreviousCount = 0;
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgAcquireDriverUnloadProtection);
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.AcquireDriverUnloadProtection.Status;
+
+        if (NT_SUCCESS(status))
+        {
+            if (PreviousCount)
+                *PreviousCount = msg->User.AcquireDriverUnloadProtection.PreviousCount;
+
+            if (ClientPreviousCount)
+                *ClientPreviousCount = msg->User.AcquireDriverUnloadProtection.ClientPreviousCount;
+        }
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphReleaseDriverUnloadProtection(
+    _Out_opt_ PLONG PreviousCount,
+    _Out_opt_ PLONG ClientPreviousCount
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgReleaseDriverUnloadProtection);
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.ReleaseDriverUnloadProtection.Status;
+
+        if (NT_SUCCESS(status))
+        {
+            if (PreviousCount)
+                *PreviousCount = msg->User.ReleaseDriverUnloadProtection.PreviousCount;
+
+            if (ClientPreviousCount)
+                *ClientPreviousCount = msg->User.ReleaseDriverUnloadProtection.ClientPreviousCount;
+        }
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphGetConnectedClientCount(
+    _Out_ PULONG Count
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgGetConnectedClientCount);
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        *Count = msg->User.GetConnectedClientCount.Count;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphActivateDynData(
+    _In_ PBYTE DynData,
+    _In_ ULONG DynDataLength,
+    _In_ PBYTE Signature,
+    _In_ ULONG SignatureLength
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgActivateDynData);
+    msg->User.ActivateDynData.DynData = DynData;
+    msg->User.ActivateDynData.DynDataLength = DynDataLength;
+    msg->User.ActivateDynData.Signature = Signature;
+    msg->User.ActivateDynData.SignatureLength = SignatureLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.ActivateDynData.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphRequestSessionAccessToken(
+    _Out_ PKPH_SESSION_ACCESS_TOKEN AccessToken,
+    _In_ PLARGE_INTEGER Expiry,
+    _In_ ULONG Privileges,
+    _In_ LONG Uses
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgRequestSessionAccessToken);
+    msg->User.RequestSessionAccessToken.Expiry = *Expiry;
+    msg->User.RequestSessionAccessToken.Privileges = Privileges;
+    msg->User.RequestSessionAccessToken.Uses = Uses;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        RtlCopyMemory(AccessToken,
+                      &msg->User.RequestSessionAccessToken.AccessToken,
+                      sizeof(KPH_SESSION_ACCESS_TOKEN));
+
+        status = msg->User.RequestSessionAccessToken.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphAssignProcessSessionToken(
+    _In_ HANDLE ProcessHandle,
+    _In_ PBYTE Signature,
+    _In_ ULONG SignatureLength
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgAssignProcessSessionToken);
+    msg->User.AssignProcessSessionToken.ProcessHandle = ProcessHandle;
+    msg->User.AssignProcessSessionToken.Signature = Signature;
+    msg->User.AssignProcessSessionToken.SignatureLength = SignatureLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.AssignProcessSessionToken.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphAssignThreadSessionToken(
+    _In_ HANDLE ThreadHandle,
+    _In_ PBYTE Signature,
+    _In_ ULONG SignatureLength
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgAssignThreadSessionToken);
+    msg->User.AssignThreadSessionToken.ThreadHandle = ThreadHandle;
+    msg->User.AssignThreadSessionToken.Signature = Signature;
+    msg->User.AssignThreadSessionToken.SignatureLength = SignatureLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.AssignThreadSessionToken.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphGetInformerProcessFilter(
+    _In_ HANDLE ProcessHandle,
+    _Out_ PKPH_INFORMER_SETTINGS Filter
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgGetInformerProcessFilter);
+    msg->User.GetInformerProcessFilter.ProcessHandle = ProcessHandle;
+    msg->User.GetInformerProcessFilter.Filter = Filter;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.GetInformerProcessFilter.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphSetInformerProcessFilter(
+    _In_opt_ HANDLE ProcessHandle,
+    _In_ PKPH_INFORMER_SETTINGS Filter
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgSetInformerProcessFilter);
+    msg->User.SetInformerProcessFilter.ProcessHandle = ProcessHandle;
+    msg->User.SetInformerProcessFilter.Filter = Filter;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.SetInformerProcessFilter.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphStripProtectedProcessMasks(
+    _In_ HANDLE ProcessHandle,
+    _In_ ACCESS_MASK ProcessAllowedMask,
+    _In_ ACCESS_MASK ThreadAllowedMask
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgStripProtectedProcessMasks);
+    msg->User.StripProtectedProcessMasks.ProcessHandle = ProcessHandle;
+    msg->User.StripProtectedProcessMasks.ProcessAllowedMask = ProcessAllowedMask;
+    msg->User.StripProtectedProcessMasks.ThreadAllowedMask = ThreadAllowedMask;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.StripProtectedProcessMasks.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KphQueryVirtualMemory(
+    _In_ HANDLE ProcessHandle,
+    _In_opt_ PVOID BaseAddress,
+    _In_ KPH_MEMORY_INFORMATION_CLASS MemoryInformationClass,
+    _Out_writes_bytes_opt_(MemoryInformationLength) PVOID MemoryInformation,
+    _In_ ULONG MemoryInformationLength,
+    _Out_opt_ PULONG ReturnLength
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgQueryVirtualMemory);
+    msg->User.QueryVirtualMemory.ProcessHandle = ProcessHandle;
+    msg->User.QueryVirtualMemory.BaseAddress = BaseAddress;
+    msg->User.QueryVirtualMemory.MemoryInformationClass = MemoryInformationClass;
+    msg->User.QueryVirtualMemory.MemoryInformation = MemoryInformation;
+    msg->User.QueryVirtualMemory.MemoryInformationLength = MemoryInformationLength;
+    msg->User.QueryVirtualMemory.ReturnLength = ReturnLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.QueryVirtualMemory.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
+}
+
+NTSTATUS KsiQueryHashInformationFile(
+    _In_ HANDLE FileHandle,
+    _Inout_ PKPH_HASH_INFORMATION HashInformation,
+    _In_ ULONG HashInformationLength
+    )
+{
+    NTSTATUS status;
+    PKPH_MESSAGE msg;
+
+    KSI_COMMS_INIT_ASSERT();
+
+    msg = PhAllocateFromFreeList(&KphMessageFreeList);
+    KphMsgInit(msg, KphMsgQueryHashInformationFile);
+    msg->User.QueryHashInformationFile.FileHandle = FileHandle;
+    msg->User.QueryHashInformationFile.HashingInformation = HashInformation;
+    msg->User.QueryHashInformationFile.HashingInformationLength = HashInformationLength;
+    status = KphCommsSendMessage(msg);
+
+    if (NT_SUCCESS(status))
+    {
+        status = msg->User.QueryHashInformationFile.Status;
+    }
+
+    PhFreeToFreeList(&KphMessageFreeList, msg);
+    return status;
 }

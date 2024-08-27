@@ -6,23 +6,24 @@
  * Authors:
  *
  *     wj32    2009-2016
- *     dmex    2018
+ *     dmex    2018-2022
  *
  */
 
 #include <phapp.h>
 #include <procprp.h>
+#include <procprv.h>
 
 NTSTATUS NTAPI PhpOpenProcessTokenForPage(
     _Out_ PHANDLE Handle,
     _In_ ACCESS_MASK DesiredAccess,
-    _In_opt_ PVOID Context
+    _In_ PVOID Context
     )
 {
     NTSTATUS status;
     HANDLE processHandle;
 
-    if (!Context)
+    if (!PH_IS_REAL_PROCESS_ID(Context))
         return STATUS_UNSUCCESSFUL;
 
     if (!NT_SUCCESS(status = PhOpenProcess(
@@ -34,15 +35,22 @@ NTSTATUS NTAPI PhpOpenProcessTokenForPage(
 
     if (!NT_SUCCESS(status = PhOpenProcessToken(
         processHandle,
-        DesiredAccess | TOKEN_READ | TOKEN_ADJUST_DEFAULT | READ_CONTROL, // HACK: Add extra access_masks for querying default token. (dmex)
+        DesiredAccess | TOKEN_READ | TOKEN_ADJUST_DEFAULT | READ_CONTROL,
         Handle
         )))
     {
-        status = PhOpenProcessToken(
+        if (!NT_SUCCESS(status = PhOpenProcessToken(
             processHandle,
-            DesiredAccess,
+            DesiredAccess | TOKEN_READ | TOKEN_ADJUST_DEFAULT,
             Handle
-            );
+            )))
+        {
+            status = PhOpenProcessToken(
+                processHandle,
+                DesiredAccess,
+                Handle
+                );
+        }
     }
 
     NtClose(processHandle);

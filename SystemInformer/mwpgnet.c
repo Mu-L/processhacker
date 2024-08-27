@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2009-2016
- *     dmex    2017
+ *     dmex    2017-2023
  *
  */
 
@@ -36,10 +36,10 @@ static BOOLEAN NetworkTreeListLoaded = FALSE;
 static PPH_TN_FILTER_ENTRY NetworkFilterEntry = NULL;
 
 BOOLEAN PhMwpNetworkPageCallback(
-    _In_ struct _PH_MAIN_TAB_PAGE *Page,
+    _In_ PPH_MAIN_TAB_PAGE Page,
     _In_ PH_MAIN_TAB_PAGE_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2
     )
 {
     switch (Message)
@@ -86,7 +86,7 @@ BOOLEAN PhMwpNetworkPageCallback(
         return TRUE;
     case MainTabPageSelected:
         {
-            BOOLEAN selected = (BOOLEAN)Parameter1;
+            BOOLEAN selected = (BOOLEAN)PtrToUlong(Parameter1);
 
             if (selected)
             {
@@ -113,9 +113,6 @@ BOOLEAN PhMwpNetworkPageCallback(
             ULONG startIndex;
             PPH_EMENU_ITEM menuItem;
 
-            if (!menuInfo)
-                break;
-
             menu = menuInfo->Menu;
             startIndex = menuInfo->StartIndex;
 
@@ -141,9 +138,6 @@ BOOLEAN PhMwpNetworkPageCallback(
         {
             PPH_MAIN_TAB_PAGE_EXPORT_CONTENT exportContent = Parameter1;
 
-            if (!exportContent)
-                break;
-
             PhWriteNetworkList(exportContent->FileStream, exportContent->Mode);
         }
         return TRUE;
@@ -156,7 +150,7 @@ BOOLEAN PhMwpNetworkPageCallback(
         break;
     case MainTabPageUpdateAutomaticallyChanged:
         {
-            BOOLEAN updateAutomatically = (BOOLEAN)Parameter1;
+            BOOLEAN updateAutomatically = (BOOLEAN)PtrToUlong(Parameter1);
 
             if (PhMwpNetworkPage->Selected)
                 PhSetEnabledProvider(&PhMwpNetworkProviderRegistration, updateAutomatically);
@@ -331,22 +325,19 @@ VOID PhShowNetworkContextMenu(
 }
 
 VOID NTAPI PhMwpNetworkItemAddedHandler(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_NETWORK_ITEM networkItem = (PPH_NETWORK_ITEM)Parameter;
-
-    if (!networkItem)
-        return;
 
     PhReferenceObject(networkItem);
     PhPushProviderEventQueue(&PhMwpNetworkEventQueue, ProviderAddedEvent, Parameter, PhGetRunIdProvider(&PhMwpNetworkProviderRegistration));
 }
 
 VOID NTAPI PhMwpNetworkItemModifiedHandler(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_NETWORK_ITEM networkItem = (PPH_NETWORK_ITEM)Parameter;
@@ -355,8 +346,8 @@ VOID NTAPI PhMwpNetworkItemModifiedHandler(
 }
 
 VOID NTAPI PhMwpNetworkItemRemovedHandler(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_NETWORK_ITEM networkItem = (PPH_NETWORK_ITEM)Parameter;
@@ -365,8 +356,8 @@ VOID NTAPI PhMwpNetworkItemRemovedHandler(
 }
 
 VOID NTAPI PhMwpNetworkItemsUpdatedHandler(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     ProcessHacker_Invoke(PhMwpOnNetworkItemsUpdated, PhGetRunIdProvider(&PhMwpNetworkProviderRegistration));

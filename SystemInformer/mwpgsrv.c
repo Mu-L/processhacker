@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2009-2016
- *     dmex    2017-2022
+ *     dmex    2017-2023
  *
  */
 
@@ -37,10 +37,10 @@ static PPH_TN_FILTER_ENTRY DriverFilterEntry = NULL;
 static PPH_TN_FILTER_ENTRY MicrosoftFilterEntry = NULL;
 
 BOOLEAN PhMwpServicesPageCallback(
-    _In_ struct _PH_MAIN_TAB_PAGE *Page,
+    _In_ PPH_MAIN_TAB_PAGE Page,
     _In_ PH_MAIN_TAB_PAGE_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2
     )
 {
     switch (Message)
@@ -87,7 +87,7 @@ BOOLEAN PhMwpServicesPageCallback(
         return TRUE;
     case MainTabPageSelected:
         {
-            BOOLEAN selected = (BOOLEAN)Parameter1;
+            BOOLEAN selected = (BOOLEAN)PtrToUlong(Parameter1);
 
             if (selected)
                 PhMwpNeedServiceTreeList();
@@ -99,9 +99,6 @@ BOOLEAN PhMwpServicesPageCallback(
             PPH_EMENU menu;
             ULONG startIndex;
             PPH_EMENU_ITEM menuItem;
-
-            if (!menuInfo)
-                break;
 
             menu = menuInfo->Menu;
             startIndex = menuInfo->StartIndex;
@@ -133,8 +130,7 @@ BOOLEAN PhMwpServicesPageCallback(
         {
             PPH_MAIN_TAB_PAGE_EXPORT_CONTENT exportContent = Parameter1;
 
-            if (exportContent)
-                PhWriteServiceList(exportContent->FileStream, exportContent->Mode);
+            PhWriteServiceList(exportContent->FileStream, exportContent->Mode);
         }
         return TRUE;
     case MainTabPageFontChanged:
@@ -212,7 +208,7 @@ BOOLEAN PhMwpDriverServiceTreeFilter(
 {
     PPH_SERVICE_NODE serviceNode = (PPH_SERVICE_NODE)Node;
 
-    if (serviceNode->ServiceItem->Type & SERVICE_DRIVER)
+    if (FlagOn(serviceNode->ServiceItem->Type, SERVICE_DRIVER))
         return FALSE;
 
     return TRUE;
@@ -245,7 +241,7 @@ BOOLEAN PhMwpMicrosoftServiceTreeFilter(
             {
                 static PH_STRINGREF microsoftCompanyNameSr = PH_STRINGREF_INIT(L"Microsoft");
 
-                // Note: This is how msconfig determines default services. (dmex) 
+                // Note: This is how msconfig determines default services. (dmex)
                 if (versionInfo.CompanyName && PhStartsWithStringRef(&versionInfo.CompanyName->sr, &microsoftCompanyNameSr, TRUE))
                 {
                     PhDeleteImageVersionInfo(&versionInfo);
@@ -256,7 +252,6 @@ BOOLEAN PhMwpMicrosoftServiceTreeFilter(
             }
         }
     }
-
 
     return TRUE;
 }
@@ -279,6 +274,10 @@ VOID PhMwpInitializeServiceMenu(
     else
     {
         PhSetFlagsAllEMenuItems(Menu, PH_EMENU_DISABLED, PH_EMENU_DISABLED);
+        PhEnableEMenuItem(Menu, ID_SERVICE_START, TRUE);
+        PhEnableEMenuItem(Menu, ID_SERVICE_CONTINUE, TRUE);
+        PhEnableEMenuItem(Menu, ID_SERVICE_PAUSE, TRUE);
+        PhEnableEMenuItem(Menu, ID_SERVICE_STOP, TRUE);
         PhEnableEMenuItem(Menu, ID_SERVICE_COPY, TRUE);
     }
 
@@ -290,20 +289,16 @@ VOID PhMwpInitializeServiceMenu(
             {
                 PhEnableEMenuItem(Menu, ID_SERVICE_START, FALSE);
                 PhEnableEMenuItem(Menu, ID_SERVICE_CONTINUE, FALSE);
-                PhEnableEMenuItem(Menu, ID_SERVICE_PAUSE,
-                    Services[0]->ControlsAccepted & SERVICE_ACCEPT_PAUSE_CONTINUE);
-                PhEnableEMenuItem(Menu, ID_SERVICE_STOP,
-                    Services[0]->ControlsAccepted & SERVICE_ACCEPT_STOP);
+                PhEnableEMenuItem(Menu, ID_SERVICE_PAUSE, FlagOn(Services[0]->ControlsAccepted, SERVICE_ACCEPT_PAUSE_CONTINUE));
+                PhEnableEMenuItem(Menu, ID_SERVICE_STOP, FlagOn(Services[0]->ControlsAccepted, SERVICE_ACCEPT_STOP));
             }
             break;
         case SERVICE_PAUSED:
             {
                 PhEnableEMenuItem(Menu, ID_SERVICE_START, FALSE);
-                PhEnableEMenuItem(Menu, ID_SERVICE_CONTINUE,
-                    Services[0]->ControlsAccepted & SERVICE_ACCEPT_PAUSE_CONTINUE);
+                PhEnableEMenuItem(Menu, ID_SERVICE_CONTINUE, FlagOn(Services[0]->ControlsAccepted, SERVICE_ACCEPT_PAUSE_CONTINUE));
                 PhEnableEMenuItem(Menu, ID_SERVICE_PAUSE, FALSE);
-                PhEnableEMenuItem(Menu, ID_SERVICE_STOP,
-                    Services[0]->ControlsAccepted & SERVICE_ACCEPT_STOP);
+                PhEnableEMenuItem(Menu, ID_SERVICE_STOP, FlagOn(Services[0]->ControlsAccepted, SERVICE_ACCEPT_STOP));
             }
             break;
         case SERVICE_STOPPED:
@@ -326,7 +321,7 @@ VOID PhMwpInitializeServiceMenu(
             break;
         }
 
-        if (!(Services[0]->ControlsAccepted & SERVICE_ACCEPT_PAUSE_CONTINUE))
+        if (!FlagOn(Services[0]->ControlsAccepted, SERVICE_ACCEPT_PAUSE_CONTINUE))
         {
             PPH_EMENU_ITEM item;
 
@@ -409,29 +404,23 @@ VOID PhShowServiceContextMenu(
 }
 
 VOID NTAPI PhMwpServiceAddedHandler(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_SERVICE_ITEM serviceItem = (PPH_SERVICE_ITEM)Parameter;
-
-    if (!serviceItem)
-        return;
 
     PhReferenceObject(serviceItem);
     PhPushProviderEventQueue(&PhMwpServiceEventQueue, ProviderAddedEvent, Parameter, PhGetRunIdProvider(&PhMwpServiceProviderRegistration));
 }
 
 VOID NTAPI PhMwpServiceModifiedHandler(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_SERVICE_MODIFIED_DATA serviceModifiedData = (PPH_SERVICE_MODIFIED_DATA)Parameter;
     PPH_SERVICE_MODIFIED_DATA copy;
-
-    if (!serviceModifiedData)
-        return;
 
     copy = PhAllocateCopy(serviceModifiedData, sizeof(PH_SERVICE_MODIFIED_DATA));
 
@@ -439,8 +428,8 @@ VOID NTAPI PhMwpServiceModifiedHandler(
 }
 
 VOID NTAPI PhMwpServiceRemovedHandler(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     PPH_SERVICE_ITEM serviceItem = (PPH_SERVICE_ITEM)Parameter;
@@ -449,8 +438,8 @@ VOID NTAPI PhMwpServiceRemovedHandler(
 }
 
 VOID NTAPI PhMwpServicesUpdatedHandler(
-    _In_opt_ PVOID Parameter,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter,
+    _In_ PVOID Context
     )
 {
     ProcessHacker_Invoke(PhMwpOnServicesUpdated, PhGetRunIdProvider(&PhMwpServiceProviderRegistration));
@@ -470,7 +459,7 @@ VOID PhMwpOnServiceAdded(
     {
         PhLogServiceEntry(PH_LOG_ENTRY_SERVICE_CREATE, ServiceItem->Name, ServiceItem->DisplayName);
 
-        if (PhMwpNotifyIconNotifyMask & PH_NOTIFY_SERVICE_CREATE)
+        if (FlagOn(PhMwpNotifyIconNotifyMask, PH_NOTIFY_SERVICE_CREATE))
         {
             if (!PhPluginsEnabled || !PhMwpPluginNotifyEvent(PH_NOTIFY_SERVICE_CREATE, ServiceItem))
             {
@@ -512,7 +501,7 @@ VOID PhMwpOnServiceModified(
     PH_SERVICE_CHANGE serviceChange;
     UCHAR logEntryType;
 
-    PhUpdateServiceNode(PhFindServiceNode(ServiceModifiedData->Service));
+    PhUpdateServiceNode(PhFindServiceNode(ServiceModifiedData->ServiceItem));
 
     serviceChange = PhGetServiceChange(ServiceModifiedData);
 
@@ -530,22 +519,24 @@ VOID PhMwpOnServiceModified(
     case ServicePaused:
         logEntryType = PH_LOG_ENTRY_SERVICE_PAUSE;
         break;
+    case ServiceModified:
+        logEntryType = PH_LOG_ENTRY_SERVICE_MODIFIED;
+        break;
     default:
-        // HACK: We can't use JustProcessed here, so use the RunId instead. (dmex)
-        logEntryType = (RunId && RunId > 2) ? PH_LOG_ENTRY_SERVICE_MODIFIED : 0;
+        logEntryType = 0;
         break;
     }
 
     if (logEntryType != 0)
-        PhLogServiceEntry(logEntryType, ServiceModifiedData->Service->Name, ServiceModifiedData->Service->DisplayName);
+        PhLogServiceEntry(logEntryType, ServiceModifiedData->ServiceItem->Name, ServiceModifiedData->ServiceItem->DisplayName);
 
-    if (PhMwpNotifyIconNotifyMask & (PH_NOTIFY_SERVICE_START | PH_NOTIFY_SERVICE_STOP | PH_NOTIFY_SERVICE_MODIFIED))
+    if (FlagOn(PhMwpNotifyIconNotifyMask, PH_NOTIFY_SERVICE_START | PH_NOTIFY_SERVICE_STOP | PH_NOTIFY_SERVICE_MODIFIED))
     {
         PPH_SERVICE_ITEM serviceItem;
 
-        serviceItem = ServiceModifiedData->Service;
+        serviceItem = ServiceModifiedData->ServiceItem;
 
-        if (serviceChange == ServiceStarted && (PhMwpNotifyIconNotifyMask & PH_NOTIFY_SERVICE_START))
+        if (serviceChange == ServiceStarted && FlagOn(PhMwpNotifyIconNotifyMask, PH_NOTIFY_SERVICE_START))
         {
             if (!PhPluginsEnabled || !PhMwpPluginNotifyEvent(PH_NOTIFY_SERVICE_START, serviceItem))
             {
@@ -574,7 +565,7 @@ VOID PhMwpOnServiceModified(
                 }
             }
         }
-        else if (serviceChange == ServiceStopped && (PhMwpNotifyIconNotifyMask & PH_NOTIFY_SERVICE_STOP))
+        else if (serviceChange == ServiceStopped && FlagOn(PhMwpNotifyIconNotifyMask, PH_NOTIFY_SERVICE_STOP))
         {
             if (!PhPluginsEnabled || !PhMwpPluginNotifyEvent(PH_NOTIFY_SERVICE_STOP, serviceItem))
             {
@@ -603,7 +594,7 @@ VOID PhMwpOnServiceModified(
                 }
             }
         }
-        else if (serviceChange == -1 && PhMwpNotifyIconNotifyMask & PH_NOTIFY_SERVICE_MODIFIED && (RunId && RunId > 2))
+        else if (serviceChange == ServiceModified && FlagOn(PhMwpNotifyIconNotifyMask, PH_NOTIFY_SERVICE_MODIFIED))
         {
             if (!PhPluginsEnabled || !PhMwpPluginNotifyEvent(PH_NOTIFY_SERVICE_MODIFIED, serviceItem))
             {
@@ -633,6 +624,8 @@ VOID PhMwpOnServiceModified(
             }
         }
     }
+
+    PhFree(ServiceModifiedData);
 }
 
 VOID PhMwpOnServiceRemoved(
@@ -641,7 +634,7 @@ VOID PhMwpOnServiceRemoved(
 {
     PhLogServiceEntry(PH_LOG_ENTRY_SERVICE_DELETE, ServiceItem->Name, ServiceItem->DisplayName);
 
-    if (PhMwpNotifyIconNotifyMask & PH_NOTIFY_SERVICE_CREATE)
+    if (FlagOn(PhMwpNotifyIconNotifyMask, PH_NOTIFY_SERVICE_DELETE))
     {
         if (!PhPluginsEnabled || !PhMwpPluginNotifyEvent(PH_NOTIFY_SERVICE_DELETE, ServiceItem))
         {

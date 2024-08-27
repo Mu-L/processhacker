@@ -6,408 +6,380 @@
  * Authors:
  *
  *     wj32    2010-2016
+ *     jxy-s   2022-2024
  *
  */
 
 #include <kph.h>
 
-#ifdef ALLOC_PRAGMA
-#pragma alloc_text(PAGE, KphCopyVirtualMemory)
-#pragma alloc_text(PAGE, KpiReadVirtualMemoryUnsafe)
-#endif
+#include <trace.h>
 
-#define KPH_STACK_COPY_BYTES 0x200
-#define KPH_POOL_COPY_BYTES 0x10000
-#define KPH_MAPPED_COPY_PAGES 14
-#define KPH_POOL_COPY_THRESHOLD 0x3ff
-
-ULONG KphpGetCopyExceptionInfo(
-    _In_ PEXCEPTION_POINTERS ExceptionInfo,
-    _Out_ PBOOLEAN HaveBadAddress,
-    _Out_ PULONG_PTR BadAddress
+/**
+ * \brief Queries information on mappings for a given section object.
+ *
+ * \param[in] SectionObject The section object to query the info of.
+ * \param[out] SectionInformation Populated with the information. This storage
+ * must be located in non-paged system-space memory.
+ * \param[in] SectionInformationLength Length of the section information.
+ * \param[out] ReturnLength Set to the number of bytes written or the required
+ * number of bytes if the input length is insufficient.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphpQuerySectionMappings(
+    _In_ PVOID SectionObject,
+    _Out_writes_bytes_opt_(SectionInformationLength) PVOID SectionInformation,
+    _In_ ULONG SectionInformationLength,
+    _Out_ PULONG ReturnLength
     )
 {
-    PEXCEPTION_RECORD exceptionRecord;
+    NTSTATUS status;
+    PKPH_DYN dyn;
+    ULONG returnLength;
+    PVOID controlArea;
+    PLIST_ENTRY listHead;
+    PKPH_SECTION_MAPPINGS_INFORMATION info;
+    PEX_SPIN_LOCK lock;
+    KIRQL oldIrql;
 
-    *HaveBadAddress = FALSE;
-    *BadAddress = 0;
-    exceptionRecord = ExceptionInfo->ExceptionRecord;
+    NPAGED_CODE_DISPATCH_MAX();
 
-    if ((exceptionRecord->ExceptionCode == STATUS_ACCESS_VIOLATION) ||
-        (exceptionRecord->ExceptionCode == STATUS_GUARD_PAGE_VIOLATION) ||
-        (exceptionRecord->ExceptionCode == STATUS_IN_PAGE_ERROR))
+    lock = NULL;
+    oldIrql = 0;
+    returnLength = 0;
+
+    dyn = KphReferenceDynData();
+
+    if (!dyn ||
+        (dyn->MmSectionControlArea == ULONG_MAX) ||
+        (dyn->MmControlAreaListHead == ULONG_MAX) ||
+        (dyn->MmControlAreaLock == ULONG_MAX))
     {
-        if (exceptionRecord->NumberParameters > 1)
+        status = STATUS_NOINTERFACE;
+        goto Exit;
+    }
+
+    controlArea = *(PVOID*)Add2Ptr(SectionObject, dyn->MmSectionControlArea);
+    if ((ULONG_PTR)controlArea & 3)
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "Section remote mappings not supported.");
+
+        status = STATUS_NOT_SUPPORTED;
+        goto Exit;
+    }
+
+    controlArea = (PVOID)((ULONG_PTR)controlArea & ~3);
+    if (!controlArea)
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "Section control area is null.");
+
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
+    lock = Add2Ptr(controlArea, dyn->MmControlAreaLock);
+    oldIrql = ExAcquireSpinLockShared(lock);
+
+    listHead = Add2Ptr(controlArea, dyn->MmControlAreaListHead);
+
+    //
+    // Links are shared in a union with AweContext pointer. Ensure that both
+    // links look valid.
+    //
+    if (!listHead->Flink || !listHead->Blink ||
+        (listHead->Flink->Blink != listHead) ||
+        (listHead->Blink->Flink != listHead))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "Section unexpected control area links.");
+
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
+    returnLength = UFIELD_OFFSET(KPH_SECTION_MAPPINGS_INFORMATION, Mappings);
+
+    for (PLIST_ENTRY link = listHead->Flink;
+         link != listHead;
+         link = link->Flink)
+    {
+        status = RtlULongAdd(returnLength,
+                             sizeof(KPH_SECTION_MAP_ENTRY),
+                             &returnLength);
+        if (!NT_SUCCESS(status))
         {
-            /* We have the address. */
-            *HaveBadAddress = TRUE;
-            *BadAddress = exceptionRecord->ExceptionInformation[1];
+            KphTracePrint(TRACE_LEVEL_VERBOSE,
+                          GENERAL,
+                          "RtlULongAdd failed: %!STATUS!",
+                          status);
+
+            goto Exit;
         }
     }
 
-    return EXCEPTION_EXECUTE_HANDLER;
-}
-
-/**
- * Copies memory from one process to another.
- *
- * \param FromProcess The source process.
- * \param FromAddress The source address.
- * \param ToProcess The target process.
- * \param ToAddress The target address.
- * \param BufferLength The number of bytes to copy.
- * \param AccessMode The mode in which to perform access checks.
- * \param ReturnLength A variable which receives the number of bytes copied.
- */
-NTSTATUS KphCopyVirtualMemory(
-    _In_ PEPROCESS FromProcess,
-    _In_ PVOID FromAddress,
-    _In_ PEPROCESS ToProcess,
-    _In_ PVOID ToAddress,
-    _In_ SIZE_T BufferLength,
-    _In_ KPROCESSOR_MODE AccessMode,
-    _Out_ PSIZE_T ReturnLength
-    )
-{
-    UCHAR stackBuffer[KPH_STACK_COPY_BYTES];
-    PVOID buffer;
-    PFN_NUMBER mdlBuffer[(sizeof(MDL) / sizeof(PFN_NUMBER)) + KPH_MAPPED_COPY_PAGES + 1];
-    PMDL mdl = (PMDL)mdlBuffer;
-    PVOID mappedAddress;
-    SIZE_T mappedTotalSize;
-    SIZE_T blockSize;
-    SIZE_T stillToCopy;
-    KAPC_STATE apcState;
-    PVOID sourceAddress;
-    PVOID targetAddress;
-    BOOLEAN doMappedCopy;
-    BOOLEAN pagesLocked;
-    BOOLEAN copyingToTarget = FALSE;
-    BOOLEAN probing = FALSE;
-    BOOLEAN mapping = FALSE;
-    BOOLEAN haveBadAddress;
-    ULONG_PTR badAddress;
-
-    PAGED_CODE();
-
-    sourceAddress = FromAddress;
-    targetAddress = ToAddress;
-
-    // We don't check if buffer == NULL when freeing. If buffer doesn't need to be freed, set to
-    // stackBuffer, not NULL.
-    buffer = stackBuffer;
-
-    mappedTotalSize = (KPH_MAPPED_COPY_PAGES - 2) * PAGE_SIZE;
-
-    if (mappedTotalSize > BufferLength)
-        mappedTotalSize = BufferLength;
-
-    stillToCopy = BufferLength;
-    blockSize = mappedTotalSize;
-
-    while (stillToCopy)
+    if (!SectionInformation || (SectionInformationLength < returnLength))
     {
-        // If we're at the last copy block, copy the remaining bytes instead of the whole block
-        // size.
-        if (blockSize > stillToCopy)
-            blockSize = stillToCopy;
-
-        // Choose the best method based on the number of bytes left to copy.
-        if (blockSize > KPH_POOL_COPY_THRESHOLD)
-        {
-            doMappedCopy = TRUE;
-        }
-        else
-        {
-            doMappedCopy = FALSE;
-
-            if (blockSize <= KPH_STACK_COPY_BYTES)
-            {
-                if (buffer != stackBuffer)
-                    ExFreePoolWithTag(buffer, 'ChpK');
-
-                buffer = stackBuffer;
-            }
-            else
-            {
-                // Don't allocate the buffer if we've done so already. Note that the block size
-                // never increases, so this allocation will always be OK.
-                if (buffer == stackBuffer)
-                {
-                    // Keep trying to allocate a buffer.
-
-                    while (TRUE)
-                    {
-                        buffer = ExAllocatePoolZero(NonPagedPool, blockSize, 'ChpK');
-
-                        // Stop trying if we got a buffer.
-                        if (buffer)
-                            break;
-
-                        blockSize /= 2;
-
-                        // Use the stack buffer if we can.
-                        if (blockSize <= KPH_STACK_COPY_BYTES)
-                        {
-                            buffer = stackBuffer;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Reset state.
-        mappedAddress = NULL;
-        pagesLocked = FALSE;
-        copyingToTarget = FALSE;
-
-        KeStackAttachProcess(FromProcess, &apcState);
-
-        __try
-        {
-            // Probe only if this is the first time.
-            if (sourceAddress == FromAddress && AccessMode != KernelMode)
-            {
-                probing = TRUE;
-                ProbeForRead(sourceAddress, BufferLength, sizeof(UCHAR));
-                probing = FALSE;
-            }
-
-            if (doMappedCopy)
-            {
-                // Initialize the MDL.
-                MmInitializeMdl(mdl, sourceAddress, blockSize);
-                MmProbeAndLockPages(mdl, AccessMode, IoReadAccess);
-                pagesLocked = TRUE;
-
-                // Map the pages.
-                mappedAddress = MmMapLockedPagesSpecifyCache(
-                    mdl,
-                    KernelMode,
-                    MmCached,
-                    NULL,
-                    FALSE,
-                    HighPagePriority
-                    );
-
-                if (!mappedAddress)
-                {
-                    // Insufficient resources; exit.
-                    mapping = TRUE;
-                    ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
-                }
-            }
-            else
-            {
-                memcpy(buffer, sourceAddress, blockSize);
-            }
-
-            KeUnstackDetachProcess(&apcState);
-
-            // Attach to the target process and copy the contents out.
-            KeStackAttachProcess(ToProcess, &apcState);
-
-            // Probe only if this is the first time.
-            if (targetAddress == ToAddress && AccessMode != KernelMode)
-            {
-                probing = TRUE;
-                ProbeForWrite(targetAddress, BufferLength, sizeof(UCHAR));
-                probing = FALSE;
-            }
-
-            // Copy the data.
-            copyingToTarget = TRUE;
-
-            if (doMappedCopy)
-                memcpy(targetAddress, mappedAddress, blockSize);
-            else
-                memcpy(targetAddress, buffer, blockSize);
-        }
-        __except (KphpGetCopyExceptionInfo(
-            GetExceptionInformation(),
-            &haveBadAddress,
-            &badAddress
-            ))
-        {
-            KeUnstackDetachProcess(&apcState);
-
-            // If we mapped the pages, unmap them.
-            if (mappedAddress)
-                MmUnmapLockedPages(mappedAddress, mdl);
-
-            // If we locked the pages, unlock them.
-            if (pagesLocked)
-                MmUnlockPages(mdl);
-
-            // If we allocated pool storage, free it.
-            if (buffer != stackBuffer)
-                ExFreePoolWithTag(buffer, 'ChpK');
-
-            // If we failed when probing or mapping, return the error status.
-            if (probing || mapping)
-                return GetExceptionCode();
-
-            // Determine which copy failed.
-            if (copyingToTarget && haveBadAddress)
-            {
-                *ReturnLength = (SIZE_T)PTR_SUB_OFFSET(badAddress, sourceAddress);
-            }
-            else
-            {
-                *ReturnLength = BufferLength - stillToCopy;
-            }
-
-            return STATUS_PARTIAL_COPY;
-        }
-
-        KeUnstackDetachProcess(&apcState);
-
-        if (doMappedCopy)
-        {
-            MmUnmapLockedPages(mappedAddress, mdl);
-            MmUnlockPages(mdl);
-        }
-
-        stillToCopy -= blockSize;
-        sourceAddress = PTR_ADD_OFFSET(sourceAddress, blockSize);
-        targetAddress = PTR_ADD_OFFSET(targetAddress, blockSize);
+        status = STATUS_BUFFER_TOO_SMALL;
+        goto Exit;
     }
 
-    if (buffer != stackBuffer)
-        ExFreePoolWithTag(buffer, 'ChpK');
+    info = SectionInformation;
 
-    *ReturnLength = BufferLength;
+    info->NumberOfMappings = 0;
 
-    return STATUS_SUCCESS;
+    for (PLIST_ENTRY link = listHead->Flink;
+         link != listHead;
+         link = link->Flink)
+    {
+        PMMVAD vad;
+        PKPH_SECTION_MAP_ENTRY entry;
+
+        vad = CONTAINING_RECORD(link, MMVAD, ViewLinks);
+        entry = &info->Mappings[info->NumberOfMappings++];
+
+        entry->ViewMapType = vad->ViewMapType;
+        entry->ProcessId = NULL;
+        if (vad->ViewMapType == VIEW_MAP_TYPE_PROCESS)
+        {
+            PEPROCESS process;
+
+            process = (PEPROCESS)((ULONG_PTR)vad->VadsProcess & ~VIEW_MAP_TYPE_PROCESS);
+            if (process)
+            {
+                entry->ProcessId = PsGetProcessId(process);
+            }
+        }
+        entry->StartVa = MiGetVadStartAddress(vad);
+        entry->EndVa = MiGetVadEndAddress(vad);
+    }
+
+    status = STATUS_SUCCESS;
+
+Exit:
+
+    *ReturnLength = returnLength;
+
+    if (lock)
+    {
+        ExReleaseSpinLockShared(lock, oldIrql);
+    }
+
+    if (dyn)
+    {
+        KphDereferenceObject(dyn);
+    }
+
+    return status;
 }
 
+PAGED_FILE();
+
 /**
- * Copies process or kernel memory into the current process.
+ * \brief Copies process or kernel memory into the current process.
  *
- * \param ProcessHandle A handle to a process. The handle must have PROCESS_VM_READ access. This
- * parameter may be NULL if \a BaseAddress lies above the user-mode range.
- * \param BaseAddress The address from which memory is to be copied.
- * \param Buffer A buffer which receives the copied memory.
- * \param BufferSize The number of bytes to copy.
- * \param NumberOfBytesRead A variable which receives the number of bytes copied to the buffer.
- * \param Key An access key. If no valid L2 key is provided, the function fails.
- * \param Client The client that initiated the request.
- * \param AccessMode The mode in which to perform access checks.
+ * \param[in] ProcessHandle A handle to a process. The handle must have
+ * PROCESS_VM_READ access. This parameter may be NULL if BaseAddress lies above
+ * the user-mode range.
+ * \param[in] BaseAddress The address from which memory is to be copied.
+ * \param[out] Buffer A buffer which receives the copied memory.
+ * \param[in] BufferSize The number of bytes to copy.
+ * \param[out] NumberOfBytesRead A variable which receives the number of bytes
+ * copied to the buffer.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
  */
-NTSTATUS KpiReadVirtualMemoryUnsafe(
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphReadVirtualMemory(
     _In_opt_ HANDLE ProcessHandle,
     _In_ PVOID BaseAddress,
     _Out_writes_bytes_(BufferSize) PVOID Buffer,
     _In_ SIZE_T BufferSize,
     _Out_opt_ PSIZE_T NumberOfBytesRead,
-    _In_opt_ KPH_KEY Key,
-    _In_ PKPH_CLIENT Client,
     _In_ KPROCESSOR_MODE AccessMode
     )
 {
     NTSTATUS status;
-    PEPROCESS process;
-    SIZE_T numberOfBytesRead = 0;
+    SIZE_T numberOfBytesRead;
+    BOOLEAN releaseModuleLock;
+    PVOID buffer;
+    BYTE stackBuffer[0x200];
 
-    PAGED_CODE();
+    PAGED_CODE_PASSIVE();
 
-    if (!NT_SUCCESS(status = KphValidateKey(KphKeyLevel2, Key, Client, AccessMode)))
-        return status;
+    numberOfBytesRead = 0;
+    releaseModuleLock = FALSE;
+    buffer = NULL;
+
+    if (!Buffer)
+    {
+        status = STATUS_INVALID_PARAMETER_3;
+        goto Exit;
+    }
 
     if (AccessMode != KernelMode)
     {
-        if (
-            (ULONG_PTR)BaseAddress + BufferSize < (ULONG_PTR)BaseAddress ||
-            (ULONG_PTR)Buffer + BufferSize < (ULONG_PTR)Buffer ||
-            (ULONG_PTR)Buffer + BufferSize > (ULONG_PTR)MmHighestUserAddress
-            )
+        if ((Add2Ptr(BaseAddress, BufferSize) < BaseAddress) ||
+            (Add2Ptr(Buffer, BufferSize) < Buffer) ||
+            (Add2Ptr(Buffer, BufferSize) > MmHighestUserAddress))
         {
-            return STATUS_ACCESS_VIOLATION;
+            status = STATUS_ACCESS_VIOLATION;
+            goto Exit;
         }
 
-        if (NumberOfBytesRead)
+        __try
         {
-            __try
+            ProbeOutputBytes(Buffer, BufferSize);
+
+            if (NumberOfBytesRead)
             {
-                ProbeForWrite(NumberOfBytesRead, sizeof(SIZE_T), sizeof(SIZE_T));
+                ProbeOutputType(NumberOfBytesRead, SIZE_T);
             }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                return GetExceptionCode();
-            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            status = GetExceptionCode();
+            goto Exit;
         }
     }
 
-    if (BufferSize != 0)
+    if (!BufferSize)
     {
-        // Select the appropriate copy method.
-        if ((ULONG_PTR)BaseAddress + BufferSize > (ULONG_PTR)MmHighestUserAddress)
+        status = STATUS_SUCCESS;
+        goto Exit;
+    }
+
+    //
+    // Select the appropriate copy method.
+    //
+
+    if (Add2Ptr(BaseAddress, BufferSize) > MmHighestUserAddress)
+    {
+        MM_COPY_ADDRESS copyAddress;
+
+        //
+        // Only permit reading from the system module ranges. Prevent TOCTOU
+        // between checking the system module list and copying.
+        //
+
+        KeEnterCriticalRegion();
+        if (!ExAcquireResourceSharedLite(PsLoadedModuleResource, TRUE))
         {
-            ULONG_PTR page;
-            ULONG_PTR pageEnd;
+            KeLeaveCriticalRegion();
 
-            status = KphValidateAddressForSystemModules(BaseAddress, BufferSize);
+            KphTracePrint(TRACE_LEVEL_VERBOSE,
+                          GENERAL,
+                          "Failed to acquire PsLoadedModuleResource");
 
-            if (!NT_SUCCESS(status))
-                return status;
+            status = STATUS_RESOURCE_NOT_OWNED;
+            goto Exit;
+        }
 
-            // Kernel memory copy (unsafe)
+        releaseModuleLock = TRUE;
 
-            page = (ULONG_PTR)BaseAddress & ~(PAGE_SIZE - 1);
-            pageEnd = ((ULONG_PTR)BaseAddress + BufferSize - 1) & ~(PAGE_SIZE - 1);
+        status = KphValidateAddressForSystemModules(BaseAddress, BufferSize);
+        if (!NT_SUCCESS(status))
+        {
+            KphTracePrint(TRACE_LEVEL_VERBOSE,
+                          GENERAL,
+                          "KphValidateAddressForSystemModules failed: %!STATUS!",
+                          status);
 
-            __try
-            {
-                // This will obviously fail if any of the pages aren't resident.
-                for (; page <= pageEnd; page += PAGE_SIZE)
-                {
-                    if (!MmIsAddressValid((PVOID)page))
-                        ExRaiseStatus(STATUS_ACCESS_VIOLATION);
-                }
+            goto Exit;
+        }
 
-                memcpy(Buffer, BaseAddress, BufferSize);
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                return GetExceptionCode();
-            }
-
-            numberOfBytesRead = BufferSize;
-            status = STATUS_SUCCESS;
+        if (BufferSize <= ARRAYSIZE(stackBuffer))
+        {
+            RtlZeroMemory(stackBuffer, ARRAYSIZE(stackBuffer));
+            buffer = stackBuffer;
         }
         else
         {
-            // User memory copy (safe)
-
-            status = ObReferenceObjectByHandle(
-                ProcessHandle,
-                PROCESS_VM_READ,
-                *PsProcessType,
-                AccessMode,
-                &process,
-                NULL
-                );
-
-            if (NT_SUCCESS(status))
+            buffer = KphAllocateNPaged(BufferSize, KPH_TAG_COPY_VM);
+            if (!buffer)
             {
-                status = KphCopyVirtualMemory(
-                    process,
-                    BaseAddress,
-                    PsGetCurrentProcess(),
-                    Buffer,
-                    BufferSize,
-                    AccessMode,
-                    &numberOfBytesRead
-                    );
-                ObDereferenceObject(process);
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "Failed to allocate copy buffer.");
+
+                status = STATUS_INSUFFICIENT_RESOURCES;
+                goto Exit;
             }
+        }
+
+        copyAddress.VirtualAddress = BaseAddress;
+
+        status = MmCopyMemory(buffer,
+                              copyAddress,
+                              BufferSize,
+                              MM_COPY_MEMORY_VIRTUAL,
+                              &numberOfBytesRead);
+
+        __try
+        {
+            RtlCopyMemory(Buffer, buffer, numberOfBytesRead);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            status = GetExceptionCode();
         }
     }
     else
     {
-        numberOfBytesRead = 0;
-        status = STATUS_SUCCESS;
+        PEPROCESS process;
+
+        if (!ProcessHandle)
+        {
+            status = STATUS_INVALID_PARAMETER_1;
+            goto Exit;
+        }
+
+        status = ObReferenceObjectByHandle(ProcessHandle,
+                                           0,
+                                           *PsProcessType,
+                                           AccessMode,
+                                           &process,
+                                           NULL);
+        if (!NT_SUCCESS(status))
+        {
+            KphTracePrint(TRACE_LEVEL_VERBOSE,
+                          GENERAL,
+                          "ObReferenceObjectByHandle failed: %!STATUS!",
+                          status);
+
+            goto Exit;
+        }
+
+        status = MmCopyVirtualMemory(process,
+                                     BaseAddress,
+                                     PsGetCurrentProcess(),
+                                     Buffer,
+                                     BufferSize,
+                                     AccessMode,
+                                     &numberOfBytesRead);
+
+        ObDereferenceObject(process);
+    }
+
+Exit:
+
+    if (buffer && (buffer != stackBuffer))
+    {
+        KphFree(buffer, KPH_TAG_COPY_VM);
+    }
+
+    if (releaseModuleLock)
+    {
+        ExReleaseResourceLite(PsLoadedModuleResource);
+        KeLeaveCriticalRegion();
     }
 
     if (NumberOfBytesRead)
@@ -420,7 +392,6 @@ NTSTATUS KpiReadVirtualMemoryUnsafe(
             }
             __except (EXCEPTION_EXECUTE_HANDLER)
             {
-                // Don't mess with the status.
                 NOTHING;
             }
         }
@@ -428,6 +399,597 @@ NTSTATUS KpiReadVirtualMemoryUnsafe(
         {
             *NumberOfBytesRead = numberOfBytesRead;
         }
+    }
+
+    return status;
+}
+
+/**
+ * \brief Queries information about a section.
+ *
+ * \param[in] SectionHandle Handle to the query to query information of.
+ * \param[in] SectionInformationClass Classification of information to query.
+ * \param[out] SectionInformation Populated with the requested information.
+ * \param[in] SectionInformationLength Length of the information buffer.
+ * \param[out] ReturnLength Set to the number of bytes written or the required
+ * number of bytes if the input length is insufficient.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphQuerySection(
+    _In_ HANDLE SectionHandle,
+    _In_ KPH_SECTION_INFORMATION_CLASS SectionInformationClass,
+    _Out_writes_bytes_opt_(SectionInformationLength) PVOID SectionInformation,
+    _In_ ULONG SectionInformationLength,
+    _Out_opt_ PULONG ReturnLength,
+    _In_ KPROCESSOR_MODE AccessMode
+    )
+{
+    NTSTATUS status;
+    PVOID sectionObject;
+    ULONG returnLength;
+    PVOID buffer;
+    BYTE stackBuffer[64];
+
+    PAGED_CODE_PASSIVE();
+
+    sectionObject = NULL;
+    returnLength = 0;
+    buffer = NULL;
+
+    if (AccessMode != KernelMode)
+    {
+        __try
+        {
+            if (SectionInformation)
+            {
+                ProbeOutputBytes(SectionInformation, SectionInformationLength);
+            }
+
+            if (ReturnLength)
+            {
+                ProbeOutputType(ReturnLength, ULONG);
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            status = GetExceptionCode();
+            goto Exit;
+        }
+    }
+
+    status = ObReferenceObjectByHandle(SectionHandle,
+                                       0,
+                                       *MmSectionObjectType,
+                                       KernelMode,
+                                       &sectionObject,
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_VERBOSE,
+                      GENERAL,
+                      "ObReferenceObjectByHandle failed: %!STATUS!",
+                      status);
+
+        sectionObject = NULL;
+        goto Exit;
+    }
+
+    switch (SectionInformationClass)
+    {
+        case KphSectionMappingsInformation:
+        {
+            if (SectionInformation)
+            {
+                if (SectionInformationLength <= ARRAYSIZE(stackBuffer))
+                {
+                    RtlZeroMemory(stackBuffer, ARRAYSIZE(stackBuffer));
+                    buffer = stackBuffer;
+                }
+                else
+                {
+                    buffer = KphAllocateNPaged(SectionInformationLength,
+                                               KPH_TAG_SECTION_QUERY);
+                    if (!buffer)
+                    {
+                        status = STATUS_INSUFFICIENT_RESOURCES;
+                        goto Exit;
+                    }
+                }
+            }
+            else
+            {
+                NT_ASSERT(!buffer);
+                SectionInformationLength = 0;
+            }
+
+            status = KphpQuerySectionMappings(sectionObject,
+                                              buffer,
+                                              SectionInformationLength,
+                                              &returnLength);
+            if (!NT_SUCCESS(status))
+            {
+                goto Exit;
+            }
+
+            if (!SectionInformation)
+            {
+                status = STATUS_BUFFER_TOO_SMALL;
+                goto Exit;
+            }
+
+            __try
+            {
+                RtlCopyMemory(SectionInformation, buffer, returnLength);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                status = GetExceptionCode();
+            }
+
+            break;
+        }
+        default:
+        {
+            status = STATUS_INVALID_INFO_CLASS;
+            break;
+        }
+    }
+
+Exit:
+
+    if (ReturnLength)
+    {
+        if (AccessMode != KernelMode)
+        {
+            __try
+            {
+                *ReturnLength = returnLength;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                NOTHING;
+            }
+        }
+        else
+        {
+            *ReturnLength = returnLength;
+        }
+    }
+
+    if (sectionObject)
+    {
+        ObDereferenceObject(sectionObject);
+    }
+
+    if (buffer && (buffer != stackBuffer))
+    {
+        KphFree(buffer, KPH_TAG_SECTION_QUERY);
+    }
+
+    return status;
+}
+
+/**
+ * \brief Queries information about a region of pages within the virtual address
+ * space of the specified process.
+ *
+ * \param[in] ProcessHandle Handle for the process whose context the pages to be
+ * queried resides.
+ * \param[in] BaseAddress The base address of the region of pages to be queried.
+ * \param[in] MemoryInformationClass The memory information to retrieve.
+ * \param[out] MemoryInformation Populated with the requested information.
+ * \param[in] MemoryInformationLength Length of the information buffer.
+ * \param[out] ReturnLength Set to the number of bytes written or the required
+ * number of bytes if the input length is insufficient.
+ * \param[in] AccessMode The mode in which to perform access checks.
+ *
+ * \return Successful or errant status.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSTATUS KphQueryVirtualMemory(
+    _In_ HANDLE ProcessHandle,
+    _In_opt_ PVOID BaseAddress,
+    _In_ KPH_MEMORY_INFORMATION_CLASS MemoryInformationClass,
+    _Out_writes_bytes_opt_(MemoryInformationLength) PVOID MemoryInformation,
+    _In_ ULONG MemoryInformationLength,
+    _Out_opt_ PULONG ReturnLength,
+    _In_ KPROCESSOR_MODE AccessMode
+    )
+{
+    NTSTATUS status;
+    ULONG returnLength;
+    PKPH_THREAD_CONTEXT thread;
+    PUNICODE_STRING mappedFileName;
+
+    PAGED_CODE_PASSIVE();
+
+    returnLength = 0;
+    thread = NULL;
+    mappedFileName = NULL;
+
+    if (AccessMode != KernelMode)
+    {
+        __try
+        {
+            if (MemoryInformation)
+            {
+                ProbeOutputBytes(MemoryInformation, MemoryInformationLength);
+            }
+
+            if (ReturnLength)
+            {
+                ProbeOutputType(ReturnLength, ULONG);
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            status = GetExceptionCode();
+            goto Exit;
+        }
+    }
+
+    switch (MemoryInformationClass)
+    {
+        case KphMemoryImageSection:
+        {
+            SIZE_T length;
+            OBJECT_ATTRIBUTES objectAttributes;
+            IO_STATUS_BLOCK ioStatusBlock;
+            HANDLE fileHandle;
+            HANDLE sectionHandle;
+
+            if (!MemoryInformation ||
+                (MemoryInformationLength < sizeof(HANDLE)))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                goto Exit;
+            }
+
+            //
+            // At this time there is no known way to open the image section
+            // for an address in a process without reopening the file.
+            //
+            // For image mappings the VAD does not retain a reference to the
+            // actual section object but does contain a pointer to the file
+            // object. There are a few exported APIs for creating sections
+            // using a file object directly. And, using the file object in the
+            // VAD, it is possible to map the data section but not the image
+            // section. Internally, MiCreateSection has checks for SEC_IMAGE
+            // when passing in a file object - this check will fail the
+            // operation.
+            //
+            // Unfortunately, to create the image section, we have to query the
+            // file name and open the file again. This introduces two points of
+            // failure that could be avoided if we could create the image
+            // section using the file object. The unfortunate failure mode is
+            // the file being "gone" or otherwise inaccessible. The other cases
+            // might be a resource constraint or a filter interfering with
+            // access to the file.
+            //
+
+            mappedFileName = KphAllocatePaged(MAX_PATH, KPH_TAG_VM_QUERY);
+            if (!mappedFileName)
+            {
+                status = STATUS_INSUFFICIENT_RESOURCES;
+                goto Exit;
+            }
+
+            status = ZwQueryVirtualMemory(ProcessHandle,
+                                          BaseAddress,
+                                          MemoryMappedFilenameInformation,
+                                          mappedFileName,
+                                          MAX_PATH,
+                                          &length);
+            if ((status == STATUS_BUFFER_OVERFLOW) && (length > 0))
+            {
+                KphFree(mappedFileName, KPH_TAG_VM_QUERY);
+                mappedFileName = KphAllocatePaged(length, KPH_TAG_VM_QUERY);
+                if (!mappedFileName)
+                {
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto Exit;
+                }
+
+                status = ZwQueryVirtualMemory(ProcessHandle,
+                                              BaseAddress,
+                                              MemoryMappedFilenameInformation,
+                                              mappedFileName,
+                                              length,
+                                              &length);
+            }
+
+            if (!NT_SUCCESS(status))
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "ZwQueryVirtualMemory failed: %!STATUS!",
+                              status);
+
+                goto Exit;
+            }
+
+            InitializeObjectAttributes(&objectAttributes,
+                                       mappedFileName,
+                                       OBJ_KERNEL_HANDLE,
+                                       NULL,
+                                       NULL);
+
+            status = KphCreateFile(&fileHandle,
+                                   FILE_READ_ACCESS | SYNCHRONIZE,
+                                   &objectAttributes,
+                                   &ioStatusBlock,
+                                   NULL,
+                                   FILE_ATTRIBUTE_NORMAL,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   FILE_OPEN,
+                                   FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                                   NULL,
+                                   0,
+                                   IO_IGNORE_SHARE_ACCESS_CHECK,
+                                   KernelMode);
+            if (!NT_SUCCESS(status))
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "KphCreateFile failed: %!STATUS!",
+                              status);
+
+                goto Exit;
+            }
+
+            InitializeObjectAttributes(&objectAttributes,
+                                       NULL,
+                                       (AccessMode ? 0 : OBJ_KERNEL_HANDLE),
+                                       NULL,
+                                       NULL);
+
+            status = ZwCreateSection(&sectionHandle,
+                                     SECTION_QUERY | SECTION_MAP_READ,
+                                     &objectAttributes,
+                                     NULL,
+                                     PAGE_READONLY,
+                                     SEC_IMAGE_NO_EXECUTE,
+                                     fileHandle);
+
+            ObCloseHandle(fileHandle, KernelMode);
+
+            if (!NT_SUCCESS(status))
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "ZwCreateSection failed: %!STATUS!",
+                              status);
+
+                goto Exit;
+            }
+
+            if (AccessMode != KernelMode)
+            {
+                __try
+                {
+                    *(PHANDLE)MemoryInformation = sectionHandle;
+                    returnLength = sizeof(HANDLE);
+                    status = STATUS_SUCCESS;
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    ObCloseHandle(sectionHandle, UserMode);
+                    status = GetExceptionCode();
+                }
+            }
+            else
+            {
+                *(PHANDLE)MemoryInformation = sectionHandle;
+                returnLength = sizeof(HANDLE);
+                status = STATUS_SUCCESS;
+            }
+
+            break;
+        }
+        case KphMemoryDataSection:
+        {
+            SIZE_T length;
+            KPH_VM_TLS_CREATE_DATA_SECTION tls;
+            PKPH_MEMORY_DATA_SECTION memoryInformation;
+
+            if (!MemoryInformation ||
+                (MemoryInformationLength) < sizeof(KPH_MEMORY_DATA_SECTION))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                goto Exit;
+            }
+
+            //
+            // The data section may be created using the file object in the VAD.
+            // First we have to access the file object from the VAD. We could do
+            // some dynamic data and walk the process VAD ourselves, but there
+            // is a "cleaner" option. Querying for the memory mapped file name
+            // will do the work to enumerate the VAD and will land us in our
+            // mini-filter instance with the file object. This still comes with
+            // possibility of filters interfering with the name query, but at
+            // least we don't have to go through an entire IRP_MJ_CREATE. The
+            // advantage here is we are able to create a section object for a
+            // file that might be "gone" or otherwise inaccessible.
+            //
+
+            thread = KphGetCurrentThreadContext();
+            if (!thread)
+            {
+                status = STATUS_INSUFFICIENT_RESOURCES;
+                goto Exit;
+            }
+
+            RtlZeroMemory(&tls, sizeof(tls));
+
+            tls.AccessMode = AccessMode;
+
+            thread->VmTlsCreateDataSection = &tls;
+
+            status = ZwQueryVirtualMemory(ProcessHandle,
+                                          BaseAddress,
+                                          MemoryMappedFilenameInformation,
+                                          NULL,
+                                          0,
+                                          &length);
+
+            if (thread->VmTlsCreateDataSection)
+            {
+                thread->VmTlsCreateDataSection = NULL;
+
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "VmTlsCreateDataSection was not null! "
+                              "ZwQueryVirtualMemory returned: %!STATUS!",
+                              status);
+
+                status = STATUS_UNEXPECTED_IO_ERROR;
+                goto Exit;
+            }
+
+            status = tls.Status;
+            if (!NT_SUCCESS(status))
+            {
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "KPH_VM_TLS_CREATE_DATA_SECTION status: %!STATUS!",
+                              status);
+
+                goto Exit;
+            }
+
+            memoryInformation = MemoryInformation;
+
+            if (AccessMode != KernelMode)
+            {
+                __try
+                {
+                    memoryInformation->SectionHandle = tls.SectionHandle;
+                    memoryInformation->SectionFileSize = tls.SectionFileSize;
+                    returnLength = sizeof(KPH_MEMORY_DATA_SECTION);
+                    status = STATUS_SUCCESS;
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    ObCloseHandle(tls.SectionHandle, UserMode);
+                    status = GetExceptionCode();
+                }
+            }
+            else
+            {
+                memoryInformation->SectionHandle = tls.SectionHandle;
+                memoryInformation->SectionFileSize = tls.SectionFileSize;
+                returnLength = sizeof(KPH_MEMORY_DATA_SECTION);
+                status = STATUS_SUCCESS;
+            }
+
+            break;
+        }
+        case KphMemoryMappedInformation:
+        {
+            SIZE_T length;
+            KPH_MEMORY_MAPPED_INFORMATION tls;
+            PKPH_MEMORY_MAPPED_INFORMATION memoryInformation;
+
+            if (!MemoryInformation ||
+                (MemoryInformationLength) < sizeof(KPH_MEMORY_MAPPED_INFORMATION))
+            {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+                goto Exit;
+            }
+
+            thread = KphGetCurrentThreadContext();
+            if (!thread)
+            {
+                status = STATUS_INSUFFICIENT_RESOURCES;
+                goto Exit;
+            }
+
+            RtlZeroMemory(&tls, sizeof(tls));
+
+            thread->VmTlsMappedInformation = &tls;
+
+            status = ZwQueryVirtualMemory(ProcessHandle,
+                                          BaseAddress,
+                                          MemoryMappedFilenameInformation,
+                                          NULL,
+                                          0,
+                                          &length);
+
+            if (thread->VmTlsMappedInformation)
+            {
+                thread->VmTlsMappedInformation = NULL;
+
+                KphTracePrint(TRACE_LEVEL_VERBOSE,
+                              GENERAL,
+                              "VmTlsMappedInformation was not null! "
+                              "ZwQueryVirtualMemory returned: %!STATUS!",
+                              status);
+
+                status = STATUS_UNEXPECTED_IO_ERROR;
+                goto Exit;
+            }
+
+            memoryInformation = MemoryInformation;
+
+            __try
+            {
+                memoryInformation->FileObject = tls.FileObject;
+                memoryInformation->SectionObjectPointers = tls.SectionObjectPointers;
+                memoryInformation->DataControlArea = tls.DataControlArea;
+                memoryInformation->SharedCacheMap = tls.SharedCacheMap;
+                memoryInformation->ImageControlArea = tls.ImageControlArea;
+                memoryInformation->UserWritableReferences = tls.UserWritableReferences;
+                returnLength = sizeof(KPH_MEMORY_MAPPED_INFORMATION);
+                status = STATUS_SUCCESS;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                status = GetExceptionCode();
+            }
+
+            break;
+        }
+        default:
+        {
+            status = STATUS_INVALID_INFO_CLASS;
+            break;
+        }
+    }
+
+Exit:
+
+    if (ReturnLength)
+    {
+        if (AccessMode != KernelMode)
+        {
+            __try
+            {
+                *ReturnLength = returnLength;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                NOTHING;
+            }
+        }
+        else
+        {
+            *ReturnLength = returnLength;
+        }
+    }
+
+    if (mappedFileName)
+    {
+        KphFree(mappedFileName, KPH_TAG_VM_QUERY);
+    }
+
+    if (thread)
+    {
+        KphDereferenceObject(thread);
     }
 
     return status;

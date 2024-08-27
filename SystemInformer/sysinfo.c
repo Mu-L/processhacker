@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2011-2016
- *     dmex    2017-2021
+ *     dmex    2017-2023
  *
  */
 
@@ -39,10 +39,10 @@
 #include <sysinfo.h>
 #include <sysinfop.h>
 
-#include <uxtheme.h>
 #include <vssym32.h>
 
 #include <mainwnd.h>
+#include <guisup.h>
 #include <phplug.h>
 #include <phsettings.h>
 
@@ -55,7 +55,7 @@ static RECT MinimumSize;
 static PH_CALLBACK_REGISTRATION ProcessesUpdatedRegistration;
 
 static PPH_LIST SectionList;
-static PH_SYSINFO_PARAMETERS CurrentParameters;
+static PH_SYSINFO_PARAMETERS CurrentParameters = {0};
 static PH_SYSINFO_VIEW_TYPE CurrentView;
 static PPH_SYSINFO_SECTION CurrentSection;
 static HWND ContainerControl;
@@ -202,7 +202,7 @@ INT_PTR CALLBACK PhSipSysInfoDialogProc(
         break;
     case WM_SIZE:
         {
-            PhSipOnSize();
+            PhSipOnSize(hwndDlg, (UINT)wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         }
         break;
     case WM_SIZING:
@@ -240,7 +240,7 @@ INT_PTR CALLBACK PhSipSysInfoDialogProc(
     case WM_CTLCOLORBTN:
     case WM_CTLCOLORDLG:
     case WM_CTLCOLORSTATIC:
-        {    
+        {
             SetBkMode((HDC)wParam, TRANSPARENT);
 
             if (PhEnableThemeSupport)
@@ -266,6 +266,26 @@ INT_PTR CALLBACK PhSipSysInfoDialogProc(
             return (INT_PTR)GetStockBrush(DC_BRUSH);
         }
         break;
+    case WM_DPICHANGED:
+        {
+            PhSipInitializeParameters();
+
+            if (SectionList)
+            {
+                for (ULONG i = 0; i < SectionList->Count; i++)
+                {
+                    PPH_SYSINFO_SECTION section = SectionList->Items[i];
+
+                    if (section->DialogHandle)
+                    {
+                        section->Callback(section, SysInfoDpiChanged, UlongToPtr(LOWORD(wParam)), 0);
+                    }
+                }
+            }
+
+            PhSipOnSize(hwndDlg, 0, 0, 0);
+        }
+        break;
     }
 
     if (uMsg >= SI_MSG_SYSINFO_FIRST && uMsg <= SI_MSG_SYSINFO_LAST)
@@ -287,15 +307,15 @@ INT_PTR CALLBACK PhSipContainerDialogProc(
     {
     case WM_INITDIALOG:
         {
-            if (WindowsVersion >= WINDOWS_8)
-            {
-                // TODO: The container background is drawn before child controls
-                // causing slight flickering when switching between sysinfo panels.
-                // We need to somehow exclude the container background drawing,
-                // setting the container window as composited works well but has
-                // slower drawing and should be considered a temporary workaround. (dmex)
-                PhSetWindowExStyle(hwndDlg, WS_EX_COMPOSITED, WS_EX_COMPOSITED);
-            }
+            //if (WindowsVersion >= WINDOWS_8)
+            //{
+            //    // TODO: The container background is drawn before child controls
+            //    // causing slight flickering when switching between sysinfo panels.
+            //    // We need to somehow exclude the container background drawing,
+            //    // setting the container window as composited works well but has
+            //    // slower drawing and should be considered a temporary workaround. (dmex)
+            //    PhSetWindowExStyle(hwndDlg, WS_EX_COMPOSITED, WS_EX_COMPOSITED);
+            //}
         }
         break;
     case WM_CTLCOLORBTN:
@@ -421,8 +441,8 @@ VOID PhSipOnInitDialog(
     MapDialogRect(PhSipWindow, &MinimumSize);
 
     MinimumSize.right += CurrentParameters.PanelWidth;
-    MinimumSize.right += GetSystemMetrics(SM_CXFRAME) * 2;
-    MinimumSize.bottom += GetSystemMetrics(SM_CYFRAME) * 2;
+    MinimumSize.right += PhGetSystemMetrics(SM_CXFRAME, CurrentParameters.WindowDpi) * 2;
+    MinimumSize.bottom += PhGetSystemMetrics(SM_CYFRAME, CurrentParameters.WindowDpi) * 2;
 
     if (SectionList->Count != 0)
     {
@@ -462,7 +482,7 @@ VOID PhSipOnInitDialog(
     //PhInitializeWindowTheme(PhSipWindow, PhEnableThemeSupport);
     PhInitializeThemeWindowFrame(PhSipWindow);
 
-    PhSipOnSize();
+    PhSipOnSize(PhSipWindow, 0, 0, 0);
     PhSipOnUserMessage(SI_MSG_SYSINFO_UPDATE, 0, 0);
 }
 
@@ -480,6 +500,8 @@ VOID PhSipOnDestroy(
 
     PhSaveWindowPlacementToSetting(L"SysInfoWindowPosition", L"SysInfoWindowSize", PhSipWindow);
     PhSipSaveWindowState();
+
+    PostQuitMessage(0);
 }
 
 VOID PhSipOnNcDestroy(
@@ -501,11 +523,9 @@ VOID PhSipOnNcDestroy(
 
     if (ThemeData)
     {
-        CloseThemeData(ThemeData);
+        PhCloseThemeData(ThemeData);
         ThemeData = NULL;
     }
-
-    PostQuitMessage(0);
 }
 
 BOOLEAN PhSipOnSysCommand(
@@ -528,15 +548,21 @@ BOOLEAN PhSipOnSysCommand(
 }
 
 VOID PhSipOnSize(
-    VOID
+    _In_ HWND WindowHandle,
+    _In_ UINT State,
+    _In_ LONG Width,
+    _In_ LONG Height
     )
 {
-    if (SectionList && SectionList->Count != 0)
+    if (State != SIZE_MINIMIZED)
     {
-        if (CurrentView == SysInfoSummaryView)
-            PhSipLayoutSummaryView();
-        else if (CurrentView == SysInfoSectionView)
-            PhSipLayoutSectionView();
+        if (SectionList && SectionList->Count != 0)
+        {
+            if (CurrentView == SysInfoSummaryView)
+                PhSipLayoutSummaryView();
+            else if (CurrentView == SysInfoSectionView)
+                PhSipLayoutSectionView();
+        }
     }
 }
 
@@ -582,9 +608,9 @@ VOID PhSipOnCommand(
         }
         break;
     case IDC_MAXSCREEN:
-        {                
+        {
             static WINDOWPLACEMENT windowLayout = { sizeof(WINDOWPLACEMENT) };
-            ULONG windowStyle = (ULONG)GetWindowLongPtr(PhSipWindow, GWL_STYLE);
+            LONG_PTR windowStyle = PhGetWindowStyle(PhSipWindow);
 
             if (windowStyle & WS_OVERLAPPEDWINDOW)
             {
@@ -597,8 +623,8 @@ VOID PhSipOnCommand(
                 {
                     PhSetWindowStyle(PhSipWindow, WS_OVERLAPPEDWINDOW, 0);
                     SetWindowPos(
-                        PhSipWindow, 
-                        HWND_TOPMOST, 
+                        PhSipWindow,
+                        HWND_TOPMOST,
                         info.rcMonitor.left,
                         info.rcMonitor.top,
                         (info.rcMonitor.right - info.rcMonitor.left),
@@ -833,7 +859,7 @@ VOID PhSipOnUserMessage(
                     PhSipRestoreSummaryView();
             }
 
-            if (IsIconic(PhSipWindow))
+            if (IsMinimized(PhSipWindow))
                 ShowWindow(PhSipWindow, SW_RESTORE);
             else
                 ShowWindow(PhSipWindow, SW_SHOW);
@@ -906,12 +932,13 @@ VOID PhSiNotifyChangeSettings(
 VOID PhSiSetColorsGraphDrawInfo(
     _Out_ PPH_GRAPH_DRAW_INFO DrawInfo,
     _In_ COLORREF Color1,
-    _In_ COLORREF Color2
+    _In_ COLORREF Color2,
+    _In_ LONG WindowDpi
     )
 {
     static PH_QUEUED_LOCK lock = PH_QUEUED_LOCK_INIT;
-    static ULONG lastDpi = ULONG_MAX;
-    static HFONT iconTitleFont;
+    static LONG lastDpi = ULONG_MAX;
+    static HFONT iconTitleFont = NULL;
 
     // Get the appropriate fonts.
 
@@ -919,20 +946,23 @@ VOID PhSiSetColorsGraphDrawInfo(
     {
         PhAcquireQueuedLockExclusive(&lock);
 
-        if (lastDpi != PhGlobalDpi)
+        if (lastDpi != WindowDpi)
         {
             LOGFONT logFont;
 
-            if (SystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(LOGFONT), &logFont, 0))
+            if (PhGetSystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(LOGFONT), &logFont, WindowDpi))
             {
-                logFont.lfHeight += PhMultiplyDivide(1, PhGlobalDpi, 72);
+                logFont.lfHeight += PhMultiplyDivide(1, WindowDpi, 72);
+
+                HFONT fontHandle = iconTitleFont;
                 iconTitleFont = CreateFontIndirect(&logFont);
+                if (fontHandle) DeleteFont(fontHandle);
             }
 
             if (!iconTitleFont)
                 iconTitleFont = PhApplicationFont;
 
-            lastDpi = PhGlobalDpi;
+            lastDpi = WindowDpi;
         }
 
         DrawInfo->LabelYFont = iconTitleFont;
@@ -980,7 +1010,7 @@ PPH_STRING PhSiSizeLabelYFunction(
 {
     ULONG64 size;
 
-    size = (ULONG64)((DOUBLE)Value * Parameter);
+    size = (ULONG64)(Value * Parameter);
 
     if (size != 0)
     {
@@ -1008,7 +1038,7 @@ PPH_STRING PhSiDoubleLabelYFunction(
 {
     DOUBLE value;
 
-    value = (DOUBLE)((DOUBLE)Value * Parameter);
+    value = (DOUBLE)(Value * Parameter);
 
     if (value != 0)
     {
@@ -1018,6 +1048,25 @@ PPH_STRING PhSiDoubleLabelYFunction(
         PhInitFormatC(&format[1], L'%');
 
         return PhFormat(format, RTL_NUMBER_OF(format), 0);
+    }
+    else
+    {
+        return PhReferenceEmptyString();
+    }
+}
+
+PPH_STRING PhSiUInt64LabelYFunction(
+    _In_ PPH_GRAPH_DRAW_INFO DrawInfo,
+    _In_ ULONG DataIndex,
+    _In_ FLOAT Value,
+    _In_ FLOAT Parameter
+    )
+{
+    ULONG64 value = (ULONG64)Value * (ULONG64)Parameter;
+
+    if (value != 0)
+    {
+        return PhFormatUInt64(value, TRUE);
     }
     else
     {
@@ -1054,12 +1103,15 @@ VOID PhSipInitializeParameters(
     TEXTMETRIC textMetrics;
     HFONT originalFont;
 
+    PhSipDeleteParameters();
+
     memset(&CurrentParameters, 0, sizeof(PH_SYSINFO_PARAMETERS));
 
+    CurrentParameters.WindowDpi = PhGetWindowDpi(PhSipWindow);
     CurrentParameters.SysInfoWindowHandle = PhSipWindow;
     CurrentParameters.ContainerWindowHandle = ContainerControl;
 
-    if (SystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(LOGFONT), &logFont, 0))
+    if (PhGetSystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(LOGFONT), &logFont, CurrentParameters.WindowDpi))
     {
         CurrentParameters.Font = CreateFontIndirect(&logFont);
     }
@@ -1071,10 +1123,10 @@ VOID PhSipInitializeParameters(
 
     hdc = GetDC(PhSipWindow);
 
-    logFont.lfHeight -= PhMultiplyDivide(3, PhGlobalDpi, 72);
+    logFont.lfHeight -= PhMultiplyDivide(3, CurrentParameters.WindowDpi, 72);
     CurrentParameters.MediumFont = CreateFontIndirect(&logFont);
 
-    logFont.lfHeight -= PhMultiplyDivide(3, PhGlobalDpi, 72);
+    logFont.lfHeight -= PhMultiplyDivide(3, CurrentParameters.WindowDpi, 72);
     CurrentParameters.LargeFont = CreateFontIndirect(&logFont);
 
     PhSipUpdateColorParameters();
@@ -1094,14 +1146,14 @@ VOID PhSipInitializeParameters(
     SelectFont(hdc, originalFont);
 
     // Internal padding and other values
-    CurrentParameters.PanelPadding = PH_SCALE_DPI(PH_SYSINFO_PANEL_PADDING);
-    CurrentParameters.WindowPadding = PH_SCALE_DPI(PH_SYSINFO_WINDOW_PADDING);
-    CurrentParameters.GraphPadding = PH_SCALE_DPI(PH_SYSINFO_GRAPH_PADDING);
-    CurrentParameters.SmallGraphWidth = PH_SCALE_DPI(PH_SYSINFO_SMALL_GRAPH_WIDTH);
-    CurrentParameters.SmallGraphPadding = PH_SCALE_DPI(PH_SYSINFO_SMALL_GRAPH_PADDING);
-    CurrentParameters.SeparatorWidth = PH_SCALE_DPI(PH_SYSINFO_SEPARATOR_WIDTH);
-    CurrentParameters.CpuPadding = PH_SCALE_DPI(PH_SYSINFO_CPU_PADDING);
-    CurrentParameters.MemoryPadding = PH_SCALE_DPI(PH_SYSINFO_MEMORY_PADDING);
+    CurrentParameters.PanelPadding = PhGetDpi(PH_SYSINFO_PANEL_PADDING, CurrentParameters.WindowDpi);
+    CurrentParameters.WindowPadding = PhGetDpi(PH_SYSINFO_WINDOW_PADDING, CurrentParameters.WindowDpi);
+    CurrentParameters.GraphPadding = PhGetDpi(PH_SYSINFO_GRAPH_PADDING, CurrentParameters.WindowDpi);
+    CurrentParameters.SmallGraphWidth = PhGetDpi(PH_SYSINFO_SMALL_GRAPH_WIDTH, CurrentParameters.WindowDpi);
+    CurrentParameters.SmallGraphPadding = PhGetDpi(PH_SYSINFO_SMALL_GRAPH_PADDING, CurrentParameters.WindowDpi);
+    CurrentParameters.SeparatorWidth = PhGetDpi(PH_SYSINFO_SEPARATOR_WIDTH, CurrentParameters.WindowDpi);
+    CurrentParameters.CpuPadding = PhGetDpi(PH_SYSINFO_CPU_PADDING, CurrentParameters.WindowDpi);
+    CurrentParameters.MemoryPadding = PhGetDpi(PH_SYSINFO_MEMORY_PADDING, CurrentParameters.WindowDpi);
 
     CurrentParameters.MinimumGraphHeight =
         CurrentParameters.PanelPadding +
@@ -1184,7 +1236,7 @@ PPH_SYSINFO_SECTION PhSipCreateSection(
     Graph_GetOptions(section->GraphHandle, &options);
     options.FadeOutBackColor = CurrentParameters.GraphBackColor;
     options.FadeOutWidth = CurrentParameters.PanelWidth + PH_SYSINFO_FADE_ADD;
-    options.DefaultCursor = LoadCursor(NULL, IDC_HAND);
+    options.DefaultCursor = PhLoadCursor(NULL, IDC_HAND);
     Graph_SetOptions(section->GraphHandle, &options);
     if (PhEnableTooltipSupport) Graph_SetTooltip(section->GraphHandle, TRUE);
 
@@ -1256,7 +1308,7 @@ PPH_SYSINFO_SECTION PhSipCreateInternalSection(
     PH_SYSINFO_SECTION section;
 
     memset(&section, 0, sizeof(PH_SYSINFO_SECTION));
-    PhInitializeStringRef(&section.Name, Name);
+    PhInitializeStringRefLongHint(&section.Name, Name);
     section.Flags = Flags;
     section.Callback = Callback;
 
@@ -1284,7 +1336,7 @@ VOID PhSipDrawRestoreSummaryPanel(
     bufferDc = CreateCompatibleDC(hdc);
     bufferBitmap = CreateCompatibleBitmap(hdc, bufferRect.right, bufferRect.bottom);
     oldBufferBitmap = SelectBitmap(bufferDc, bufferBitmap);
-    
+
     SetBkMode(bufferDc, TRANSPARENT);
 
     if (PhEnableThemeSupport)
@@ -1313,7 +1365,7 @@ VOID PhSipDrawRestoreSummaryPanel(
     {
         if (ThemeHasItemBackground)
         {
-            DrawThemeBackground(
+            PhDrawThemeBackground(
                 ThemeData,
                 bufferDc,
                 TVP_TREEITEM,
@@ -1512,7 +1564,7 @@ VOID PhSipDefaultDrawPanel(
         {
             //if (Section->GraphHot)
             //{
-            //    DrawThemeBackground(
+            //    PhDrawThemeBackground(
             //        ThemeData,
             //        hdc,
             //        TVP_TREEITEM,
@@ -1547,7 +1599,7 @@ VOID PhSipDefaultDrawPanel(
                 themeRect = DrawPanel->Rect;
                 themeRect.left -= 2; // remove left edge
 
-                DrawThemeBackground(
+                PhDrawThemeBackground(
                     ThemeData,
                     hdc,
                     TVP_TREEITEM,
@@ -1559,7 +1611,7 @@ VOID PhSipDefaultDrawPanel(
         }
         else if (Section->HasFocus)
         {
-            DrawThemeBackground(
+            PhDrawThemeBackground(
                 ThemeData,
                 hdc,
                 TVP_TREEITEM,
@@ -1573,21 +1625,21 @@ VOID PhSipDefaultDrawPanel(
     {
         if (CurrentView == SysInfoSectionView)
         {
-            //HBRUSH brush = NULL;
+            HBRUSH brush = NULL;
 
             if (Section->GraphHot || Section->PanelHot || Section->HasFocus)
             {
-                //brush = GetSysColorBrush(COLOR_WINDOW); // TODO: Use a different color
+                brush = GetSysColorBrush(COLOR_HOTLIGHT);
             }
             else if (Section == CurrentSection)
             {
-                //brush = GetSysColorBrush(COLOR_WINDOW);
+                brush = GetSysColorBrush(COLOR_WINDOW);
             }
 
-            //if (brush)
-            //{
-            //    FillRect(hdc, &DrawPanel->Rect, brush);
-            //}
+            if (brush)
+            {
+                FillRect(hdc, &DrawPanel->Rect, brush);
+            }
         }
     }
 
@@ -1668,7 +1720,7 @@ VOID PhSipDefaultDrawPanel(
         textHeight = measureRect.bottom - measureRect.top;
         textWidth = measureRect.right - measureRect.left;
         //dprintf(
-        //    "[rectHeight: %u, rectwidth: %u] [lineHeight: %u, lineWidth: %u] [textHeight: %u, textWidth: %u]\n", 
+        //    "[rectHeight: %u, rectwidth: %u] [lineHeight: %u, lineWidth: %u] [textHeight: %u, textWidth: %u]\n",
         //    rectHeight, rectWidth,
         //    lineHeight, lineWidth,
         //    textHeight, textWidth
@@ -1924,7 +1976,7 @@ VOID PhSipEnterSectionViewInner(
     )
 {
     Section->HasFocus = FALSE;
-    Section->Callback(Section, SysInfoViewChanging, (PVOID)CurrentView, CurrentSection);
+    Section->Callback(Section, SysInfoViewChanging, UlongToPtr(CurrentView), CurrentSection);
 
     if (FromSummaryView)
     {
@@ -1961,7 +2013,7 @@ VOID PhSipRestoreSummaryView(
     {
         section = SectionList->Items[i];
 
-        section->Callback(section, SysInfoViewChanging, (PVOID)CurrentView, NULL);
+        section->Callback(section, SysInfoViewChanging, UlongToPtr(CurrentView), NULL);
 
         PhSetWindowStyle(section->GraphHandle, GC_STYLE_FADEOUT | GC_STYLE_DRAW_PANEL, GC_STYLE_FADEOUT | GC_STYLE_DRAW_PANEL);
         ShowWindow(section->PanelHandle, SW_HIDE);
@@ -2214,7 +2266,7 @@ LRESULT CALLBACK PhSipPanelHookWndProc(
         break;
     case WM_SETCURSOR:
         {
-            SetCursor(LoadCursor(NULL, IDC_HAND));
+            PhSetCursor(PhLoadCursor(NULL, IDC_HAND));
         }
         return TRUE;
     case WM_GETDLGCODE:
@@ -2303,17 +2355,19 @@ VOID PhSipUpdateThemeData(
     VOID
     )
 {
+    LONG dpi = PhGetWindowDpi(PhSipWindow);
+
     if (ThemeData)
     {
-        CloseThemeData(ThemeData);
+        PhCloseThemeData(ThemeData);
         ThemeData = NULL;
     }
 
-    ThemeData = OpenThemeData(PhSipWindow, VSCLASS_TREEVIEW);
+    ThemeData = PhOpenThemeData(PhSipWindow, VSCLASS_TREEVIEW, dpi);
 
     if (ThemeData)
     {
-        ThemeHasItemBackground = !!IsThemePartDefined(ThemeData, TVP_TREEITEM, 0);
+        ThemeHasItemBackground = PhIsThemePartDefined(ThemeData, TVP_TREEITEM, 0);
     }
     else
     {

@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2011
- *     dmex    2015-2021
+ *     dmex    2015-2023
  *
  */
 
@@ -21,6 +21,7 @@ typedef struct _ET_GPU_CONTEXT
     PET_PROCESS_BLOCK Block;
     PH_CALLBACK_REGISTRATION ProcessesUpdatedRegistration;
     BOOLEAN Enabled;
+    LONG WindowDpi;
     //PH_LAYOUT_MANAGER LayoutManager;
 
     HWND GpuGroupBox;
@@ -41,6 +42,13 @@ typedef struct _ET_GPU_CONTEXT
 
 static RECT NormalGraphTextMargin = { 5, 5, 5, 5 };
 static RECT NormalGraphTextPadding = { 3, 3, 3, 3 };
+
+VOID GpuPropUpdateWindowDpi(
+    _In_ PET_GPU_CONTEXT Context
+    )
+{
+    Context->WindowDpi = PhGetWindowDpi(Context->WindowHandle);
+}
 
 VOID GpuPropCreateGraphs(
     _In_ PET_GPU_CONTEXT Context
@@ -154,11 +162,18 @@ VOID GpuPropLayoutGraphs(
     HDWP deferHandle;
     RECT clientRect;
     //RECT panelRect;
-    RECT margin = { PH_SCALE_DPI(13), PH_SCALE_DPI(13), PH_SCALE_DPI(13), PH_SCALE_DPI(13) };
-    RECT innerMargin = { PH_SCALE_DPI(10), PH_SCALE_DPI(20), PH_SCALE_DPI(10), PH_SCALE_DPI(10) };
-    LONG between = PH_SCALE_DPI(3);
+    RECT margin;
+    RECT innerMargin;
+    LONG between;
     ULONG graphWidth;
     ULONG graphHeight;
+
+    margin.left = margin.top = margin.right = margin.bottom = PhGetDpi(13, Context->WindowDpi);
+
+    innerMargin.left = innerMargin.right = innerMargin.bottom = PhGetDpi(10, Context->WindowDpi);
+    innerMargin.top = PhGetDpi(20, Context->WindowDpi);
+
+    between = PhGetDpi(3, Context->WindowDpi);
 
     Context->GpuGraphState.Valid = FALSE;
     Context->GpuGraphState.TooltipIndex = ULONG_MAX;
@@ -280,12 +295,12 @@ VOID GpuPropUpdateGraphs(
 //    if (Context->DetailsHandle)
 //    {
 //        ET_PROCESS_GPU_STATISTICS processGpuStatistics;
-//    
+//
 //        if (Context->Block->ProcessItem->QueryHandle)
 //            EtQueryProcessGpuStatistics(Context->Block->ProcessItem->QueryHandle, &processGpuStatistics);
 //        else
 //            memset(&processGpuStatistics, 0, sizeof(ET_PROCESS_GPU_STATISTICS));
-//    
+//
 //        PhSetDialogItemText(Context->DetailsHandle, IDC_ZDEDICATEDCOMMITTED_V, PhaFormatSize(processGpuStatistics.DedicatedCommitted, ULONG_MAX)->Buffer);
 //        PhSetDialogItemText(Context->DetailsHandle, IDC_ZSHAREDCOMMITTED_V, PhaFormatSize(processGpuStatistics.SharedCommitted, ULONG_MAX)->Buffer);
 //        PhSetDialogItemText(Context->DetailsHandle, IDC_ZTOTALALLOCATED_V, PhaFormatSize(processGpuStatistics.BytesAllocated, ULONG_MAX)->Buffer);
@@ -299,7 +314,7 @@ VOID GpuPropUpdateGraphs(
 //    }
 //}
 
-VOID NTAPI ProcessesUpdatedHandler(
+VOID NTAPI GpuProcessesUpdatedHandler(
     _In_opt_ PVOID Parameter,
     _In_opt_ PVOID Context
     )
@@ -308,7 +323,7 @@ VOID NTAPI ProcessesUpdatedHandler(
 
     if (context && context->WindowHandle && context->Enabled)
     {
-        PostMessage(context->WindowHandle, ET_WM_UPDATE, 0, 0);
+        PostMessage(context->WindowHandle, WM_PH_UPDATE_DIALOG, 0, 0);
     }
 }
 
@@ -360,12 +375,13 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
             PhInitializeGraphState(&context->MemorySharedGraphState);
             PhInitializeGraphState(&context->GpuCommittedGraphState);
 
+            GpuPropUpdateWindowDpi(context);
             GpuPropCreateGraphs(context);
             GpuPropCreatePanel(context);
 
             PhRegisterCallback(
                 PhGetGeneralCallback(GeneralCallbackProcessProviderUpdatedEvent),
-                ProcessesUpdatedHandler,
+                GpuProcessesUpdatedHandler,
                 context,
                 &context->ProcessesUpdatedRegistration
                 );
@@ -399,6 +415,13 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
         {
             if (PhBeginPropPageLayout(hwndDlg, propPageContext))
                 PhEndPropPageLayout(hwndDlg, propPageContext);
+        }
+        break;
+    case WM_DPICHANGED_AFTERPARENT:
+        {
+            GpuPropUpdateWindowDpi(context);
+
+            GpuPropLayoutGraphs(context);
         }
         break;
     case WM_NOTIFY:
@@ -440,8 +463,8 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
 
                     if (header->hwndFrom == context->GpuGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleGraph ? PH_GRAPH_LABEL_MAX_Y : 0);
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorCpuKernel"), 0);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorCpuKernel"), 0, context->WindowDpi);
                         PhGraphStateGetDrawInfo(&context->GpuGraphState, getDrawInfo, context->Block->GpuHistory.Count);
 
                         if (!context->GpuGraphState.Valid)
@@ -452,12 +475,19 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                             {
                                 FLOAT max = 0;
 
-                                for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                if (EtEnableAvxSupport && drawInfo->LineDataCount > 128)
                                 {
-                                    FLOAT data = context->GpuGraphState.Data1[i]; // HACK
+                                    max = PhMaxMemorySingles(context->GpuGraphState.Data1, drawInfo->LineDataCount);
+                                }
+                                else
+                                {
+                                    for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                    {
+                                        FLOAT data = context->GpuGraphState.Data1[i];
 
-                                    if (max < data)
-                                        max = data;
+                                        if (max < data)
+                                            max = data;
+                                    }
                                 }
 
                                 if (max != 0)
@@ -467,6 +497,14 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
 
                                 drawInfo->LabelYFunction = PhSiDoubleLabelYFunction;
                                 drawInfo->LabelYFunctionParameter = max;
+                            }
+                            else
+                            {
+                                if (EtEnableScaleText)
+                                {
+                                    drawInfo->LabelYFunction = PhSiDoubleLabelYFunction;
+                                    drawInfo->LabelYFunctionParameter = 1.0f;
+                                }
                             }
 
                             context->GpuGraphState.Valid = TRUE;
@@ -478,7 +516,7 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                             PH_FORMAT format[2];
 
                             // %.2f%%
-                            PhInitFormatF(&format[0], context->Block->CurrentGpuUsage * 100, 2);
+                            PhInitFormatF(&format[0], context->Block->GpuCurrentUsage * 100, 2);
                             PhInitFormatC(&format[1], L'%');
 
                             PhMoveReference(&context->GpuGraphState.Text, PhFormat(format, RTL_NUMBER_OF(format), 0));
@@ -500,9 +538,9 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                     }
                     else if (header->hwndFrom == context->MemGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleGraph ? PH_GRAPH_LABEL_MAX_Y : 0);
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPhysical"), 0);
-                        PhGraphStateGetDrawInfo(&context->MemoryGraphState, getDrawInfo, context->Block->MemoryHistory.Count);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPhysical"), 0, context->WindowDpi);
+                        PhGraphStateGetDrawInfo(&context->MemoryGraphState, getDrawInfo, context->Block->GpuMemoryHistory.Count);
 
                         if (!context->MemoryGraphState.Valid)
                         {
@@ -513,14 +551,28 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                                 max = (FLOAT)EtGpuDedicatedLimit / PAGE_SIZE;
                             }
 
-                            for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                            if (EtEnableAvxSupport && drawInfo->LineDataCount > 128)
                             {
                                 FLOAT data1;
 
-                                context->MemoryGraphState.Data1[i] = data1 = (FLOAT)PhGetItemCircularBuffer_ULONG(&context->Block->MemoryHistory, i);
+                                PhCopyConvertCircularBufferULONG(&context->Block->GpuMemoryHistory, context->MemoryGraphState.Data1, drawInfo->LineDataCount);
+
+                                data1 = PhMaxMemorySingles(context->MemoryGraphState.Data1, drawInfo->LineDataCount);
 
                                 if (max < data1)
                                     max = data1;
+                            }
+                            else
+                            {
+                                for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                {
+                                    FLOAT data1;
+
+                                    context->MemoryGraphState.Data1[i] = data1 = (FLOAT)PhGetItemCircularBuffer_ULONG(&context->Block->GpuMemoryHistory, i);
+
+                                    if (max < data1)
+                                        max = data1;
+                                }
                             }
 
                             if (max != 0)
@@ -528,7 +580,7 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                                 PhDivideSinglesBySingle(context->MemoryGraphState.Data1, max, drawInfo->LineDataCount);
                             }
 
-                            if (EtEnableScaleGraph)
+                            if (EtEnableScaleText)
                             {
                                 drawInfo->LabelYFunction = PhSiSizeLabelYFunction;
                                 drawInfo->LabelYFunctionParameter = max * PAGE_SIZE;
@@ -536,13 +588,13 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
 
                             context->MemoryGraphState.Valid = TRUE;
                         }
-                        
+
                         if (EtGraphShowText)
                         {
                             HDC hdc;
 
                             PhMoveReference(&context->MemoryGraphState.Text, PhFormatSize(
-                                UInt32x32To64(context->Block->CurrentMemUsage, PAGE_SIZE), ULONG_MAX));
+                                UInt32x32To64(context->Block->GpuCurrentMemUsage, PAGE_SIZE), ULONG_MAX));
 
                             hdc = Graph_GetBufferedContext(context->MemGraphHandle);
                             PhSetGraphText(
@@ -561,9 +613,9 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                     }
                     else if (header->hwndFrom == context->SharedGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleGraph ? PH_GRAPH_LABEL_MAX_Y : 0);
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorIoWrite"), 0);
-                        PhGraphStateGetDrawInfo(&context->MemorySharedGraphState, getDrawInfo, context->Block->MemorySharedHistory.Count);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorIoWrite"), 0, context->WindowDpi);
+                        PhGraphStateGetDrawInfo(&context->MemorySharedGraphState, getDrawInfo, context->Block->GpuMemorySharedHistory.Count);
 
                         if (!context->MemorySharedGraphState.Valid)
                         {
@@ -574,14 +626,28 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                                 max = (FLOAT)EtGpuSharedLimit / PAGE_SIZE;
                             }
 
-                            for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                            if (EtEnableAvxSupport && drawInfo->LineDataCount > 128)
                             {
-                                FLOAT data;
+                                FLOAT data1;
 
-                                context->MemorySharedGraphState.Data1[i] = data = (FLOAT)PhGetItemCircularBuffer_ULONG(&context->Block->MemorySharedHistory, i);
+                                PhCopyConvertCircularBufferULONG(&context->Block->GpuMemorySharedHistory, context->MemorySharedGraphState.Data1, drawInfo->LineDataCount);
 
-                                if (max < data)
-                                    max = data;
+                                data1 = PhMaxMemorySingles(context->MemorySharedGraphState.Data1, drawInfo->LineDataCount);
+
+                                if (max < data1)
+                                    max = data1;
+                            }
+                            else
+                            {
+                                for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                {
+                                    FLOAT data;
+
+                                    context->MemorySharedGraphState.Data1[i] = data = (FLOAT)PhGetItemCircularBuffer_ULONG(&context->Block->GpuMemorySharedHistory, i);
+
+                                    if (max < data)
+                                        max = data;
+                                }
                             }
 
                             if (max != 0)
@@ -589,7 +655,7 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                                 PhDivideSinglesBySingle(context->MemorySharedGraphState.Data1, max, drawInfo->LineDataCount);
                             }
 
-                            if (EtEnableScaleGraph)
+                            if (EtEnableScaleText)
                             {
                                 drawInfo->LabelYFunction = PhSiSizeLabelYFunction;
                                 drawInfo->LabelYFunctionParameter = max * PAGE_SIZE;
@@ -597,13 +663,13 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
 
                             context->MemorySharedGraphState.Valid = TRUE;
                         }
-                        
+
                         if (EtGraphShowText)
                         {
                             HDC hdc;
 
                             PhMoveReference(&context->MemorySharedGraphState.Text, PhFormatSize(
-                                UInt32x32To64(context->Block->CurrentMemSharedUsage, PAGE_SIZE), ULONG_MAX));
+                                UInt32x32To64(context->Block->GpuCurrentMemSharedUsage, PAGE_SIZE), ULONG_MAX));
 
                             hdc = Graph_GetBufferedContext(context->SharedGraphHandle);
                             PhSetGraphText(
@@ -622,8 +688,8 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                     }
                     else if (header->hwndFrom == context->CommittedGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleGraph ? PH_GRAPH_LABEL_MAX_Y : 0);
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPrivate"), 0);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPrivate"), 0, context->WindowDpi);
                         PhGraphStateGetDrawInfo(&context->GpuCommittedGraphState, getDrawInfo, context->Block->GpuCommittedHistory.Count);
 
                         if (!context->GpuCommittedGraphState.Valid)
@@ -636,14 +702,28 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                                 max = 1024 * 1024; // minimum scaling
                             }
 
-                            for (i = 0; i < drawInfo->LineDataCount; i++)
+                            if (EtEnableAvxSupport && drawInfo->LineDataCount > 128)
                             {
                                 FLOAT data1;
 
-                                context->GpuCommittedGraphState.Data1[i] = data1 = (FLOAT)PhGetItemCircularBuffer_ULONG(&context->Block->GpuCommittedHistory, i);
+                                PhCopyConvertCircularBufferULONG(&context->Block->GpuCommittedHistory, context->GpuCommittedGraphState.Data1, drawInfo->LineDataCount);
+
+                                data1 = PhMaxMemorySingles(context->GpuCommittedGraphState.Data1, drawInfo->LineDataCount);
 
                                 if (max < data1)
                                     max = data1;
+                            }
+                            else
+                            {
+                                for (i = 0; i < drawInfo->LineDataCount; i++)
+                                {
+                                    FLOAT data1;
+
+                                    context->GpuCommittedGraphState.Data1[i] = data1 = (FLOAT)PhGetItemCircularBuffer_ULONG(&context->Block->GpuCommittedHistory, i);
+
+                                    if (max < data1)
+                                        max = data1;
+                                }
                             }
 
                             if (max != 0)
@@ -651,7 +731,7 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                                 PhDivideSinglesBySingle(context->GpuCommittedGraphState.Data1, max, drawInfo->LineDataCount);
                             }
 
-                            if (EtEnableScaleGraph)
+                            if (EtEnableScaleText)
                             {
                                 drawInfo->LabelYFunction = PhSiSizeLabelYFunction;
                                 drawInfo->LabelYFunctionParameter = max * PAGE_SIZE;
@@ -665,7 +745,7 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                             HDC hdc;
 
                             PhMoveReference(&context->GpuCommittedGraphState.Text, PhFormatSize(
-                                UInt32x32To64(context->Block->CurrentCommitUsage, PAGE_SIZE), ULONG_MAX));
+                                UInt32x32To64(context->Block->GpuCurrentCommitUsage, PAGE_SIZE), ULONG_MAX));
 
                             hdc = Graph_GetBufferedContext(context->CommittedGraphHandle);
                             PhSetGraphText(
@@ -720,7 +800,7 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                                 PH_FORMAT format[3];
 
                                 gpuMemory = PhGetItemCircularBuffer_ULONG(
-                                    &context->Block->MemoryHistory,
+                                    &context->Block->GpuMemoryHistory,
                                     getTooltipText->Index
                                     );
 
@@ -742,7 +822,7 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
                                 PH_FORMAT format[3];
 
                                 gpuSharedMemory = PhGetItemCircularBuffer_ULONG(
-                                    &context->Block->MemorySharedHistory,
+                                    &context->Block->GpuMemorySharedHistory,
                                     getTooltipText->Index
                                     );
 
@@ -784,7 +864,7 @@ INT_PTR CALLBACK EtpGpuPageDlgProc(
             }
         }
         break;
-    case ET_WM_UPDATE:
+    case WM_PH_UPDATE_DIALOG:
         {
             if (!(processItem->State & PH_PROCESS_ITEM_REMOVED) && context->Enabled)
             {

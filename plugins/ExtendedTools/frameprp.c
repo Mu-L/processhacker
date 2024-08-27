@@ -5,7 +5,7 @@
  *
  * Authors:
  *
- *     dmex    2021-2022
+ *     dmex    2021-2023
  *
  */
 
@@ -18,6 +18,7 @@ typedef struct _ET_FRAMES_CONTEXT
     PET_PROCESS_BLOCK Block;
     PH_CALLBACK_REGISTRATION ProcessesUpdatedRegistration;
     BOOLEAN Enabled;
+    LONG WindowDpi;
 
     HWND FramesPerSecondGroupBox;
     HWND FramesLatencyGroupBox;
@@ -70,6 +71,13 @@ PPH_STRING FramesLabelYFunction(
     {
         return PhReferenceEmptyString();
     }
+}
+
+VOID FramesPropUpdateWindowDpi(
+    _In_ PET_FRAMES_CONTEXT Context
+    )
+{
+    Context->WindowDpi = PhGetWindowDpi(Context->WindowHandle);
 }
 
 VOID FramesPropCreateGraphs(
@@ -204,9 +212,9 @@ VOID FramesPropLayoutGraphs(
     HDWP deferHandle;
     RECT clientRect;
     //RECT panelRect;
-    RECT margin = { PH_SCALE_DPI(13), PH_SCALE_DPI(13), PH_SCALE_DPI(13), PH_SCALE_DPI(13) };
-    RECT innerMargin = { PH_SCALE_DPI(10), PH_SCALE_DPI(20), PH_SCALE_DPI(10), PH_SCALE_DPI(10) };
-    LONG between = PH_SCALE_DPI(3);
+    RECT margin;
+    RECT innerMargin;
+    LONG between;
     ULONG graphWidth;
     ULONG graphHeight;
 
@@ -224,6 +232,13 @@ VOID FramesPropLayoutGraphs(
     Context->FramesDisplayTimeGraphState.TooltipIndex = ULONG_MAX;
     Context->FramesDisplayLatencyGraphState.Valid = FALSE;
     Context->FramesDisplayLatencyGraphState.TooltipIndex = ULONG_MAX;
+
+    margin.left = margin.top = margin.right = margin.bottom = PhGetDpi(13, Context->WindowDpi);
+
+    innerMargin.left = innerMargin.right = innerMargin.bottom = PhGetDpi(10, Context->WindowDpi);
+    innerMargin.top = PhGetDpi(20, Context->WindowDpi);
+
+    between = PhGetDpi(3, Context->WindowDpi);
 
     GetClientRect(Context->WindowHandle, &clientRect);
     graphWidth = clientRect.right - margin.left - margin.right;
@@ -391,7 +406,7 @@ VOID FramesPropUpdatePanel(
     PhInitFormatC(&format[4], L')');
 
     string = PhFormat(format, RTL_NUMBER_OF(format), 0);
-    PhSetWindowText(Context->FramesPerSecondGroupBox, PhGetString(string));
+    PhSetGroupBoxText(Context->FramesPerSecondGroupBox, PhGetString(string));
     PhDereferenceObject(string);
 }
 
@@ -404,7 +419,7 @@ VOID NTAPI FramesProcessesUpdatedHandler(
 
     if (context && context->WindowHandle && context->Enabled)
     {
-        PostMessage(context->WindowHandle, ET_WM_UPDATE, 0, 0);
+        PostMessage(context->WindowHandle, WM_PH_UPDATE_DIALOG, 0, 0);
     }
 }
 
@@ -456,6 +471,7 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
             PhInitializeGraphState(&context->FramesDisplayTimeGraphState);
             PhInitializeGraphState(&context->FramesDisplayLatencyGraphState);
 
+            FramesPropUpdateWindowDpi(context);
             FramesPropCreateGraphs(context);
             FramesPropCreatePanel(context);
 
@@ -503,6 +519,13 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
         {
             if (PhBeginPropPageLayout(hwndDlg, propPageContext))
                 PhEndPropPageLayout(hwndDlg, propPageContext);
+        }
+        break;
+    case WM_DPICHANGED_AFTERPARENT:
+        {
+            FramesPropUpdateWindowDpi(context);
+
+            FramesPropLayoutGraphs(context);
         }
         break;
     case WM_NOTIFY:
@@ -575,8 +598,8 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
 
                     if (header->hwndFrom == context->FramesPerSecondGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | PH_GRAPH_LABEL_MAX_Y;
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorCpuKernel"), 0);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorCpuKernel"), 0, context->WindowDpi);
                         PhGraphStateGetDrawInfo(&context->FramesPerSecondGraphState, getDrawInfo, context->Block->FramesPerSecondHistory.Count);
 
                         if (!context->FramesPerSecondGraphState.Valid)
@@ -585,12 +608,19 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
 
                             PhCopyCircularBuffer_FLOAT(&context->Block->FramesPerSecondHistory, context->FramesPerSecondGraphState.Data1, drawInfo->LineDataCount);
 
-                            for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                            if (EtEnableAvxSupport && drawInfo->LineDataCount > 128)
                             {
-                                FLOAT data = context->FramesPerSecondGraphState.Data1[i]; // HACK
+                                max = PhMaxMemorySingles(context->FramesPerSecondGraphState.Data1, drawInfo->LineDataCount);
+                            }
+                            else
+                            {
+                                for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                {
+                                    FLOAT data = context->FramesPerSecondGraphState.Data1[i];
 
-                                if (max < data)
-                                    max = data;
+                                    if (max < data)
+                                        max = data;
+                                }
                             }
 
                             if (max != 0)
@@ -630,8 +660,8 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
                     }
                     else if (header->hwndFrom == context->FramesLatencyGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | PH_GRAPH_LABEL_MAX_Y;
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPhysical"), 0);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPhysical"), 0, context->WindowDpi);
                         PhGraphStateGetDrawInfo(&context->FramesLatencyGraphState, getDrawInfo, context->Block->FramesLatencyHistory.Count);
 
                         if (!context->FramesLatencyGraphState.Valid)
@@ -640,12 +670,19 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
 
                             PhCopyCircularBuffer_FLOAT(&context->Block->FramesLatencyHistory, context->FramesLatencyGraphState.Data1, drawInfo->LineDataCount);
 
-                            for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                            if (EtEnableAvxSupport && drawInfo->LineDataCount > 128)
                             {
-                                FLOAT data = context->FramesLatencyGraphState.Data1[i]; // HACK
+                                max = PhMaxMemorySingles(context->FramesLatencyGraphState.Data1, drawInfo->LineDataCount);
+                            }
+                            else
+                            {
+                                for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                {
+                                    FLOAT data = context->FramesLatencyGraphState.Data1[i];
 
-                                if (max < data)
-                                    max = data;
+                                    if (max < data)
+                                        max = data;
+                                }
                             }
 
                             if (max != 0)
@@ -657,7 +694,7 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
                             drawInfo->LabelYFunctionParameter = max;
                             context->FramesLatencyGraphState.Valid = TRUE;
                         }
-                        
+
                         if (EtGraphShowText)
                         {
                             HDC hdc;
@@ -685,8 +722,8 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
                     }
                     else if (header->hwndFrom == context->PresentIntervalGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | PH_GRAPH_LABEL_MAX_Y;
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorIoWrite"), 0);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorIoWrite"), 0, context->WindowDpi);
                         PhGraphStateGetDrawInfo(&context->PresentIntervalGraphState, getDrawInfo, context->Block->FramesMsBetweenPresentsHistory.Count);
 
                         if (!context->PresentIntervalGraphState.Valid)
@@ -695,12 +732,19 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
 
                             PhCopyCircularBuffer_FLOAT(&context->Block->FramesMsBetweenPresentsHistory, context->PresentIntervalGraphState.Data1, drawInfo->LineDataCount);
 
-                            for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                            if (EtEnableAvxSupport && drawInfo->LineDataCount > 128)
                             {
-                                FLOAT data = context->PresentIntervalGraphState.Data1[i]; // HACK
+                                max = PhMaxMemorySingles(context->PresentIntervalGraphState.Data1, drawInfo->LineDataCount);
+                            }
+                            else
+                            {
+                                for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                {
+                                    FLOAT data = context->PresentIntervalGraphState.Data1[i];
 
-                                if (max < data)
-                                    max = data;
+                                    if (max < data)
+                                        max = data;
+                                }
                             }
 
                             if (max != 0)
@@ -740,8 +784,8 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
                     }
                     else if (header->hwndFrom == context->PresentDurationGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | PH_GRAPH_LABEL_MAX_Y;
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPrivate"), 0);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPrivate"), 0, context->WindowDpi);
                         PhGraphStateGetDrawInfo(&context->PresentDurationGraphState, getDrawInfo, context->Block->FramesMsInPresentApiHistory.Count);
 
                         if (!context->PresentDurationGraphState.Valid)
@@ -750,12 +794,19 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
 
                             PhCopyCircularBuffer_FLOAT(&context->Block->FramesMsInPresentApiHistory, context->PresentDurationGraphState.Data1, drawInfo->LineDataCount);
 
-                            for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                            if (EtEnableAvxSupport && drawInfo->LineDataCount > 128)
                             {
-                                FLOAT data = context->PresentDurationGraphState.Data1[i]; // HACK
+                                max = PhMaxMemorySingles(context->PresentDurationGraphState.Data1, drawInfo->LineDataCount);
+                            }
+                            else
+                            {
+                                for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                {
+                                    FLOAT data = context->PresentDurationGraphState.Data1[i];
 
-                                if (max < data)
-                                    max = data;
+                                    if (max < data)
+                                        max = data;
+                                }
                             }
 
                             if (max != 0)
@@ -795,8 +846,8 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
                     }
                     else if (header->hwndFrom == context->FramesRenderTimeGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | PH_GRAPH_LABEL_MAX_Y;
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPrivate"), 0);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPrivate"), 0, context->WindowDpi);
                         PhGraphStateGetDrawInfo(&context->FramesRenderTimeGraphState, getDrawInfo, context->Block->FramesMsUntilRenderCompleteHistory.Count);
 
                         if (!context->FramesRenderTimeGraphState.Valid)
@@ -805,12 +856,19 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
 
                             PhCopyCircularBuffer_FLOAT(&context->Block->FramesMsUntilRenderCompleteHistory, context->FramesRenderTimeGraphState.Data1, drawInfo->LineDataCount);
 
-                            for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                            if (EtEnableAvxSupport && drawInfo->LineDataCount > 128)
                             {
-                                FLOAT data = context->FramesRenderTimeGraphState.Data1[i]; // HACK
+                                max = PhMaxMemorySingles(context->FramesRenderTimeGraphState.Data1, drawInfo->LineDataCount);
+                            }
+                            else
+                            {
+                                for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                {
+                                    FLOAT data = context->FramesRenderTimeGraphState.Data1[i];
 
-                                if (max < data)
-                                    max = data;
+                                    if (max < data)
+                                        max = data;
+                                }
                             }
 
                             if (max != 0)
@@ -850,8 +908,8 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
                     }
                     else if (header->hwndFrom == context->FramesDisplayTimeGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | PH_GRAPH_LABEL_MAX_Y;
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorCpuKernel"), 0);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorCpuKernel"), 0, context->WindowDpi);
                         PhGraphStateGetDrawInfo(&context->FramesDisplayTimeGraphState, getDrawInfo, context->Block->FramesMsUntilDisplayedHistory.Count);
 
                         if (!context->FramesDisplayTimeGraphState.Valid)
@@ -860,12 +918,19 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
 
                             PhCopyCircularBuffer_FLOAT(&context->Block->FramesMsUntilDisplayedHistory, context->FramesDisplayTimeGraphState.Data1, drawInfo->LineDataCount);
 
-                            for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                            if (EtEnableAvxSupport && drawInfo->LineDataCount > 128)
                             {
-                                FLOAT data = context->FramesDisplayTimeGraphState.Data1[i]; // HACK
+                                max = PhMaxMemorySingles(context->FramesDisplayTimeGraphState.Data1, drawInfo->LineDataCount);
+                            }
+                            else
+                            {
+                                for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                {
+                                    FLOAT data = context->FramesDisplayTimeGraphState.Data1[i];
 
-                                if (max < data)
-                                    max = data;
+                                    if (max < data)
+                                        max = data;
+                                }
                             }
 
                             if (max != 0)
@@ -905,8 +970,8 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
                     }
                     else if (header->hwndFrom == context->FramesDisplayLatencyGraphHandle)
                     {
-                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | PH_GRAPH_LABEL_MAX_Y;
-                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPhysical"), 0);
+                        drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (EtEnableScaleText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                        PhSiSetColorsGraphDrawInfo(drawInfo, PhGetIntegerSetting(L"ColorPhysical"), 0, context->WindowDpi);
                         PhGraphStateGetDrawInfo(&context->FramesDisplayLatencyGraphState, getDrawInfo, context->Block->FramesDisplayLatencyHistory.Count);
 
                         if (!context->FramesDisplayLatencyGraphState.Valid)
@@ -915,12 +980,19 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
 
                             PhCopyCircularBuffer_FLOAT(&context->Block->FramesDisplayLatencyHistory, context->FramesDisplayLatencyGraphState.Data1, drawInfo->LineDataCount);
 
-                            for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                            if (EtEnableAvxSupport && drawInfo->LineDataCount > 128)
                             {
-                                FLOAT data = context->FramesDisplayLatencyGraphState.Data1[i]; // HACK
+                                max = PhMaxMemorySingles(context->FramesDisplayLatencyGraphState.Data1, drawInfo->LineDataCount);
+                            }
+                            else
+                            {
+                                for (ULONG i = 0; i < drawInfo->LineDataCount; i++)
+                                {
+                                    FLOAT data = context->FramesDisplayLatencyGraphState.Data1[i];
 
-                                if (max < data)
-                                    max = data;
+                                    if (max < data)
+                                        max = data;
+                                }
                             }
 
                             if (max != 0)
@@ -1098,7 +1170,7 @@ INT_PTR CALLBACK EtpFramesPageDlgProc(
             }
         }
         break;
-    case ET_WM_UPDATE:
+    case WM_PH_UPDATE_DIALOG:
         {
             if (!(processItem->State & PH_PROCESS_ITEM_REMOVED) && context->Enabled)
             {

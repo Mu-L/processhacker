@@ -99,9 +99,6 @@
     <ClCompile Include="memprv.c">
       <Filter>System Informer</Filter>
     </ClCompile>
-    <ClCompile Include="memrslt.c">
-      <Filter>System Informer</Filter>
-    </ClCompile>
     <ClCompile Include="memsrch.c">
       <Filter>System Informer</Filter>
     </ClCompile>
@@ -109,9 +106,6 @@
       <Filter>System Informer</Filter>
     </ClCompile>
     <ClCompile Include="netprv.c">
-      <Filter>System Informer</Filter>
-    </ClCompile>
-    <ClCompile Include="netstk.c">
       <Filter>System Informer</Filter>
     </ClCompile>
     <ClCompile Include="notifico.c">
@@ -306,18 +300,45 @@
     <ClCompile Include="heapinfo.c">
       <Filter>System Informer</Filter>
     </ClCompile>
+    <ClCompile Include="prpgvdm.c">
+      <Filter>System Informer</Filter>
+    </ClCompile>
+    <ClCompile Include="delayload.c">
+      <Filter>System Informer</Filter>
+    </ClCompile>
+    <ClCompile Include="admintask.c">
+      <Filter>System Informer</Filter>
+    </ClCompile>
+    <ClCompile Include="ksisup.c">
+      <Filter>System Informer</Filter>
+    </ClCompile>
+    <ClCompile Include="delayhook.c">
+      <Filter>System Informer</Filter>
+    </ClCompile>
+    <ClCompile Include="ksyscall.c">
+      <Filter>System Informer</Filter>
+    </ClCompile>
+    <ClCompile Include="memmod.c">
+      <Filter>System Informer</Filter>
+    </ClCompile>
+    <ClCompile Include="devprv.c">
+      <Filter>System Informer</Filter>
+    </ClCompile>
+    <ClCompile Include="mwpgdev.c">
+      <Filter>System Informer</Filter>
+    </ClCompile>
     <ClCompile Include="notiftoast.cpp">
       <Filter>System Informer</Filter>
     </ClCompile>
-    <ClCompile Include="prpgvdm.c">
+    <ClCompile Include="ksidbg.c">
+      <Filter>System Informer</Filter>
+    </ClCompile>
+    <ClCompile Include="thrdstks.c">
       <Filter>System Informer</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\hidnproc.h">
-      <Filter>Headers</Filter>
-    </ClInclude>
-    <ClInclude Include="include\memsrch.h">
       <Filter>Headers</Filter>
     </ClInclude>
     <ClInclude Include="include\phapp.h">
@@ -458,18 +479,18 @@
     <ClInclude Include="include\notiftoast.h">
       <Filter>Headers</Filter>
     </ClInclude>
+    <ClInclude Include="include\ksisup.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="include\devprv.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="resources\cross.bmp">
-      <Filter>Resources</Filter>
-    </None>
     <None Include="SystemInformer.ico">
       <Filter>Resources</Filter>
     </None>
     <None Include="resources\SystemInformer.png">
-      <Filter>Resources</Filter>
-    </None>
-    <None Include="resources\tick.bmp">
       <Filter>Resources</Filter>
     </None>
     <None Include="resources\application.ico">
@@ -480,6 +501,30 @@
     </None>
     <None Include="SystemInformer.def">
       <Filter>Module</Filter>
+    </None>
+    <None Include="resources\case_sensitive_modern_dark.svg">
+      <Filter>Resources</Filter>
+    </None>
+    <None Include="resources\case_sensitive_modern_light.svg">
+      <Filter>Resources</Filter>
+    </None>
+    <None Include="resources\regex_modern_dark.svg">
+      <Filter>Resources</Filter>
+    </None>
+    <None Include="resources\regex_modern_light.svg">
+      <Filter>Resources</Filter>
+    </None>
+    <None Include="resources\search_modern_dark.svg">
+      <Filter>Resources</Filter>
+    </None>
+    <None Include="resources\search_modern_light.svg">
+      <Filter>Resources</Filter>
+    </None>
+    <None Include="resources\search_stop_modern_dark.svg">
+      <Filter>Resources</Filter>
+    </None>
+    <None Include="resources\search_stop_modern_light.svg">
+      <Filter>Resources</Filter>
     </None>
   </ItemGroup>
   <ItemGroup>
@@ -497,9 +542,6 @@
   </ItemGroup>
   <ItemGroup>
     <Image Include="resources\pin.ico">
-      <Filter>Resources</Filter>
-    </Image>
-    <Image Include="resources\pencil.ico">
       <Filter>Resources</Filter>
     </Image>
     <Image Include="resources\folder.ico">
@@ -523,5 +565,49 @@
     <Image Include="resources\shield.ico">
       <Filter>Resources</Filter>
     </Image>
+    <Image Include="resources\active_search_small.png">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="resources\inactive_search_small.png">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="resources\case_sensitive_modern_dark.png">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="resources\case_sensitive_modern_light.png">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="resources\regex_modern_dark.png">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="resources\regex_modern_light.png">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="resources\search_modern_dark.png">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="resources\search_modern_light.png">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="resources\search_stop_modern_dark.png">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="resources\search_stop_modern_light.png">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="resources\systeminformer-128x128.png">
+      <Filter>Resources</Filter>
+    </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="resources\capslist.txt">
+      <Filter>Resources</Filter>
+    </Text>
+    <Text Include="resources\etwguids.txt">
+      <Filter>Resources</Filter>
+    </Text>
+    <Text Include="resources\pooltag.txt">
+      <Filter>Resources</Filter>
+    </Text>
   </ItemGroup>
 </Project>

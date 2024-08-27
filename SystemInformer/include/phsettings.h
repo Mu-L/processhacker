@@ -1,5 +1,31 @@
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     wj32    2010-2016
+ *     dmex    2017-2023
+ *
+ */
+
 #ifndef PH_SETTINGS_H
 #define PH_SETTINGS_H
+
+_User_set_
+VOID
+NTAPI
+PhAddDefaultSettings(
+    VOID
+    );
+
+_User_set_
+VOID
+NTAPI
+PhUpdateCachedSettings(
+    VOID
+    );
 
 // Cached settings
 
@@ -13,17 +39,18 @@
 
 EXT BOOLEAN PhEnableProcessQueryStage2;
 EXT BOOLEAN PhEnableServiceQueryStage2;
-EXT BOOLEAN PhEnableThemeSupport;
+EXT BOOLEAN PhEnableWindowText;
 EXT BOOLEAN PhEnableTooltipSupport;
 EXT BOOLEAN PhEnableLinuxSubsystemSupport;
 EXT BOOLEAN PhEnableNetworkResolveDoHSupport;
 EXT BOOLEAN PhEnableVersionShortText;
+EXT BOOLEAN PhEnableDeferredLayout;
 
 EXT ULONG PhCsForceNoParent;
 EXT ULONG PhCsHighlightingDuration;
-EXT ULONG PhCsHideOtherUserProcesses;
 EXT ULONG PhCsPropagateCpuUsage;
 EXT ULONG PhCsScrollToNewProcesses;
+EXT ULONG PhCsScrollToRemovedProcesses;
 EXT ULONG PhCsShowCpuBelow001;
 EXT ULONG PhCsUpdateInterval;
 
@@ -49,6 +76,8 @@ EXT ULONG PhCsUseColorHandleFiltered;
 EXT ULONG PhCsColorHandleFiltered;
 EXT ULONG PhCsUseColorImmersiveProcesses;
 EXT ULONG PhCsColorImmersiveProcesses;
+EXT ULONG PhCsUseColorUIAccessProcesses;
+EXT ULONG PhCsColorUIAccessProcesses;
 EXT ULONG PhCsUseColorPicoProcesses;
 EXT ULONG PhCsColorPicoProcesses;
 EXT ULONG PhCsUseColorSuspended;
@@ -92,7 +121,9 @@ EXT ULONG PhCsColorServiceStop;
 
 EXT BOOLEAN PhEnableImageCoherencySupport;
 EXT ULONG PhCsImageCoherencyScanLevel;
-EXT ULONG PhCsEnableScaleCpuGraph;
+EXT BOOLEAN PhCsEnableGraphMaxScale;
+EXT BOOLEAN PhCsEnableGraphMaxText;
+EXT BOOLEAN PhCsEnableAvxSupport;
 
 #define PH_SET_INTEGER_CACHED_SETTING(Name, Value) (PhSetIntegerSetting(TEXT(#Name), PhCs##Name = (Value)))
 

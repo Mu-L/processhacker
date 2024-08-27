@@ -1,3 +1,15 @@
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     wj32    2011-2015
+ *     dmex    2016-2023
+ *
+ */
+
 #ifndef GPUSYS_H
 #define GPUSYS_H
 
@@ -6,8 +18,8 @@
 BOOLEAN EtpGpuSysInfoSectionCallback(
     _In_ PPH_SYSINFO_SECTION Section,
     _In_ PH_SYSINFO_SECTION_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2
     );
 
 VOID EtpInitializeGpuDialog(
@@ -41,30 +53,30 @@ VOID EtpCreateGpuGraphs(
     );
 
 VOID EtpLayoutGpuGraphs(
-    VOID
+    _In_ HWND hwnd
     );
 
 VOID EtpNotifyGpuGraph(
     _In_ NMHDR *Header
     );
 
-VOID EtpNotifyDedicatedGraph(
+VOID EtpNotifyDedicatedGpuGraph(
     _In_ NMHDR *Header
     );
 
-VOID EtpNotifySharedGraph(
+VOID EtpNotifySharedGpuGraph(
     _In_ NMHDR *Header
     );
 
-VOID EtpNotifyPowerUsageGraph(
+VOID EtpNotifyPowerUsageGpuGraph(
     _In_ NMHDR *Header
     );
 
-VOID EtpNotifyTemperatureGraph(
+VOID EtpNotifyTemperatureGpuGraph(
     _In_ NMHDR *Header
     );
 
-VOID EtpNotifyFanRpmGraph(
+VOID EtpNotifyFanRpmGpuGraph(
     _In_ NMHDR *Header
     );
 
@@ -76,15 +88,15 @@ VOID EtpUpdateGpuPanel(
     VOID
     );
 
-PPH_PROCESS_RECORD EtpReferenceMaxNodeRecord(
+PPH_PROCESS_RECORD EtpGpuReferenceMaxNodeRecord(
     _In_ LONG Index
     );
 
-PPH_STRING EtpGetMaxNodeString(
+PPH_STRING EtpGpuGetMaxNodeString(
     _In_ LONG Index
     );
 
-PPH_STRING EtpGetGpuNameString(
+PPH_STRING EtpGpuGetNameString(
     VOID
     );
 

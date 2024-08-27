@@ -5,37 +5,55 @@
  *
  * Authors:
  *
- *     dmex    2020
+ *     dmex    2020-2023
  *
  */
 
 #include "toolstatus.h"
-#include <malloc.h>
-#include <shobjidl.h>
-
-HICON PhUpdateIconCpuHistory(
-    _In_ PH_PLUGIN_SYSTEM_STATISTICS Statistics
-    );
-
-HICON PhUpdateIconIoHistory(
-    _In_ PH_PLUGIN_SYSTEM_STATISTICS Statistics
-    );
-
-HICON PhUpdateIconCommitHistory(
-    _In_ PH_PLUGIN_SYSTEM_STATISTICS Statistics
-    );
-
-HICON PhUpdateIconPhysicalHistory(
-    _In_ PH_PLUGIN_SYSTEM_STATISTICS Statistics
-    );
-
-HICON PhUpdateIconCpuUsage(
-    _In_ PH_PLUGIN_SYSTEM_STATISTICS Statistics
-    );
 
 PH_TASKBAR_ICON TaskbarListIconType = TASKBAR_ICON_NONE;
 BOOLEAN TaskbarIsDirty = FALSE;
-static ITaskbarList3* TaskbarListClass = NULL;
+BOOLEAN TaskbarMainWndExiting = FALSE;
+static HANDLE TaskbarListClass = NULL;
+static HANDLE TaskbarThreadHandle = NULL;
+static HANDLE TaskbarEventHandle = NULL;
+
+VOID NTAPI TaskbarInitialize(
+    VOID
+    )
+{
+    if (TaskbarListIconType != TASKBAR_ICON_NONE)
+    {
+        static PH_INITONCE initOnce = PH_INITONCE_INIT;
+
+        if (PhBeginInitOnce(&initOnce))
+        {
+            if (NT_SUCCESS(PhCreateEvent(
+                &TaskbarEventHandle,
+                EVENT_ALL_ACCESS,
+                SynchronizationEvent,
+                FALSE
+                )))
+            {
+                // Use a separate thread so we don't block the main GUI or
+                // the provider threads when explorer is not responding. (dmex)
+                PhCreateThreadEx(&TaskbarThreadHandle, TaskbarIconUpdateThread, NULL);
+            }
+
+            PhEndInitOnce(&initOnce);
+        }
+    }
+}
+
+VOID NTAPI TaskbarUpdateEvents(
+    VOID
+    )
+{
+    if (TaskbarEventHandle)
+    {
+        NtSetEvent(TaskbarEventHandle, NULL);
+    }
+}
 
 VOID NTAPI TaskbarUpdateGraphs(
     VOID
@@ -47,8 +65,8 @@ VOID NTAPI TaskbarUpdateGraphs(
         {
             if (TaskbarListClass)
             {
-                ITaskbarList3_SetOverlayIcon(TaskbarListClass, PhMainWindowHandle, NULL, NULL);
-                ITaskbarList3_Release(TaskbarListClass);
+                PhTaskbarListSetOverlayIcon(TaskbarListClass, PhMainWndHandle, NULL, NULL);
+                PhTaskbarListDestroy(TaskbarListClass);
                 TaskbarListClass = NULL;
             }
 
@@ -61,20 +79,16 @@ VOID NTAPI TaskbarUpdateGraphs(
 
         if (!TaskbarListClass)
         {
-            if (SUCCEEDED(PhGetClassObject(L"explorerframe.dll", &CLSID_TaskbarList, &IID_ITaskbarList3, &TaskbarListClass)))
+            if (!HR_SUCCESS(PhTaskbarListCreate(&TaskbarListClass)))
             {
-                if (!SUCCEEDED(ITaskbarList3_HrInit(TaskbarListClass)))
-                {
-                    ITaskbarList3_Release(TaskbarListClass);
-                    TaskbarListClass = NULL;
-                }
+                TaskbarListClass = NULL;
             }
         }
 
         if (TaskbarIsDirty)
         {
             if (TaskbarListClass)
-                ITaskbarList3_SetOverlayIcon(TaskbarListClass, PhMainWindowHandle, NULL, NULL);
+                PhTaskbarListSetOverlayIcon(TaskbarListClass, PhMainWndHandle, NULL, NULL);
             TaskbarIsDirty = FALSE;
         }
 
@@ -100,19 +114,47 @@ VOID NTAPI TaskbarUpdateGraphs(
         if (overlayIcon)
         {
             if (TaskbarListClass)
-                ITaskbarList3_SetOverlayIcon(TaskbarListClass, PhMainWindowHandle, overlayIcon, NULL);
+                PhTaskbarListSetOverlayIcon(TaskbarListClass, PhMainWndHandle, overlayIcon, NULL);
             DestroyIcon(overlayIcon);
         }
     }
+}
+
+NTSTATUS TaskbarIconUpdateThread(
+    _In_opt_ PVOID Context
+    )
+{
+    PhSetThreadName(NtCurrentThread(), L"TaskbarIconUpdateThread");
+
+    while (TRUE)
+    {
+        if (TaskbarMainWndExiting)
+            break;
+
+        if (!TaskbarEventHandle)
+        {
+            PhDelayExecution(1000);
+            continue;
+        }
+
+        if (NT_SUCCESS(NtWaitForSingleObject(TaskbarEventHandle, FALSE, NULL)))
+        {
+            TaskbarUpdateGraphs();
+        }
+    }
+
+    return STATUS_SUCCESS;
 }
 
 typedef struct _PH_NF_BITMAP
 {
     BOOLEAN Initialized;
     HDC Hdc;
-    BITMAPINFOHEADER Header;
     HBITMAP Bitmap;
     PVOID Bits;
+    LONG Width;
+    LONG Height;
+    LONG TaskbarDpi;
 } PH_NF_BITMAP, *PPH_NF_BITMAP;
 
 static PH_NF_BITMAP PhDefaultBitmapContext = { 0 };
@@ -127,31 +169,68 @@ static VOID PhBeginBitmap2(
     _Out_ HBITMAP *Bitmap,
     _Out_opt_ PVOID *Bits,
     _Out_ HDC *Hdc,
-    _Out_opt_ HBITMAP *OldBitmap
+    _Out_ HBITMAP *OldBitmap
     )
 {
+    LONG dpiValue = PhGetTaskbarDpi();
+
+    // Initialize and cache the current system metrics. (dmex)
+
+    if (Context->TaskbarDpi == 0 || Context->TaskbarDpi != dpiValue)
+    {
+        Context->Width = PhGetSystemMetrics(SM_CXSMICON, dpiValue);
+        Context->Height = PhGetSystemMetrics(SM_CXSMICON, dpiValue);
+    }
+
+    // Cleanup existing resources when the DPI changes so we're able to re-initialize with updated DPI. (dmex)
+
+    if (Context->TaskbarDpi != 0 && Context->TaskbarDpi != dpiValue)
+    {
+        if (PhBlackIcon)
+        {
+            DestroyIcon(PhBlackIcon);
+            PhBlackIcon = NULL;
+        }
+
+        if (Context->Hdc)
+        {
+            DeleteDC(Context->Hdc);
+            Context->Hdc = NULL;
+        }
+
+        if (Context->Bitmap)
+        {
+            DeleteBitmap(Context->Bitmap);
+            Context->Bitmap = NULL;
+        }
+
+        Context->Initialized = FALSE;
+    }
+
     if (!Context->Initialized)
     {
-        HDC hdc;
+        HDC screenHdc;
+        BITMAPINFO bitmapInfo;
 
-        hdc = GetDC(NULL);
-        Context->Hdc = CreateCompatibleDC(hdc);
+        memset(&bitmapInfo, 0, sizeof(BITMAPINFO));
+        bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bitmapInfo.bmiHeader.biPlanes = 1;
+        bitmapInfo.bmiHeader.biCompression = BI_RGB;
+        bitmapInfo.bmiHeader.biWidth = Context->Width;
+        bitmapInfo.bmiHeader.biHeight = Context->Height;
+        bitmapInfo.bmiHeader.biBitCount = 32;
 
-        memset(&Context->Header, 0, sizeof(BITMAPINFOHEADER));
-        Context->Header.biSize = sizeof(BITMAPINFOHEADER);
-        Context->Header.biWidth = 16;
-        Context->Header.biHeight = 16;
-        Context->Header.biPlanes = 1;
-        Context->Header.biBitCount = 32;
-        Context->Bitmap = CreateDIBSection(hdc, (BITMAPINFO*)&Context->Header, DIB_RGB_COLORS, &Context->Bits, NULL, 0);
+        screenHdc = GetDC(NULL);
+        Context->Hdc = CreateCompatibleDC(screenHdc);
+        Context->Bitmap = CreateDIBSection(screenHdc, &bitmapInfo, DIB_RGB_COLORS, &Context->Bits, NULL, 0);
+        ReleaseDC(NULL, screenHdc);
 
-        ReleaseDC(NULL, hdc);
-
+        Context->TaskbarDpi = dpiValue;
         Context->Initialized = TRUE;
     }
 
-    *Width = 16;
-    *Height = 16;
+    *Width = Context->Width;
+    *Height = Context->Height;
     *Bitmap = Context->Bitmap;
     if (Bits) *Bits = Context->Bits;
     *Hdc = Context->Hdc;
@@ -184,7 +263,7 @@ HICON PhGetBlackIcon(
         ICONINFO iconInfo;
 
         PhBeginBitmap2(&PhBlackBitmapContext, &width, &height, &PhBlackBitmap, &bits, &hdc, &oldBitmap);
-        memset(bits, 0, width * height * sizeof(ULONG));
+        memset(bits, 0, width * height * sizeof(RGBQUAD));
 
         iconInfo.fIcon = TRUE;
         iconInfo.xHotspot = 0;
@@ -193,7 +272,7 @@ HICON PhGetBlackIcon(
         iconInfo.hbmColor = PhBlackBitmap;
         PhBlackIcon = CreateIconIndirect(&iconInfo);
 
-        SelectObject(hdc, oldBitmap);
+        SelectBitmap(hdc, oldBitmap);
     }
 
     return PhBlackIcon;
@@ -248,8 +327,11 @@ HICON PhUpdateIconCpuHistory(
     // Icon
     PhBeginBitmap(&drawInfo.Width, &drawInfo.Height, &bitmap, &bits, &hdc, &oldBitmap);
     maxDataCount = drawInfo.Width / 2 + 1;
-    lineData1 = _alloca(maxDataCount * sizeof(FLOAT));
-    lineData2 = _alloca(maxDataCount * sizeof(FLOAT));
+
+    if (!(lineData1 = _malloca(maxDataCount * sizeof(FLOAT))))
+        return NULL;
+    if (!(lineData2 = _malloca(maxDataCount * sizeof(FLOAT))))
+        return NULL;
 
     lineDataCount = min(maxDataCount, Statistics.CpuKernelHistory->Count);
     PhCopyCircularBuffer_FLOAT(Statistics.CpuKernelHistory, lineData1, lineDataCount);
@@ -262,12 +344,13 @@ HICON PhUpdateIconCpuHistory(
     drawInfo.LineColor2 = PhGetIntegerSetting(L"ColorCpuUser");
     drawInfo.LineBackColor1 = PhHalveColorBrightness(drawInfo.LineColor1);
     drawInfo.LineBackColor2 = PhHalveColorBrightness(drawInfo.LineColor2);
+    PhDrawGraphDirect(hdc, bits, &drawInfo);
 
-    if (bits)
-        PhDrawGraphDirect(hdc, bits, &drawInfo);
-
-    SelectObject(hdc, oldBitmap);
+    SelectBitmap(hdc, oldBitmap);
     icon = PhBitmapToIcon(bitmap);
+
+    _freea(lineData2);
+    _freea(lineData1);
 
     return icon;
 }
@@ -306,15 +389,18 @@ HICON PhUpdateIconIoHistory(
     // Icon
     PhBeginBitmap(&drawInfo.Width, &drawInfo.Height, &bitmap, &bits, &hdc, &oldBitmap);
     maxDataCount = drawInfo.Width / 2 + 1;
-    lineData1 = _alloca(maxDataCount * sizeof(FLOAT));
-    lineData2 = _alloca(maxDataCount * sizeof(FLOAT));
+
+    if (!(lineData1 = _malloca(maxDataCount * sizeof(FLOAT))))
+        return NULL;
+    if (!(lineData2 = _malloca(maxDataCount * sizeof(FLOAT))))
+        return NULL;
 
     lineDataCount = min(maxDataCount, Statistics.IoReadHistory->Count);
     max = 1024 * 1024; // minimum scaling of 1 MB.
 
     for (i = 0; i < lineDataCount; i++)
     {
-        lineData1[i] = (FLOAT)PhGetItemCircularBuffer_ULONG64(Statistics.IoReadHistory, i) 
+        lineData1[i] = (FLOAT)PhGetItemCircularBuffer_ULONG64(Statistics.IoReadHistory, i)
                      + (FLOAT)PhGetItemCircularBuffer_ULONG64(Statistics.IoOtherHistory, i);
         lineData2[i] = (FLOAT)PhGetItemCircularBuffer_ULONG64(Statistics.IoWriteHistory, i);
 
@@ -332,12 +418,13 @@ HICON PhUpdateIconIoHistory(
     drawInfo.LineColor2 = PhGetIntegerSetting(L"ColorIoWrite");
     drawInfo.LineBackColor1 = PhHalveColorBrightness(drawInfo.LineColor1);
     drawInfo.LineBackColor2 = PhHalveColorBrightness(drawInfo.LineColor2);
+    PhDrawGraphDirect(hdc, bits, &drawInfo);
 
-    if (bits)
-        PhDrawGraphDirect(hdc, bits, &drawInfo);
-
-    SelectObject(hdc, oldBitmap);
+    SelectBitmap(hdc, oldBitmap);
     icon = PhBitmapToIcon(bitmap);
+
+    _freea(lineData2);
+    _freea(lineData1);
 
     return icon;
 }
@@ -389,11 +476,9 @@ HICON PhUpdateIconCommitHistory(
     drawInfo.LineData1 = lineData1;
     drawInfo.LineColor1 = PhGetIntegerSetting(L"ColorPrivate");
     drawInfo.LineBackColor1 = PhHalveColorBrightness(drawInfo.LineColor1);
+    PhDrawGraphDirect(hdc, bits, &drawInfo);
 
-    if (bits)
-        PhDrawGraphDirect(hdc, bits, &drawInfo);
-
-    SelectObject(hdc, oldBitmap);
+    SelectBitmap(hdc, oldBitmap);
     icon = PhBitmapToIcon(bitmap);
 
     _freea(lineData1);
@@ -448,11 +533,9 @@ HICON PhUpdateIconPhysicalHistory(
     drawInfo.LineData1 = lineData1;
     drawInfo.LineColor1 = PhGetIntegerSetting(L"ColorPhysical");
     drawInfo.LineBackColor1 = PhHalveColorBrightness(drawInfo.LineColor1);
+    PhDrawGraphDirect(hdc, bits, &drawInfo);
 
-    if (bits)
-        PhDrawGraphDirect(hdc, bits, &drawInfo);
-
-    SelectObject(hdc, oldBitmap);
+    SelectBitmap(hdc, oldBitmap);
     icon = PhBitmapToIcon(bitmap);
 
     _freea(lineData1);
@@ -467,12 +550,13 @@ HICON PhUpdateIconCpuUsage(
     ULONG width;
     ULONG height;
     HBITMAP bitmap;
+    PVOID bits;
     HDC hdc;
     HBITMAP oldBitmap;
     HICON icon;
 
     // Icon
-    PhBeginBitmap(&width, &height, &bitmap, NULL, &hdc, &oldBitmap);
+    PhBeginBitmap(&width, &height, &bitmap, &bits, &hdc, &oldBitmap);
 
     // This stuff is copied from CpuUsageIcon.cs (PH 1.x).
     {
@@ -486,11 +570,11 @@ HICON PhUpdateIconCpuUsage(
         LONG ul = (LONG)(u * height);
         RECT rect;
         HBRUSH dcBrush;
-        HBRUSH dcPen;
+        HPEN dcPen;
         POINT points[2];
 
-        dcBrush = GetStockObject(DC_BRUSH);
-        dcPen = GetStockObject(DC_PEN);
+        dcBrush = GetStockBrush(DC_BRUSH);
+        dcPen = GetStockPen(DC_PEN);
         rect.left = 0;
         rect.top = 0;
         rect.right = width;
@@ -501,7 +585,7 @@ HICON PhUpdateIconCpuUsage(
         // Draw the base line.
         if (kl + ul == 0)
         {
-            SelectObject(hdc, dcPen);
+            SelectPen(hdc, dcPen);
             SetDCPenColor(hdc, uColor);
             points[0].x = 0;
             points[0].y = height - 1;
@@ -523,7 +607,7 @@ HICON PhUpdateIconCpuUsage(
             if (points[0].y < 0) points[0].y = 0;
             points[1].x = width;
             points[1].y = points[0].y;
-            SelectObject(hdc, dcPen);
+            SelectPen(hdc, dcPen);
             SetDCPenColor(hdc, uColor);
             Polyline(hdc, points, 2);
 
@@ -541,14 +625,14 @@ HICON PhUpdateIconCpuUsage(
                 if (points[0].y < 0) points[0].y = 0;
                 points[1].x = width;
                 points[1].y = points[0].y;
-                SelectObject(hdc, dcPen);
+                SelectPen(hdc, dcPen);
                 SetDCPenColor(hdc, kColor);
                 Polyline(hdc, points, 2);
             }
         }
     }
 
-    SelectObject(hdc, oldBitmap);
+    SelectBitmap(hdc, oldBitmap);
     icon = PhBitmapToIcon(bitmap);
 
     return icon;

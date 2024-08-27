@@ -91,6 +91,7 @@ typedef enum _KWAIT_REASON
     WrPhysicalFault,
     WrIoRing,
     WrMdlCache,
+    WrRcu,
     MaximumWaitReason
 } KWAIT_REASON, *PKWAIT_REASON;
 
@@ -138,7 +139,7 @@ NtCallbackReturn(
 
 #if (PHNT_VERSION >= PHNT_VISTA)
 NTSYSCALLAPI
-VOID
+NTSTATUS
 NTAPI
 NtFlushProcessWriteBuffers(
     VOID

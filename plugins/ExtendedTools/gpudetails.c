@@ -54,8 +54,8 @@ VOID EtpGpuDetailsAddListViewItemGroups(
     PhAddListViewGroupItem(ListViewHandle, GpuGroupId, GPUADAPTER_DETAILS_INDEX_TEMPERATURE, L"Temperature", NULL);
 }
 
-VOID EtpQueryAdapterDeviceProperties(
-    _In_ PCWSTR DeviceName,
+VOID EtpGpuQueryAdapterDeviceProperties(
+    _In_ PPH_STRING DeviceName,
     _In_ HWND ListViewHandle)
 {
     PPH_STRING driverDate;
@@ -68,7 +68,7 @@ VOID EtpQueryAdapterDeviceProperties(
         PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_DRIVERDATE, 1, PhGetStringOrEmpty(driverDate));
         PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_DRIVERVERSION, 1, PhGetStringOrEmpty(driverVersion));
         PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_PHYSICALLOCTION, 1, PhGetStringOrEmpty(locationInfo));
- 
+
         if (installedMemory != ULLONG_MAX)
         {
             PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_TOTALMEMORY, 1, PhaFormatSize(installedMemory, ULONG_MAX)->Buffer);
@@ -81,8 +81,8 @@ VOID EtpQueryAdapterDeviceProperties(
     }
 }
 
-VOID EtpQueryAdapterRegistryInfo(
-    _In_ D3DKMT_HANDLE AdapterHandle, 
+VOID EtpGpuQueryAdapterRegistryInfo(
+    _In_ D3DKMT_HANDLE AdapterHandle,
     _In_ HWND ListViewHandle)
 {
     D3DKMT_ADAPTERREGISTRYINFO adapterInfo;
@@ -100,76 +100,30 @@ VOID EtpQueryAdapterRegistryInfo(
     }
 }
 
-VOID EtpQueryAdapterDriverModel(
-    _In_ D3DKMT_HANDLE AdapterHandle, 
+VOID EtpGpuQueryAdapterDriverModel(
+    _In_ D3DKMT_HANDLE AdapterHandle,
     _In_ HWND ListViewHandle)
 {
-    D3DKMT_DRIVERVERSION wddmversion;
+    D3DKMT_DRIVERVERSION d3dkmtDriverVersion;
 
-    memset(&wddmversion, 0, sizeof(D3DKMT_DRIVERVERSION));
+    memset(&d3dkmtDriverVersion, 0, sizeof(D3DKMT_DRIVERVERSION));
 
     if (NT_SUCCESS(EtQueryAdapterInformation(
         AdapterHandle,
         KMTQAITYPE_DRIVERVERSION,
-        &wddmversion,
+        &d3dkmtDriverVersion,
         sizeof(D3DKMT_DRIVERVERSION)
         )))
     {
-        switch (wddmversion)
-        {
-        case KMT_DRIVERVERSION_WDDM_1_0:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 1.0");
-            break;
-        case KMT_DRIVERVERSION_WDDM_1_1_PRERELEASE:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 1.1 (pre-release)");
-            break;
-        case KMT_DRIVERVERSION_WDDM_1_1:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 1.1");
-            break;
-        case KMT_DRIVERVERSION_WDDM_1_2:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 1.2");
-            break;
-        case KMT_DRIVERVERSION_WDDM_1_3:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 1.3");
-            break;
-        case KMT_DRIVERVERSION_WDDM_2_0:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 2.0");
-            break;
-        case KMT_DRIVERVERSION_WDDM_2_1:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 2.1");
-            break;
-        case KMT_DRIVERVERSION_WDDM_2_2:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 2.2");
-            break;
-        case KMT_DRIVERVERSION_WDDM_2_3:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 2.3");
-            break;
-        case KMT_DRIVERVERSION_WDDM_2_4:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 2.4");
-            break;
-        case KMT_DRIVERVERSION_WDDM_2_5:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 2.5");
-            break;
-        case KMT_DRIVERVERSION_WDDM_2_6:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 2.6");
-            break;
-        case KMT_DRIVERVERSION_WDDM_2_7:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 2.7");
-            break;
-        case KMT_DRIVERVERSION_WDDM_3_0:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 3.0");
-            break;
-        case KMT_DRIVERVERSION_WDDM_3_1:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"WDDM 3.1");
-            break;
-        default:
-            PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1, L"ERROR");
-            break;
-        }
+        ULONG majorVersion = d3dkmtDriverVersion / 1000;
+        ULONG minorVersion = (d3dkmtDriverVersion - majorVersion * 1000) / 100;
+
+        PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_WDDMVERSION, 1,
+            PhaFormatString(L"WDDM %lu.%lu", majorVersion, minorVersion)->Buffer);
     }
 }
 
-VOID EtpQueryAdapterDriverVersion(
+VOID EtpGpuQueryAdapterDriverVersion(
     _In_ D3DKMT_HANDLE AdapterHandle,
     _In_ HWND ListViewHandle)
 {
@@ -214,7 +168,7 @@ VOID EtpQueryAdapterDriverVersion(
     }
 }
 
-VOID EtpQueryAdapterDeviceIds(
+VOID EtpGpuQueryAdapterDeviceIds(
     _In_ D3DKMT_HANDLE AdapterHandle,
     _In_ HWND ListViewHandle)
 {
@@ -244,7 +198,7 @@ VOID EtpQueryAdapterDeviceIds(
     }
 }
 
-VOID EtpQueryAdapterPerfInfo(
+VOID EtpGpuQueryAdapterPerfInfo(
     _In_ D3DKMT_HANDLE AdapterHandle,
     _In_ HWND ListViewHandle)
 {
@@ -299,7 +253,7 @@ VOID EtpQueryAdapterPerfInfo(
         else
             PhSetListViewSubItem(ListViewHandle, GPUADAPTER_DETAILS_INDEX_POWERUSAGE, 1, PhaFormatString(L"%lu%%", adapterPerfData.Power * 100 / 1000)->Buffer);
 
-        if (PhGetIntegerSetting(SETTING_NAME_ENABLE_FAHRENHEIT))
+        if (EtGpuFahrenheitEnabled)
         {
             ULONG gpuCurrentTemp = adapterPerfData.Temperature * 100 / 1000;
             FLOAT gpuFahrenheitTemp = (FLOAT)(gpuCurrentTemp * 1.8 + 32);
@@ -370,24 +324,24 @@ VOID EtpGpuDetailsEnumAdapters(
             EtpGpuDetailsAddListViewItemGroups(ListViewHandle, i);
         }
 
-        EtpQueryAdapterDeviceProperties(openAdapterFromDeviceName.pDeviceName, ListViewHandle);
+        EtpGpuQueryAdapterDeviceProperties(gpuAdapter->DeviceInterface, ListViewHandle);
         //EtpQueryAdapterRegistryInfo(openAdapterFromDeviceName.AdapterHandle, ListViewHandle);
-        EtpQueryAdapterDriverModel(openAdapterFromDeviceName.hAdapter, ListViewHandle);
+        EtpGpuQueryAdapterDriverModel(openAdapterFromDeviceName.hAdapter, ListViewHandle);
         //EtpQueryAdapterDriverVersion(openAdapterFromDeviceName.AdapterHandle, ListViewHandle);
-        EtpQueryAdapterDeviceIds(openAdapterFromDeviceName.hAdapter, ListViewHandle);
+        EtpGpuQueryAdapterDeviceIds(openAdapterFromDeviceName.hAdapter, ListViewHandle);
         //EtQueryAdapterFeatureLevel(openAdapterFromDeviceName.AdapterLuid);
-        EtpQueryAdapterPerfInfo(openAdapterFromDeviceName.hAdapter, ListViewHandle);
+        EtpGpuQueryAdapterPerfInfo(openAdapterFromDeviceName.hAdapter, ListViewHandle);
 
         EtCloseAdapterHandle(openAdapterFromDeviceName.hAdapter);
     }
 }
 
-static VOID ProcessesUpdatedCallback(
+VOID EtpGpuProcessesUpdatedCallback(
     _In_opt_ PVOID Parameter,
     _In_opt_ PVOID Context
     )
 {
-    PostMessage((HWND)Context, ET_WM_UPDATE, 0, 0);
+    PostMessage((HWND)Context, WM_PH_UPDATE_DIALOG, 0, 0);
 }
 
 typedef struct _ET_GPU_DETAILS_CONTEXT
@@ -416,11 +370,6 @@ INT_PTR CALLBACK EtpGpuDetailsDlgProc(
     else
     {
         context = PhGetWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
-
-        if (uMsg == WM_DESTROY)
-        {
-            PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
-        }
     }
 
     if (context == NULL)
@@ -453,7 +402,7 @@ INT_PTR CALLBACK EtpGpuDetailsDlgProc(
 
             PhRegisterCallback(
                 PhGetGeneralCallback(GeneralCallbackProcessProviderUpdatedEvent),
-                ProcessesUpdatedCallback,
+                EtpGpuProcessesUpdatedCallback,
                 hwndDlg,
                 &context->ProcessesUpdatedCallbackRegistration
                 );
@@ -464,9 +413,14 @@ INT_PTR CALLBACK EtpGpuDetailsDlgProc(
             PhUnregisterCallback(PhGetGeneralCallback(GeneralCallbackProcessProviderUpdatedEvent), &context->ProcessesUpdatedCallbackRegistration);
 
             PhDeleteLayoutManager(&context->LayoutManager);
-            PhFree(context);
 
             PostQuitMessage(0);
+        }
+        break;
+    case WM_NCDESTROY:
+        {
+            PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
+            PhFree(context);
         }
         break;
     case WM_COMMAND:
@@ -485,12 +439,12 @@ INT_PTR CALLBACK EtpGpuDetailsDlgProc(
             PhLayoutManagerLayout(&context->LayoutManager);
         }
         break;
-    case ET_WM_UPDATE:
+    case WM_PH_UPDATE_DIALOG:
         {
             EtpGpuDetailsEnumAdapters(context->ListViewHandle);
         }
         break;
-    case ET_WM_SHOWDIALOG:
+    case WM_PH_SHOW_DIALOG:
         {
             if (IsMinimized(hwndDlg))
                 ShowWindow(hwndDlg, SW_RESTORE);
@@ -514,7 +468,7 @@ INT_PTR CALLBACK EtpGpuDetailsDlgProc(
                 point.y = GET_Y_LPARAM(lParam);
 
                 if (point.x == -1 && point.y == -1)
-                    PhGetListViewContextMenuPoint((HWND)wParam, &point);
+                    PhGetListViewContextMenuPoint(context->ListViewHandle, &point);
 
                 PhGetSelectedListViewItemParams(context->ListViewHandle, &listviewItems, &numberOfItems);
 
@@ -631,5 +585,5 @@ VOID EtShowGpuDetailsDialog(
         PhWaitForEvent(&EtGpuDetailsInitializedEvent, NULL);
     }
 
-    PostMessage(EtGpuDetailsDialogHandle, ET_WM_SHOWDIALOG, 0, 0);
+    PostMessage(EtGpuDetailsDialogHandle, WM_PH_SHOW_DIALOG, 0, 0);
 }

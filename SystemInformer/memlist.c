@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2015
- *     dmex    2017-2018
+ *     dmex    2017-2023
  *
  */
 
@@ -38,9 +38,9 @@ LONG PhpMemoryTreeNewPostSortFunction(
 BOOLEAN NTAPI PhpMemoryTreeNewCallback(
     _In_ HWND hwnd,
     _In_ PH_TREENEW_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2,
+    _In_ PVOID Context
     );
 
 VOID PhInitializeMemoryList(
@@ -49,6 +49,8 @@ VOID PhInitializeMemoryList(
     _Out_ PPH_MEMORY_LIST_CONTEXT Context
     )
 {
+    BOOLEAN enableMonospaceFont = !!PhGetIntegerSetting(L"EnableMonospaceFont");
+
     memset(Context, 0, sizeof(PH_MEMORY_LIST_CONTEXT));
 
     Context->AllocationBaseNodeList = PhCreateList(100);
@@ -56,6 +58,7 @@ VOID PhInitializeMemoryList(
 
     Context->ParentWindowHandle = ParentWindowHandle;
     Context->TreeNewHandle = TreeNewHandle;
+
     PhSetControlTheme(TreeNewHandle, L"explorer");
 
     TreeNew_SetCallback(TreeNewHandle, PhpMemoryTreeNewCallback, Context);
@@ -63,7 +66,7 @@ VOID PhInitializeMemoryList(
     TreeNew_SetRedraw(TreeNewHandle, FALSE);
 
     // Default columns
-    PhAddTreeNewColumn(TreeNewHandle, PHMMTLC_BASEADDRESS, TRUE, L"Base address", 120, PH_ALIGN_LEFT, -2, 0);
+    PhAddTreeNewColumn(TreeNewHandle, PHMMTLC_BASEADDRESS, TRUE, L"Base address", 120, PH_ALIGN_LEFT | (enableMonospaceFont ? PH_ALIGN_MONOSPACE_FONT : 0), -2, 0);
     PhAddTreeNewColumn(TreeNewHandle, PHMMTLC_TYPE, TRUE, L"Type", 90, PH_ALIGN_LEFT, 0, 0);
     PhAddTreeNewColumnEx(TreeNewHandle, PHMMTLC_SIZE, TRUE, L"Size", 80, PH_ALIGN_RIGHT, 1, DT_RIGHT, TRUE);
     PhAddTreeNewColumn(TreeNewHandle, PHMMTLC_PROTECTION, TRUE, L"Protection", 60, PH_ALIGN_LEFT, 2, 0);
@@ -73,9 +76,14 @@ VOID PhInitializeMemoryList(
     PhAddTreeNewColumnEx(TreeNewHandle, PHMMTLC_SHAREABLEWS, TRUE, L"Shareable WS", 80, PH_ALIGN_RIGHT, 6, DT_RIGHT, TRUE);
     PhAddTreeNewColumnEx(TreeNewHandle, PHMMTLC_SHAREDWS, TRUE, L"Shared WS", 80, PH_ALIGN_RIGHT, 7, DT_RIGHT, TRUE);
     PhAddTreeNewColumnEx(TreeNewHandle, PHMMTLC_LOCKEDWS, TRUE, L"Locked WS", 80, PH_ALIGN_RIGHT, 8, DT_RIGHT, TRUE);
-
-    PhAddTreeNewColumnEx(TreeNewHandle, PHMMTLC_COMMITTED, FALSE, L"Committed", 80, PH_ALIGN_RIGHT, 9, DT_RIGHT, TRUE);
-    PhAddTreeNewColumnEx(TreeNewHandle, PHMMTLC_PRIVATE, FALSE, L"Private", 80, PH_ALIGN_RIGHT, 10, DT_RIGHT, TRUE);
+    // Customizable columns
+    PhAddTreeNewColumnEx(TreeNewHandle, PHMMTLC_COMMITTED, FALSE, L"Committed", 80, PH_ALIGN_RIGHT, ULONG_MAX, DT_RIGHT, TRUE);
+    PhAddTreeNewColumnEx(TreeNewHandle, PHMMTLC_PRIVATE, FALSE, L"Private", 80, PH_ALIGN_RIGHT, ULONG_MAX, DT_RIGHT, TRUE);
+    PhAddTreeNewColumn(TreeNewHandle, PHMMTLC_SIGNING_LEVEL, FALSE, L"Signing level", 80, PH_ALIGN_LEFT, ULONG_MAX, 0);
+    PhAddTreeNewColumn(TreeNewHandle, PHMMTLC_ORIGINAL_PROTECTION, FALSE, L"Original protection", 80, PH_ALIGN_LEFT, ULONG_MAX, 0);
+    PhAddTreeNewColumn(TreeNewHandle, PHMMTLC_ORIGINAL_PAGES, FALSE, L"Original pages", 80, PH_ALIGN_LEFT, ULONG_MAX, 0);
+    PhAddTreeNewColumn(TreeNewHandle, PHMMTLC_REGIONTYPE, FALSE, L"Region type", 80, PH_ALIGN_LEFT, ULONG_MAX, 0);
+    PhAddTreeNewColumn(TreeNewHandle, PHMMTLC_PRIORITY, FALSE, L"Priority", 80, PH_ALIGN_LEFT, ULONG_MAX, 0);
 
     TreeNew_SetRedraw(TreeNewHandle, TRUE);
 
@@ -181,6 +189,9 @@ VOID PhSetOptionsMemoryList(
     case PH_MEMORY_FLAGS_GUARD_OPTION:
         Context->HideGuardRegions = !Context->HideGuardRegions;
         break;
+    case PH_MEMORY_FLAGS_ZERO_PAD_ADDRESSES:
+        Context->ZeroPadAddresses = !Context->ZeroPadAddresses;
+        break;
     }
 }
 
@@ -208,6 +219,10 @@ VOID PhpDestroyMemoryNode(
         PhDereferenceObject(MemoryNode->CommittedText);
     if (MemoryNode->PrivateText)
         PhDereferenceObject(MemoryNode->PrivateText);
+    if (MemoryNode->RegionTypeText)
+        PhDereferenceObject(MemoryNode->RegionTypeText);
+    if (MemoryNode->PriorityText)
+        PhDereferenceObject(MemoryNode->PriorityText);
     if (MemoryNode->Children)
         PhDereferenceObject(MemoryNode->Children);
 
@@ -235,6 +250,11 @@ PPH_MEMORY_NODE PhpAddAllocationBaseNode(
 
     memoryItem->BaseAddress = AllocationBase;
     memoryItem->AllocationBase = AllocationBase;
+
+    if (Context->ZeroPadAddresses)
+        PhPrintPointerPadZeros(memoryItem->BaseAddressString, memoryItem->BaseAddress);
+    else
+        PhPrintPointer(memoryItem->BaseAddressString, memoryItem->BaseAddress);
 
     memoryNode->Children = PhCreateList(1);
 
@@ -291,6 +311,7 @@ VOID PhpCopyMemoryRegionTypeInfo(
     else if (Destination->RegionType == MappedFileRegion)
         PhClearReference(&Destination->u.MappedFile.FileName);
 
+    Destination->RegionTypeEx = Source->RegionTypeEx;
     Destination->RegionType = Source->RegionType;
     Destination->u = Source->u;
 
@@ -356,6 +377,7 @@ VOID PhReplaceMemoryList(
                 allocationBaseNode->MemoryItem->Type = memoryItem->Type;
 
                 PhGetMemoryProtectionString(allocationBaseNode->MemoryItem->Protect, allocationBaseNode->ProtectionText);
+                //PhGetMemoryProtectionString(allocationBaseNode->MemoryItem->AllocationProtect, allocationBaseNode->OriginalProtectionText);
 
                 if (memoryItem->RegionType != CustomRegion || memoryItem->u.Custom.PropertyOfAllocationBase)
                     PhpCopyMemoryRegionTypeInfo(memoryItem, allocationBaseNode->MemoryItem);
@@ -363,7 +385,7 @@ VOID PhReplaceMemoryList(
                 if (Context->HideFreeRegions && (allocationBaseNode->MemoryItem->State & MEM_FREE))
                     allocationBaseNode->Node.Visible = FALSE;
                 if (Context->HideGuardRegions && (allocationBaseNode->MemoryItem->State & PAGE_GUARD))
-                    memoryNode->Node.Visible = FALSE;
+                    allocationBaseNode->Node.Visible = FALSE;
             }
             else
             {
@@ -373,6 +395,7 @@ VOID PhReplaceMemoryList(
         }
 
         PhGetMemoryProtectionString(memoryItem->Protect, memoryNode->ProtectionText);
+        PhGetMemoryProtectionString(memoryItem->AllocationProtect, memoryNode->OriginalProtectionText);
     }
 
     TreeNew_NodesStructured(Context->TreeNewHandle);
@@ -391,12 +414,12 @@ VOID PhRemoveMemoryNode(
     PhRemoveElementAvlTree(&List->Set, &MemoryNode->MemoryItem->Links);
     RemoveEntryList(&MemoryNode->MemoryItem->ListEntry);
 
-    if ((index = PhFindItemList(Context->RegionNodeList, MemoryNode)) != -1)
+    if ((index = PhFindItemList(Context->RegionNodeList, MemoryNode)) != ULONG_MAX)
         PhRemoveItemList(Context->RegionNodeList, index);
 
     if (MemoryNode->MemoryItem->AllocationBaseItem == MemoryNode->MemoryItem)
     {
-        if ((index = PhFindItemList(Context->AllocationBaseNodeList, MemoryNode->Parent)) != -1)
+        if ((index = PhFindItemList(Context->AllocationBaseNodeList, MemoryNode->Parent)) != ULONG_MAX)
             PhRemoveItemList(Context->AllocationBaseNodeList, index);
     }
 
@@ -411,8 +434,71 @@ VOID PhUpdateMemoryNode(
     )
 {
     PhGetMemoryProtectionString(MemoryNode->MemoryItem->Protect, MemoryNode->ProtectionText);
+    PhGetMemoryProtectionString(MemoryNode->MemoryItem->AllocationProtect, MemoryNode->OriginalProtectionText);
     memset(MemoryNode->TextCache, 0, sizeof(PH_STRINGREF) * PHMMTLC_MAXIMUM);
     TreeNew_InvalidateNode(Context->TreeNewHandle, &MemoryNode->Node);
+}
+
+VOID PhInvalidateAllMemoryNodes(
+    _In_ PPH_MEMORY_LIST_CONTEXT Context
+    )
+{
+    ULONG i;
+
+    for (i = 0; i < Context->AllocationBaseNodeList->Count; i++)
+    {
+        PPH_MEMORY_NODE memoryNode = Context->AllocationBaseNodeList->Items[i];
+
+        memset(memoryNode->TextCache, 0, sizeof(PH_STRINGREF) * PHMMTLC_MAXIMUM);
+        TreeNew_InvalidateNode(Context->TreeNewHandle, &memoryNode->Node);
+    }
+
+    for (i = 0; i < Context->RegionNodeList->Count; i++)
+    {
+        PPH_MEMORY_NODE memoryNode = Context->RegionNodeList->Items[i];
+
+        memset(memoryNode->TextCache, 0, sizeof(PH_STRINGREF) * PHMMTLC_MAXIMUM);
+        TreeNew_InvalidateNode(Context->TreeNewHandle, &memoryNode->Node);
+    }
+
+    InvalidateRect(Context->TreeNewHandle, NULL, FALSE);
+    TreeNew_NodesStructured(Context->TreeNewHandle);
+}
+
+VOID PhInvalidateAllMemoryBaseAddressNodes(
+    _In_ PPH_MEMORY_LIST_CONTEXT Context
+    )
+{
+    ULONG i;
+
+    for (i = 0; i < Context->AllocationBaseNodeList->Count; i++)
+    {
+        PPH_MEMORY_NODE memoryNode = Context->AllocationBaseNodeList->Items[i];
+
+        if (Context->ZeroPadAddresses)
+            PhPrintPointerPadZeros(memoryNode->MemoryItem->BaseAddressString, memoryNode->MemoryItem->BaseAddress);
+        else
+            PhPrintPointer(memoryNode->MemoryItem->BaseAddressString, memoryNode->MemoryItem->BaseAddress);
+
+        memset(memoryNode->TextCache, 0, sizeof(PH_STRINGREF) * PHMMTLC_MAXIMUM);
+        //TreeNew_InvalidateNode(Context->TreeNewHandle, &memoryNode->Node);
+    }
+
+    for (i = 0; i < Context->RegionNodeList->Count; i++)
+    {
+        PPH_MEMORY_NODE memoryNode = Context->RegionNodeList->Items[i];
+
+        if (Context->ZeroPadAddresses)
+            PhPrintPointerPadZeros(memoryNode->MemoryItem->BaseAddressString, memoryNode->MemoryItem->BaseAddress);
+        else
+            PhPrintPointer(memoryNode->MemoryItem->BaseAddressString, memoryNode->MemoryItem->BaseAddress);
+
+        memset(memoryNode->TextCache, 0, sizeof(PH_STRINGREF) * PHMMTLC_MAXIMUM);
+        //TreeNew_InvalidateNode(Context->TreeNewHandle, &memoryNode->Node);
+    }
+
+    InvalidateRect(Context->TreeNewHandle, NULL, FALSE);
+    TreeNew_NodesStructured(Context->TreeNewHandle);
 }
 
 VOID PhExpandAllMemoryNodes(
@@ -449,6 +535,10 @@ VOID PhExpandAllMemoryNodes(
         TreeNew_NodesStructured(Context->TreeNewHandle);
 }
 
+extern PWSTR PhGetProcessHeapClassText(
+    _In_ ULONG HeapClass
+    );
+
 PPH_STRING PhGetMemoryRegionUseText(
     _In_ PPH_MEMORY_ITEM MemoryItem
     )
@@ -458,12 +548,12 @@ PPH_STRING PhGetMemoryRegionUseText(
     switch (type)
     {
     case UnknownRegion:
-        return PhReferenceEmptyString();
+        return NULL;
     case CustomRegion:
         PhReferenceObject(MemoryItem->u.Custom.Text);
         return MemoryItem->u.Custom.Text;
     case UnusableRegion:
-        return PhReferenceEmptyString();
+        return NULL;
     case MappedFileRegion:
         PhReferenceObject(MemoryItem->u.MappedFile.FileName);
         return MemoryItem->u.MappedFile.FileName;
@@ -484,11 +574,13 @@ PPH_STRING PhGetMemoryRegionUseText(
             type == Stack32Region ? L" 32-bit" : L"", HandleToUlong(MemoryItem->u.Stack.ThreadId));
     case HeapRegion:
     case Heap32Region:
-        return PhFormatString(L"Heap%s (ID %lu)",
+        return PhFormatString(L"%s%s (ID %lu)",
+            MemoryItem->u.Heap.ClassValid ? PhGetProcessHeapClassText(MemoryItem->u.Heap.Class) : L"Heap",
             type == Heap32Region ? L" 32-bit" : L"", (ULONG)MemoryItem->u.Heap.Index + 1);
     case HeapSegmentRegion:
     case HeapSegment32Region:
-        return PhFormatString(L"Heap segment%s (ID %lu)",
+        return PhFormatString(L"%s Segment%s (ID %lu)",
+            MemoryItem->u.HeapSegment.HeapItem->u.Heap.ClassValid ? PhGetProcessHeapClassText(MemoryItem->u.HeapSegment.HeapItem->u.Heap.Class) : L"Heap",
             type == HeapSegment32Region ? L" 32-bit" : L"", (ULONG)MemoryItem->u.HeapSegment.HeapItem->u.Heap.Index + 1);
     case CfgBitmapRegion:
     case CfgBitmap32Region:
@@ -505,11 +597,23 @@ PPH_STRING PhGetMemoryRegionUseText(
     case ShimDataRegion:
         return PhFormatString(L"Shim data");
     case ActivationContextDataRegion:
-        return PhFormatString(L"Activation context data");
-    case SystemDefaultActivationContextDataRegion:
-        return PhFormatString(L"Default activation context data");
+        switch (MemoryItem->u.ActivationContextData.Type)
+        {
+        case ProcessActivationContext:
+            return PhFormatString(L"Process activation context data");
+        case SystemActivationContext:
+            return PhFormatString(L"System activation context data");
+        default:
+            return PhFormatString(L"Activation context data");
+        }
+    case WerRegistrationDataRegion:
+        return PhFormatString(L"WER registration data");
+    case SiloSharedDataRegion:
+        return PhFormatString(L"Silo shared data");
+    case TelemetryCoverageRegion:
+        return PhFormatString(L"Telemetry coverage map");
     default:
-        return PhReferenceEmptyString();
+        return NULL;
     }
 }
 
@@ -521,18 +625,28 @@ VOID PhpUpdateMemoryNodeUseText(
         MemoryNode->UseText = PhGetMemoryRegionUseText(MemoryNode->MemoryItem);
 }
 
+VOID PhpUpdateMemoryRegionTypeExText(
+    _Inout_ PPH_MEMORY_NODE MemoryNode
+    )
+{
+    if (MemoryNode->IsAllocationBase)
+        return;
+
+    if (!MemoryNode->RegionTypeText)
+        MemoryNode->RegionTypeText = PhGetMemoryRegionTypeExString(MemoryNode->MemoryItem);
+}
+
 PPH_STRING PhpFormatSizeIfNonZero(
     _In_ ULONG64 Size
     )
 {
     if (Size != 0)
-        return PhFormatSize(Size, -1);
+        return PhFormatSize(Size, ULONG_MAX);
     else
         return NULL;
 }
 
 #define SORT_FUNCTION(Column) PhpMemoryTreeNewCompare##Column
-
 #define BEGIN_SORT_FUNCTION(Column) static int __cdecl PhpMemoryTreeNewCompare##Column( \
     _In_ void *_context, \
     _In_ const void *_elem1, \
@@ -642,19 +756,55 @@ BEGIN_SORT_FUNCTION(Private)
 }
 END_SORT_FUNCTION
 
+BEGIN_SORT_FUNCTION(SigningLevel)
+{
+    sortResult = shortcmp(
+        memoryItem1->RegionType == MappedFileRegion && memoryItem1->u.MappedFile.SigningLevelValid ? memoryItem1->u.MappedFile.SigningLevel : -1,
+        memoryItem2->RegionType == MappedFileRegion && memoryItem2->u.MappedFile.SigningLevelValid ? memoryItem2->u.MappedFile.SigningLevel : -1
+        );
+}
+END_SORT_FUNCTION
+
+BEGIN_SORT_FUNCTION(OriginalProtection)
+{
+    sortResult = PhCompareStringZ(node1->OriginalProtectionText, node2->OriginalProtectionText, FALSE);
+}
+END_SORT_FUNCTION
+
+BEGIN_SORT_FUNCTION(OriginalPages)
+{
+    FLOAT modified1 = memoryItem1->SharedOriginalPages ? (memoryItem1->SharedOriginalPages * 100.f / (memoryItem1->RegionSize / PAGE_SIZE)) : 0.0f;
+    FLOAT modified2 = memoryItem2->SharedOriginalPages ? (memoryItem2->SharedOriginalPages * 100.f / (memoryItem2->RegionSize / PAGE_SIZE)) : 0.0f;
+
+    sortResult = doublecmp(modified1, modified2);
+}
+END_SORT_FUNCTION
+
+BEGIN_SORT_FUNCTION(RegionType)
+{
+    PhpUpdateMemoryRegionTypeExText(node1);
+    PhpUpdateMemoryRegionTypeExText(node2);
+    sortResult = PhCompareStringWithNull(node1->RegionTypeText, node2->RegionTypeText, TRUE);
+}
+END_SORT_FUNCTION
+
+BEGIN_SORT_FUNCTION(Priority)
+{
+    sortResult = uintptrcmp(memoryItem1->Priority, memoryItem2->Priority);
+}
+END_SORT_FUNCTION
+
 BOOLEAN NTAPI PhpMemoryTreeNewCallback(
     _In_ HWND hwnd,
     _In_ PH_TREENEW_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2,
+    _In_ PVOID Context
     )
 {
     PPH_MEMORY_LIST_CONTEXT context = Context;
     PPH_MEMORY_NODE node;
 
-    if (!context)
-        return TRUE;
     if (PhCmForwardMessage(hwnd, Message, Parameter1, Parameter2, &context->Cm))
         return TRUE;
 
@@ -663,10 +813,6 @@ BOOLEAN NTAPI PhpMemoryTreeNewCallback(
     case TreeNewGetChildren:
         {
             PPH_TREENEW_GET_CHILDREN getChildren = Parameter1;
-
-            if (!getChildren)
-                break;
-
             node = (PPH_MEMORY_NODE)getChildren->Node;
 
             if (context->TreeNewSortOrder == NoSortOrder)
@@ -699,9 +845,16 @@ BOOLEAN NTAPI PhpMemoryTreeNewCallback(
                         SORT_FUNCTION(SharedWs),
                         SORT_FUNCTION(LockedWs),
                         SORT_FUNCTION(Committed),
-                        SORT_FUNCTION(Private)
+                        SORT_FUNCTION(Private),
+                        SORT_FUNCTION(SigningLevel),
+                        SORT_FUNCTION(OriginalProtection),
+                        SORT_FUNCTION(OriginalPages),
+                        SORT_FUNCTION(RegionType),
+                        SORT_FUNCTION(Priority),
                     };
                     int (__cdecl *sortFunction)(void *, const void *, const void *);
+
+                    static_assert(RTL_NUMBER_OF(sortFunctions) == PHMMTLC_MAXIMUM, "SortFunctions must equal maximum.");
 
                     if (!PhCmForwardSort(
                         (PPH_TREENEW_NODE *)context->RegionNodeList->Items,
@@ -735,10 +888,6 @@ BOOLEAN NTAPI PhpMemoryTreeNewCallback(
     case TreeNewIsLeaf:
         {
             PPH_TREENEW_IS_LEAF isLeaf = Parameter1;
-
-            if (!isLeaf)
-                break;
-
             node = (PPH_MEMORY_NODE)isLeaf->Node;
 
             if (context->TreeNewSortOrder == NoSortOrder)
@@ -752,52 +901,61 @@ BOOLEAN NTAPI PhpMemoryTreeNewCallback(
             PPH_TREENEW_GET_CELL_TEXT getCellText = Parameter1;
             PPH_MEMORY_ITEM memoryItem;
 
-            if (!getCellText)
-                break;
-
             node = (PPH_MEMORY_NODE)getCellText->Node;
             memoryItem = node->MemoryItem;
 
             switch (getCellText->Id)
             {
             case PHMMTLC_BASEADDRESS:
-                PhPrintPointer(node->BaseAddressText, memoryItem->BaseAddress);
-                PhInitializeStringRefLongHint(&getCellText->Text, node->BaseAddressText);
+                PhInitializeStringRefLongHint(&getCellText->Text, memoryItem->BaseAddressString);
                 break;
             case PHMMTLC_TYPE:
-                if (memoryItem->State & MEM_FREE)
                 {
-                    if (memoryItem->RegionType == UnusableRegion)
-                        PhInitializeStringRef(&getCellText->Text, L"Free (Unusable)");
-                    else
-                        PhInitializeStringRef(&getCellText->Text, L"Free");
-                }
-                else if (node->IsAllocationBase)
-                {
-                    PhInitializeStringRefLongHint(&getCellText->Text, PhGetMemoryTypeString(memoryItem->Type));
-                }
-                else
-                {
-                    PH_FORMAT format[3];
-                    SIZE_T returnLength;
-
-                    PhInitFormatS(&format[0], PhGetMemoryTypeString(memoryItem->Type));
-                    PhInitFormatS(&format[1], L": ");
-                    PhInitFormatS(&format[2], PhGetMemoryStateString(memoryItem->State));
-
-                    if (PhFormatToBuffer(format, 3, node->TypeText, sizeof(node->TypeText), &returnLength))
+                    if (FlagOn(memoryItem->State, MEM_FREE))
                     {
-                        getCellText->Text.Buffer = node->TypeText;
-                        getCellText->Text.Length = returnLength - sizeof(UNICODE_NULL);
+                        if (memoryItem->RegionType == UnusableRegion)
+                            PhInitializeStringRef(&getCellText->Text, L"Free (Unusable)");
+                        else
+                            PhInitializeStringRef(&getCellText->Text, L"Free");
+                    }
+                    else if (node->IsAllocationBase)
+                    {
+                        PPH_STRINGREF string;
+
+                        if (string = PhGetMemoryTypeString(memoryItem->Type))
+                        {
+                            getCellText->Text.Length = string->Length;
+                            getCellText->Text.Buffer = string->Buffer;
+                        }
+                        else
+                        {
+                            PhInitializeEmptyStringRef(&getCellText->Text);
+                        }
+                    }
+                    else
+                    {
+                        PH_FORMAT format[3];
+                        SIZE_T returnLength;
+
+                        PhInitFormatSR(&format[0], *PhGetMemoryTypeString(memoryItem->Type));
+                        PhInitFormatS(&format[1], L": ");
+                        PhInitFormatSR(&format[2], *PhGetMemoryStateString(memoryItem->State));
+
+                        if (PhFormatToBuffer(format, 3, node->TypeText, sizeof(node->TypeText), &returnLength))
+                        {
+                            getCellText->Text.Buffer = node->TypeText;
+                            getCellText->Text.Length = returnLength - sizeof(UNICODE_NULL);
+                        }
                     }
                 }
                 break;
             case PHMMTLC_SIZE:
-                PhMoveReference(&node->SizeText, PhFormatSize(memoryItem->RegionSize, -1));
+                PhMoveReference(&node->SizeText, PhFormatSize(memoryItem->RegionSize, ULONG_MAX));
                 getCellText->Text = PhGetStringRef(node->SizeText);
                 break;
             case PHMMTLC_PROTECTION:
-                PhInitializeStringRefLongHint(&getCellText->Text, node->ProtectionText);
+                if (node->ProtectionText[0] != UNICODE_NULL)
+                    PhInitializeStringRefLongHint(&getCellText->Text, node->ProtectionText);
                 break;
             case PHMMTLC_USE:
                 PhpUpdateMemoryNodeUseText(node);
@@ -831,6 +989,69 @@ BOOLEAN NTAPI PhpMemoryTreeNewCallback(
                 PhMoveReference(&node->PrivateText, PhpFormatSizeIfNonZero(memoryItem->PrivateSize));
                 getCellText->Text = PhGetStringRef(node->PrivateText);
                 break;
+            case PHMMTLC_SIGNING_LEVEL:
+                if (memoryItem->RegionType == MappedFileRegion && memoryItem->u.MappedFile.SigningLevelValid)
+                {
+                    PPH_STRINGREF string;
+
+                    if (string = PhGetSigningLevelString(memoryItem->u.MappedFile.SigningLevel))
+                    {
+                        getCellText->Text.Length = string->Length;
+                        getCellText->Text.Buffer = string->Buffer;
+                    }
+                }
+                break;
+            case PHMMTLC_ORIGINAL_PROTECTION:
+                {
+                    if (node->OriginalProtectionText[0] != UNICODE_NULL)
+                        PhInitializeStringRefLongHint(&getCellText->Text, node->OriginalProtectionText);
+                }
+                break;
+            case PHMMTLC_ORIGINAL_PAGES:
+                {
+                    if (node->IsAllocationBase)
+                        break;
+
+                    if (memoryItem->State & MEM_COMMIT && (memoryItem->Type & (MEM_MAPPED | MEM_IMAGE)))
+                    {
+                        SIZE_T count = memoryItem->SharedOriginalPages;
+                        SIZE_T modified = (memoryItem->RegionSize / PAGE_SIZE) - count;
+                        PH_FORMAT format[4];
+
+                        PhInitFormatF(&format[0], count ? (count * 100 / (memoryItem->RegionSize / PAGE_SIZE)) : 0.0, 2);
+
+                        if (modified)
+                        {
+                            PhInitFormatS(&format[1], L"% (");
+                            PhInitFormatI64U(&format[2], modified);
+                            PhInitFormatS(&format[3], L")");
+                            PhMoveReference(&node->OriginalPagesText, PhFormat(format, RTL_NUMBER_OF(format), 0));
+                        }
+                        else
+                        {
+                            PhInitFormatS(&format[1], L"%");
+                            PhMoveReference(&node->OriginalPagesText, PhFormat(format, 2, 0));
+                        }
+
+                        getCellText->Text = PhGetStringRef(node->OriginalPagesText);
+                    }
+                }
+                break;
+            case PHMMTLC_REGIONTYPE:
+                {
+                    PhpUpdateMemoryRegionTypeExText(node);
+                    getCellText->Text = PhGetStringRef(node->RegionTypeText);
+                }
+                break;
+            case PHMMTLC_PRIORITY:
+                {
+                    if (memoryItem->Priority != 0)
+                    {
+                        PhMoveReference(&node->PriorityText, PhFormatUInt64(memoryItem->Priority, TRUE));
+                        getCellText->Text = PhGetStringRef(node->PriorityText);
+                    }
+                }
+                break;
             default:
                 return FALSE;
             }
@@ -843,19 +1064,16 @@ BOOLEAN NTAPI PhpMemoryTreeNewCallback(
             PPH_TREENEW_GET_NODE_COLOR getNodeColor = Parameter1;
             PPH_MEMORY_ITEM memoryItem;
 
-            if (!getNodeColor)
-                break;
-
             node = (PPH_MEMORY_NODE)getNodeColor->Node;
             memoryItem = node->MemoryItem;
 
             if (!memoryItem)
-                NOTHING; 
+                NOTHING;
             else if (
                 context->HighlightExecutePages && (
-                memoryItem->Protect & PAGE_EXECUTE || 
-                memoryItem->Protect & PAGE_EXECUTE_READ || 
-                memoryItem->Protect & PAGE_EXECUTE_READWRITE || 
+                memoryItem->Protect & PAGE_EXECUTE ||
+                memoryItem->Protect & PAGE_EXECUTE_READ ||
+                memoryItem->Protect & PAGE_EXECUTE_READWRITE ||
                 memoryItem->Protect & PAGE_EXECUTE_WRITECOPY
                 ))
             {
@@ -884,7 +1102,7 @@ BOOLEAN NTAPI PhpMemoryTreeNewCallback(
             //    memoryItem->RegionType == StackRegion || memoryItem->RegionType == Stack32Region ||
             //    memoryItem->RegionType == HeapRegion || memoryItem->RegionType == Heap32Region ||
             //    memoryItem->RegionType == HeapSegmentRegion || memoryItem->RegionType == HeapSegment32Region
-            //    ((memoryItem->Protect & PAGE_EXECUTE_WRITECOPY || memoryItem->Protect & PAGE_EXECUTE_READWRITE || 
+            //    ((memoryItem->Protect & PAGE_EXECUTE_WRITECOPY || memoryItem->Protect & PAGE_EXECUTE_READWRITE ||
             //    memoryItem->Protect & PAGE_READWRITE) && !(memoryItem->Type & SEC_IMAGE))
             //    )
             //{
@@ -906,9 +1124,6 @@ BOOLEAN NTAPI PhpMemoryTreeNewCallback(
     case TreeNewKeyDown:
         {
             PPH_TREENEW_KEY_EVENT keyEvent = Parameter1;
-
-            if (!keyEvent)
-                break;
 
             switch (keyEvent->VirtualKey)
             {
@@ -948,10 +1163,6 @@ BOOLEAN NTAPI PhpMemoryTreeNewCallback(
     case TreeNewLeftDoubleClick:
         {
             PPH_TREENEW_MOUSE_EVENT mouseEvent = Parameter1;
-
-            if (!mouseEvent)
-                break;
-
             node = (PPH_MEMORY_NODE)mouseEvent->Node;
 
             if (node && node->IsAllocationBase)
@@ -963,9 +1174,6 @@ BOOLEAN NTAPI PhpMemoryTreeNewCallback(
     case TreeNewContextMenu:
         {
             PPH_TREENEW_CONTEXT_MENU contextMenu = Parameter1;
-
-            if (!contextMenu)
-                break;
 
             SendMessage(context->ParentWindowHandle, WM_COMMAND, ID_SHOWCONTEXTMENU, (LPARAM)contextMenu);
         }

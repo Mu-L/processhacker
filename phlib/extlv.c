@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010-2012
- *     dmex    2017
+ *     dmex    2017-2023
  *
  */
 
@@ -88,13 +88,13 @@ INT PhpDefaultCompareListViewItems(
 /**
  * Enables extended list view support for a list view control.
  *
- * \param hWnd A handle to the list view control.
+ * \param WindowHandle A handle to the list view control.
  */
 VOID PhSetExtendedListView(
-    _In_ HWND hWnd
+    _In_ HWND WindowHandle
     )
 {
-    PhSetExtendedListViewEx(hWnd, 0, AscendingSortOrder);
+    PhSetExtendedListViewEx(WindowHandle, 0, AscendingSortOrder);
 }
 
 VOID PhSetExtendedListViewEx(
@@ -270,7 +270,7 @@ LRESULT CALLBACK PhpExtendedListViewWndProc(
         {
             if (context->Cursor)
             {
-                SetCursor(context->Cursor);
+                PhSetCursor(context->Cursor);
                 return TRUE;
             }
         }
@@ -456,6 +456,8 @@ LRESULT CALLBACK PhpExtendedListViewWndProc(
         return TRUE;
     case ELVM_SORTITEMS:
         {
+            BOOL result;
+
             if (context->SortFast)
             {
                 // This sort method is faster than the normal sort because our comparison function
@@ -463,22 +465,28 @@ LRESULT CALLBACK PhpExtendedListViewWndProc(
                 // values. The disadvantage of this method is that default sorting is not available
                 // - if a column doesn't have a comparison function, it doesn't get sorted at all.
 
-                ListView_SortItems(
+                result = (BOOL)CallWindowProc( // ListView_SortItems
+                    oldWndProc,
                     hwnd,
-                    PhpExtendedListViewCompareFastFunc,
-                    (LPARAM)context
+                    LVM_SORTITEMS,
+                    (WPARAM)context,
+                    (LPARAM)(PFNLVCOMPARE)PhpExtendedListViewCompareFastFunc
                     );
             }
             else
             {
-                ListView_SortItemsEx(
+                result = (BOOL)CallWindowProc( // ListView_SortItemsEx
+                    oldWndProc,
                     hwnd,
-                    PhpExtendedListViewCompareFunc,
-                    (LPARAM)context
+                    LVM_SORTITEMSEX,
+                    (WPARAM)context,
+                    (LPARAM)(PFNLVCOMPARE)PhpExtendedListViewCompareFunc
                     );
             }
+
+            return result;
         }
-        return TRUE;
+        break;
     }
 
     return CallWindowProc(oldWndProc, hwnd, uMsg, wParam, lParam);
@@ -497,12 +505,12 @@ VOID PhSetHeaderSortIcon(
     _In_ PH_SORT_ORDER Order
     )
 {
-    ULONG count;
-    ULONG i;
+    INT count;
+    INT i;
 
     count = Header_GetItemCount(hwnd);
 
-    if (count == -1)
+    if (count == INT_ERROR)
         return;
 
     for (i = 0; i < count; i++)
@@ -534,7 +542,7 @@ VOID PhSetHeaderSortIcon(
     }
 }
 
-static INT PhpExtendedListViewCompareFunc(
+INT PhpExtendedListViewCompareFunc(
     _In_ LPARAM lParam1,
     _In_ LPARAM lParam2,
     _In_ LPARAM lParamSort
@@ -607,7 +615,7 @@ static INT PhpExtendedListViewCompareFunc(
     return 0;
 }
 
-static INT PhpExtendedListViewCompareFastFunc(
+INT PhpExtendedListViewCompareFastFunc(
     _In_ LPARAM lParam1,
     _In_ LPARAM lParam2,
     _In_ LPARAM lParamSort
@@ -664,7 +672,7 @@ static INT PhpExtendedListViewCompareFastFunc(
     return 0;
 }
 
-static FORCEINLINE INT PhpCompareListViewItems(
+FORCEINLINE INT PhpCompareListViewItems(
     _In_ PPH_EXTLV_CONTEXT Context,
     _In_ INT X,
     _In_ INT Y,
@@ -674,13 +682,13 @@ static FORCEINLINE INT PhpCompareListViewItems(
     _In_ BOOLEAN EnableDefault
     )
 {
-    INT result = 0;
-
     if (
         Column < PH_MAX_COMPARE_FUNCTIONS &&
         Context->CompareFunctions[Column]
         )
     {
+        INT result;
+
         result = PhModifySort(
             Context->CompareFunctions[Column](XParam, YParam, Context->Context),
             Context->SortOrder
@@ -703,7 +711,7 @@ static FORCEINLINE INT PhpCompareListViewItems(
     }
 }
 
-static INT PhpDefaultCompareListViewItems(
+INT PhpDefaultCompareListViewItems(
     _In_ PPH_EXTLV_CONTEXT Context,
     _In_ INT X,
     _In_ INT Y,

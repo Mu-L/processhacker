@@ -92,12 +92,12 @@ VOID PhShowMemoryEditorDialog(
         PhSwapReference(&context->Title, Title);
         context->Flags = Flags;
 
-        context->WindowHandle = CreateDialogParam(
+        context->WindowHandle = PhCreateDialog(
             PhInstanceHandle,
             MAKEINTRESOURCE(IDD_MEMEDIT),
             NULL,
             PhpMemoryEditorDlgProc,
-            (LPARAM)context
+            context
             );
 
         if (!context->LoadCompleted)
@@ -186,7 +186,7 @@ INT_PTR CALLBACK PhpMemoryEditorDlgProc(
                 {
                     PhSetWindowText(hwndDlg, PhaFormatString(L"%s (%u) (0x%Ix - 0x%Ix)",
                         processItem->ProcessName->Buffer, HandleToUlong(context->ProcessId),
-                        context->BaseAddress, (ULONG_PTR)context->BaseAddress + context->RegionSize)->Buffer);
+                        (ULONG_PTR)context->BaseAddress, (ULONG_PTR)context->BaseAddress + context->RegionSize)->Buffer);
                     PhDereferenceObject(processItem);
                 }
             }
@@ -260,21 +260,35 @@ INT_PTR CALLBACK PhpMemoryEditorDlgProc(
             HexEdit_SetBuffer(context->HexEditHandle, context->Buffer, (ULONG)context->RegionSize);
 
             {
-                PH_RECTANGLE windowRectangle;
+                PH_RECTANGLE windowRectangle = { 0 };
 
                 windowRectangle.Position = PhGetIntegerPairSetting(L"MemEditPosition");
-                windowRectangle.Size = PhGetScalableIntegerPairSetting(L"MemEditSize", TRUE).Pair;
-                PhAdjustRectangleToWorkingArea(NULL, &windowRectangle);
 
-                MoveWindow(hwndDlg, windowRectangle.Left, windowRectangle.Top,
-                    windowRectangle.Width, windowRectangle.Height, FALSE);
+                if (windowRectangle.Position.X == 0)
+                {
+                    PhCenterWindow(hwndDlg, context->OwnerHandle);
+                }
+                else
+                {
+                    RECT rect;
+                    LONG dpiValue;
 
-                // Implement cascading by saving an offsetted rectangle.
-                windowRectangle.Left += 20;
-                windowRectangle.Top += 20;
+                    rect = PhRectangleToRect(windowRectangle);
+                    dpiValue = PhGetMonitorDpi(&rect);
 
-                PhSetIntegerPairSetting(L"MemEditPosition", windowRectangle.Position);
-                PhSetScalableIntegerPairSetting2(L"MemEditSize", windowRectangle.Size);
+                    windowRectangle.Size = PhGetScalableIntegerPairSetting(L"MemEditSize", TRUE, dpiValue).Pair;
+                    PhAdjustRectangleToWorkingArea(NULL, &windowRectangle);
+
+                    MoveWindow(hwndDlg, windowRectangle.Left, windowRectangle.Top,
+                        windowRectangle.Width, windowRectangle.Height, FALSE);
+
+                    // Implement cascading by saving an offsetted rectangle.
+                    windowRectangle.Left += 20;
+                    windowRectangle.Top += 20;
+
+                    PhSetIntegerPairSetting(L"MemEditPosition", windowRectangle.Position);
+                    PhSetScalableIntegerPairSetting2(L"MemEditSize", windowRectangle.Size, dpiValue);
+                }
             }
 
             {
@@ -297,6 +311,8 @@ INT_PTR CALLBACK PhpMemoryEditorDlgProc(
                         PhaFormatString(L"%u bytes per row", bytesPerRow)->Buffer, FALSE);
                 }
             }
+
+            PhInitializeWindowTheme(hwndDlg, !!PhGetIntegerSetting(L"EnableThemeSupport"));
 
             context->LoadCompleted = TRUE;
         }
@@ -530,6 +546,12 @@ INT_PTR CALLBACK PhpMemoryEditorDlgProc(
             HexEdit_SetSel(context->HexEditHandle, (ULONG)wParam, PtrToUlong(PTR_ADD_OFFSET(wParam, lParam)));
         }
         break;
+    case WM_CTLCOLORBTN:
+        return HANDLE_WM_CTLCOLORBTN(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+    case WM_CTLCOLORDLG:
+        return HANDLE_WM_CTLCOLORDLG(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+    case WM_CTLCOLORSTATIC:
+        return HANDLE_WM_CTLCOLORSTATIC(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
     }
 
     return FALSE;

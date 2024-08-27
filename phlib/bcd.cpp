@@ -5,12 +5,13 @@
  *
  * Authors:
  *
- *     dmex    2021-2022
+ *     dmex    2021-2023
  *
  */
 
 #include <ph.h>
 #include <bcd.h>
+#include <mapldr.h>
 
 static PVOID BcdDllBaseAddress = nullptr;
 static decltype(&BcdOpenSystemStore) BcdOpenSystemStore_I = nullptr;
@@ -94,7 +95,7 @@ NTSTATUS PhBcdCloseStore(
 
 NTSTATUS PhBcdOpenObject(
     _In_ HANDLE StoreHandle,
-    _In_ PGUID Identifier,
+    _In_ PCGUID Identifier,
     _Out_ PHANDLE ObjectHandle
     )
 {
@@ -468,8 +469,8 @@ NTSTATUS PhBcdSetBootApplicationOneTime(
     {
         HANDLE objectFirmwareHandle;
 
-        // The user might have a third party boot loader where the Windows NT {bootmgr} 
-        // is NOT the default {fwbootmgr} entry. So make the reboot seemless/effortless by
+        // The user might have a third party boot loader where the Windows NT {bootmgr}
+        // is NOT the default {fwbootmgr} entry. So make the reboot seamless/effortless by
         // synchronizing the {fwbootmgr} one-time option to the Windows NT {bootmgr}.
         // This is a QOL optimization so you don't have to manually select Windows
         // first for it to then launch the boot application we already selected. (dmex)
@@ -480,8 +481,11 @@ NTSTATUS PhBcdSetBootApplicationOneTime(
             &objectFirmwareHandle
             )))
         {
-            BCD_ELEMENT_OBJECT_LIST objectFirmwareList[32] = { 0 }; // dynamic?
-            ULONG objectFirmwareListLength = sizeof(objectFirmwareList);
+            BCD_ELEMENT_OBJECT_LIST objectFirmwareList[32]; // dynamic?
+            ULONG objectFirmwareListLength;
+
+            memset(objectFirmwareList, 0, sizeof(objectFirmwareList));
+            objectFirmwareListLength = sizeof(objectFirmwareList);
 
             if (NT_SUCCESS(PhBcdGetElementData(
                 objectFirmwareHandle,
@@ -491,7 +495,7 @@ NTSTATUS PhBcdSetBootApplicationOneTime(
                 )))
             {
                 // Check if the default entry is some third party application.
-                if (!IsEqualGUID(GUID_WINDOWS_BOOTMGR, objectFirmwareList->ObjectList[0]))
+                if (!IsEqualGUID(objectFirmwareList->ObjectList[0], GUID_WINDOWS_BOOTMGR))
                 {
                     BCD_ELEMENT_OBJECT_LIST firmwareOneTimeBootEntry[1];
 
@@ -685,7 +689,7 @@ static VOID PhpBcdEnumerateOsLoaderList(
 
 static VOID PhpBcdEnumerateBootMgrList(
     _In_ HANDLE StoreHandle,
-    _In_ PGUID Identifier,
+    _In_ PCGUID Identifier,
     _In_ ULONG ElementType,
     _In_ PPH_LIST ObjectList
     )

@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2016
- *     dmex    2017-2020
+ *     dmex    2017-2023
  *
  */
 
@@ -110,10 +110,14 @@ NTSTATUS PhGetProcessMitigationPolicy(
     COPY_PROCESS_MITIGATION_POLICY(ChildProcess, PROCESS_MITIGATION_CHILD_PROCESS_POLICY);
     COPY_PROCESS_MITIGATION_POLICY(SideChannelIsolation, PROCESS_MITIGATION_SIDE_CHANNEL_ISOLATION_POLICY); // 19H1
     COPY_PROCESS_MITIGATION_POLICY(UserShadowStack, PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY); // 20H1
+    COPY_PROCESS_MITIGATION_POLICY(RedirectionTrust, PROCESS_MITIGATION_REDIRECTION_TRUST_POLICY); // 22H1
+    COPY_PROCESS_MITIGATION_POLICY(UserPointerAuth, PROCESS_MITIGATION_USER_POINTER_AUTH_POLICY);
+    COPY_PROCESS_MITIGATION_POLICY(SEHOP, PROCESS_MITIGATION_SEHOP_POLICY);
 
     return status;
 }
 
+_Success_(return)
 BOOLEAN PhDescribeProcessMitigationPolicy(
     _In_ PROCESS_MITIGATION_POLICY Policy,
     _In_ PVOID Data,
@@ -443,7 +447,7 @@ BOOLEAN PhDescribeProcessMitigationPolicy(
     case ProcessSystemCallFilterPolicy:
         {
             PPROCESS_MITIGATION_SYSTEM_CALL_FILTER_POLICY data = Data;
-            
+
             if (data->FilterId)
             {
                 if (ShortDescription)
@@ -604,57 +608,82 @@ BOOLEAN PhDescribeProcessMitigationPolicy(
             }
         }
         break;
+case ProcessRedirectionTrustPolicy:
+{
+    PPROCESS_MITIGATION_REDIRECTION_TRUST_POLICY data = Data;
+
+    // Ensure data is not NULL
+    if (data)
+    {
+        // Handle Enforce Redirection Trust Policy
+        if (data->EnforceRedirectionTrust && data->AuditRedirectionTrust)
+        {
+            if (ShortDescription)
+                *ShortDescription = PhCreateString(L"Junction redirection protection / Audit");
+
+            if (LongDescription)
+                *LongDescription = PhCreateString(L"Prevents the process from following filesystem junctions created by non-admin users and logs the attempt.\r\nLogs attempts by the process to follow filesystem junctions created by non-admin users.\r\n");
+
+            result = TRUE;
+        }
+        else if (data->EnforceRedirectionTrust)
+        {
+            if (ShortDescription)
+                *ShortDescription = PhCreateString(L"Junction redirection protection");
+
+            if (LongDescription)
+                *LongDescription = PhCreateString(L"Prevents the process from following filesystem junctions created by non-admin users and logs the attempt.\r\n");
+
+            result = TRUE;
+        }
+        else if (data->AuditRedirectionTrust)
+        {
+            if (ShortDescription)
+                *ShortDescription = PhCreateString(L"Junction redirection protection (Audit)");
+
+            if (LongDescription)
+                *LongDescription = PhCreateString(L"Logs attempts by the process to follow filesystem junctions created by non-admin users.\r\n");
+
+            result = TRUE;
+        }
+    }
+}
+break;
+    case ProcessUserPointerAuthPolicy:
+        {
+            PPROCESS_MITIGATION_USER_POINTER_AUTH_POLICY data = Data;
+
+            if (data->EnablePointerAuthUserIp)
+            {
+                if (ShortDescription)
+                    *ShortDescription = PhCreateString(L"ARM pointer authentication");
+
+                if (LongDescription)
+                    *LongDescription = PhCreateString(L"Pointer authentication (PAC) prevents unexpected changes to pointers.\r\n");
+
+                result = TRUE;
+            }
+        }
+        break;
+    case ProcessSEHOPPolicy:
+        {
+            PPROCESS_MITIGATION_SEHOP_POLICY data = Data;
+
+            if (data->EnableSehop)
+            {
+                if (ShortDescription)
+                    *ShortDescription = PhCreateString(L"Structured exception handling overwrite protection (SEHOP)");
+
+                if (LongDescription)
+                    *LongDescription = PhCreateString(L"SEHOP prevents Structured Exception Handler (SEH) overwrites.\r\n");
+
+                result = TRUE;
+            }
+        }
+        break;
     default:
         result = FALSE;
     }
 
     return result;
-}
-
-NTSTATUS PhGetProcessSystemDllInitBlock(
-    _In_ HANDLE ProcessHandle,
-    _Out_ PPS_SYSTEM_DLL_INIT_BLOCK *SystemDllInitBlock
-    )
-{
-    NTSTATUS status;
-    PH_STRINGREF systemRoot;
-    PVOID ldrInitBlockBaseAddress = NULL;
-    PPH_STRING ntdllFileName;
-
-    PhGetSystemRoot(&systemRoot);
-    ntdllFileName = PhConcatStringRefZ(&systemRoot, L"\\System32\\ntdll.dll");
-
-    status = PhGetProcedureAddressRemote(
-        ProcessHandle,
-        ntdllFileName->Buffer,
-        "LdrSystemDllInitBlock",
-        0,
-        &ldrInitBlockBaseAddress,
-        NULL
-        );
-
-    PhDereferenceObject(ntdllFileName);
-
-    if (NT_SUCCESS(status) && ldrInitBlockBaseAddress)
-    {
-        PPS_SYSTEM_DLL_INIT_BLOCK ldrInitBlock;
-
-        ldrInitBlock = PhAllocate(sizeof(PS_SYSTEM_DLL_INIT_BLOCK));
-        memset(ldrInitBlock, 0, sizeof(PS_SYSTEM_DLL_INIT_BLOCK));
-
-        status = NtReadVirtualMemory(
-            ProcessHandle,
-            ldrInitBlockBaseAddress,
-            ldrInitBlock,
-            sizeof(PS_SYSTEM_DLL_INIT_BLOCK),
-            NULL
-            );
-
-        if (NT_SUCCESS(status))
-            *SystemDllInitBlock = ldrInitBlock;
-        else
-            PhFree(ldrInitBlock);
-    }
-
-    return status;
 }

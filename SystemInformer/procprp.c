@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2009-2016
- *     dmex    2016-2022
+ *     dmex    2016-2023
  *
  */
 
@@ -14,17 +14,19 @@
 #include <procprp.h>
 #include <procprpp.h>
 
+#include <mapldr.h>
 #include <kphuser.h>
 #include <settings.h>
 
 #include <phplug.h>
 #include <phsettings.h>
 #include <procprv.h>
+#include <mainwnd.h>
 
 PPH_OBJECT_TYPE PhpProcessPropContextType = NULL;
 PPH_OBJECT_TYPE PhpProcessPropPageContextType = NULL;
 PPH_OBJECT_TYPE PhpProcessPropPageWaitContextType = NULL;
-PH_STRINGREF PhpLoadingText = PH_STRINGREF_INIT(L"Loading...");
+PH_STRINGREF PhProcessPropPageLoadingText = PH_STRINGREF_INIT(L"Loading...");
 static RECT MinimumSize = { -1, -1, -1, -1 };
 SLIST_HEADER WaitContextQueryListHead;
 
@@ -42,7 +44,7 @@ PPH_PROCESS_PROPCONTEXT PhCreateProcessPropContext(
         PhpProcessPropContextType = PhCreateObjectType(L"ProcessPropContext", 0, PhpProcessPropContextDeleteProcedure);
         PhpProcessPropPageContextType = PhCreateObjectType(L"ProcessPropPageContext", 0, PhpProcessPropPageContextDeleteProcedure);
         PhpProcessPropPageWaitContextType = PhCreateObjectType(L"ProcessPropPageWaitContext", 0, PhpProcessPropPageWaitContextDeleteProcedure);
-        RtlInitializeSListHead(&WaitContextQueryListHead);
+        PhInitializeSListHead(&WaitContextQueryListHead);
         PhEndInitOnce(&initOnce);
     }
 
@@ -177,6 +179,8 @@ INT CALLBACK PhpPropSheetProc(
                 MinimumSize = rect;
                 MinimumSize.left = 0;
             }
+
+            PhSetTimer(hwndDlg, 2000, 2000, NULL);
         }
         break;
     }
@@ -208,18 +212,15 @@ LRESULT CALLBACK PhpPropSheetWndProc(
 
     oldWndProc = propSheetContext->PropSheetWindowHookProc;
 
-    if (RtlQueryDepthSList(&WaitContextQueryListHead))
-    {
-        PhpFlushProcessPropSheetWaitContextData();
-    }
-
     switch (uMsg)
     {
     case WM_DESTROY:
         {
             HWND tabControl;
             TCITEM tabItem;
-            WCHAR text[128];
+            WCHAR text[128] = L"";
+
+            PhKillTimer(hwnd, 2000);
 
             // Save the window position and size.
 
@@ -247,6 +248,8 @@ LRESULT CALLBACK PhpPropSheetWndProc(
             PhRemoveWindowContext(hwnd, 0xF);
 
             PhDeleteLayoutManager(&propSheetContext->LayoutManager);
+            PhRemoveWindowContext(hwnd, PH_WINDOW_CONTEXT_DEFAULT);
+
             PhFree(propSheetContext);
         }
         break;
@@ -305,6 +308,24 @@ LRESULT CALLBACK PhpPropSheetWndProc(
                     return TRUE;
                 }
             }
+
+            if (PhCsForceNoParent)
+            {
+                if (wParam == VK_F5)
+                {
+                    ProcessHacker_Refresh();
+                }
+            }
+        }
+        break;
+    case WM_TIMER:
+        {
+            UINT id = (UINT)wParam;
+
+            if (id == 2000)
+            {
+                PhpFlushProcessPropSheetWaitContextData();
+            }
         }
         break;
     }
@@ -351,10 +372,16 @@ VOID PhpInitializePropSheetLayoutStage2(
     _In_ HWND hwnd
     )
 {
-    PH_RECTANGLE windowRectangle;
+    PH_RECTANGLE windowRectangle = {0};
+    RECT rect;
+    LONG dpiValue;
 
     windowRectangle.Position = PhGetIntegerPairSetting(L"ProcPropPosition");
-    windowRectangle.Size = PhGetScalableIntegerPairSetting(L"ProcPropSize", TRUE).Pair;
+
+    rect = PhRectangleToRect(windowRectangle);
+    dpiValue = PhGetMonitorDpi(&rect);
+
+    windowRectangle.Size = PhGetScalableIntegerPairSetting(L"ProcPropSize", TRUE, dpiValue).Pair;
 
     if (windowRectangle.Size.X < MinimumSize.right)
         windowRectangle.Size.X = MinimumSize.right;
@@ -480,12 +507,25 @@ VOID NTAPI PhpProcessPropPageWaitContextDeleteProcedure(
 {
     PPH_PROCESS_WAITPROPCONTEXT context = (PPH_PROCESS_WAITPROPCONTEXT)Object;
 
+    PhpFlushProcessPropSheetWaitContextData();
+
     if (context->ProcessWaitHandle)
+    {
         RtlDeregisterWaitEx(context->ProcessWaitHandle, RTL_WAITER_DEREGISTER_WAIT_FOR_COMPLETION);
+        context->ProcessWaitHandle = NULL;
+    }
+
     if (context->ProcessHandle)
+    {
         NtClose(context->ProcessHandle);
+        context->ProcessHandle = NULL;
+    }
+
     if (context->ProcessItem)
+    {
         PhDereferenceObject(context->ProcessItem);
+        context->ProcessItem = NULL;
+    }
 }
 
 VOID PhpCreateProcessPropSheetWaitContext(
@@ -501,9 +541,9 @@ VOID PhpCreateProcessPropSheetWaitContext(
         return;
     if (processItem->ProcessId == NtCurrentProcessId())
         return;
-    // On Windows 8.1 and above, processes without threads are reflected processes 
+    // On Windows 8.1 and above, processes without threads are reflected processes
     // which will not terminate if we have a handle open. (wj32)
-    if (processItem->NumberOfThreads == 0)
+    if (processItem->UserTime.QuadPart + processItem->KernelTime.QuadPart == 0 && processItem->NumberOfThreads == 0)
         return;
 
     if (!NT_SUCCESS(PhOpenProcess(
@@ -526,7 +566,7 @@ VOID PhpCreateProcessPropSheetWaitContext(
         PhpProcessPropertiesWaitCallback,
         waitContext,
         INFINITE,
-        WT_EXECUTEONLYONCE | WT_EXECUTEINIOTHREAD
+        WT_EXECUTEONLYONCE | WT_EXECUTEINWAITTHREAD
         )))
     {
         PropContext->ProcessWaitContext = waitContext;
@@ -534,8 +574,12 @@ VOID PhpCreateProcessPropSheetWaitContext(
     else
     {
         PhDereferenceObject(waitContext->ProcessItem);
+        waitContext->ProcessItem = NULL;
+
+        NtClose(waitContext->ProcessHandle);
+        waitContext->ProcessHandle = NULL;
+
         PhDereferenceObject(waitContext);
-        NtClose(processHandle);
     }
 }
 
@@ -547,7 +591,9 @@ VOID PhpFlushProcessPropSheetWaitContextData(
     PPH_PROCESS_WAITPROPCONTEXT data;
     PROCESS_BASIC_INFORMATION basicInfo;
 
-    //if (!RtlFirstEntrySList(&QueryListHead))
+    //if (!PhQueryDepthSList(&WaitContextQueryListHead))
+    //    return;
+    //if (!RtlFirstEntrySList(&WaitContextQueryListHead))
     //    return;
 
     entry = RtlInterlockedFlushSList(&WaitContextQueryListHead);
@@ -598,7 +644,7 @@ VOID PhpFlushProcessPropSheetWaitContextData(
     }
 }
 
-VOID CALLBACK PhpProcessPropertiesWaitCallback(
+VOID NTAPI PhpProcessPropertiesWaitCallback(
     _In_ PVOID Context,
     _In_ BOOLEAN TimerOrWaitFired
     )
@@ -655,7 +701,7 @@ BOOLEAN PhPropPageDlgProcHeader(
     if (ProcessItem)
         *ProcessItem = propPageContext->PropContext->ProcessItem;
 
-    if (uMsg == WM_DESTROY)
+    if (uMsg == WM_NCDESTROY)
     {
         PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
 
@@ -668,6 +714,22 @@ BOOLEAN PhPropPageDlgProcHeader(
 
     return TRUE;
 }
+
+#ifdef DEBUG
+static VOID ASSERT_DIALOGRECT(
+    _In_ PVOID DllBase,
+    _In_ PCWSTR Name,
+    _In_ SHORT Width,
+    _In_ USHORT Height
+    )
+{
+    PDLGTEMPLATEEX dialogTemplate = NULL;
+
+    PhLoadResource(DllBase, Name, RT_DIALOG, NULL, &dialogTemplate);
+
+    assert(dialogTemplate && dialogTemplate->cx == Width && dialogTemplate->cy == Height);
+}
+#endif
 
 PPH_LAYOUT_ITEM PhAddPropPageLayoutItem(
     _In_ HWND hwnd,
@@ -705,6 +767,9 @@ PPH_LAYOUT_ITEM PhAddPropPageLayoutItem(
         RECT dialogSize;
         RECT margin;
 
+#ifdef DEBUG
+        ASSERT_DIALOGRECT(PhInstanceHandle, MAKEINTRESOURCE(IDD_PROCGENERAL), 260, 260);
+#endif
         // MAKE SURE THESE NUMBERS ARE CORRECT.
         dialogSize.right = 260;
         dialogSize.bottom = 260;
@@ -839,7 +904,7 @@ NTSTATUS PhpProcessPropertiesThreadStart(
         PropContext->ProcessItem->IsInJob &&
         // There's no way the job page can function without KPH since it needs
         // to open a handle to the job.
-        KphIsConnected()
+        (KsiLevel() >= KphLevelMed)
         )
     {
         PhAddProcessPropPage2(
@@ -860,9 +925,11 @@ NTSTATUS PhpProcessPropertiesThreadStart(
     }
 
     // WMI Provider Host
-    // Note: The Winmgmt service includes WMI providers but the process doesn't get tagged with WmiProviderHostType
-    // and the perf cost adding service detection is too high for just this one usage case. (dmex)
-    //if ((PropContext->ProcessItem->KnownProcessType & KnownProcessTypeMask) == WmiProviderHostType)
+    // Note: The Winmgmt service has WMI providers but doesn't get tagged with WmiProviderHostType. (dmex)
+    if (
+        (PropContext->ProcessItem->KnownProcessType & KnownProcessTypeMask) == WmiProviderHostType ||
+        (PropContext->ProcessItem->KnownProcessType & KnownProcessTypeMask) == ServiceHostProcessType
+        )
     {
         newPage = PhCreateProcessPropPageContext(
             MAKEINTRESOURCE(IDD_PROCWMIPROVIDERS),

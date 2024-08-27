@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010-2016
- *     dmex    2017-2022
+ *     dmex    2017-2023
  *
  */
 
@@ -16,6 +16,7 @@
 #include <cpysave.h>
 #include <emenu.h>
 #include <kphuser.h>
+#include <ksisup.h>
 #include <symprv.h>
 
 #include <actions.h>
@@ -23,8 +24,6 @@
 #include <phplug.h>
 #include <settings.h>
 #include <thrdprv.h>
-
-#include <dbghelp.h>
 
 #define WM_PH_COMPLETED (WM_APP + 301)
 //#define WM_PH_STATUS_UPDATE (WM_APP + 302)
@@ -113,6 +112,8 @@ typedef enum _PH_STACK_TREE_COLUMN_ITEM_NAME
     PH_STACK_TREE_COLUMN_RETURNADDRESS,
     PH_STACK_TREE_COLUMN_FILENAME,
     PH_STACK_TREE_COLUMN_LINETEXT,
+    PH_STACK_TREE_COLUMN_ARCHITECTURE,
+    PH_STACK_TREE_COLUMN_FRAMEDISTANCE,
     TREE_COLUMN_ITEM_MAXIMUM
 } PH_STACK_TREE_COLUMN_ITEM_NAME;
 
@@ -123,6 +124,7 @@ typedef struct _PH_STACK_TREE_ROOT_NODE
     PH_THREAD_STACK_FRAME StackFrame;
 
     ULONG Index;
+    ULONG FrameDistance;
     PPH_STRING TooltipText;
     PPH_STRING IndexString;
     PPH_STRING SymbolString;
@@ -136,6 +138,8 @@ typedef struct _PH_STACK_TREE_ROOT_NODE
     WCHAR Parameter4String[PH_PTR_STR_LEN_1];
     WCHAR PcAddressString[PH_PTR_STR_LEN_1];
     WCHAR ReturnAddressString[PH_PTR_STR_LEN_1];
+    PH_STRINGREF Architecture;
+    PPH_STRING FrameDistanceString;
 
     PH_STRINGREF TextCache[TREE_COLUMN_ITEM_MAXIMUM];
 } PH_STACK_TREE_ROOT_NODE, *PPH_STACK_TREE_ROOT_NODE;
@@ -252,6 +256,18 @@ BEGIN_SORT_FUNCTION(LineText)
 }
 END_SORT_FUNCTION
 
+BEGIN_SORT_FUNCTION(Architecture)
+{
+    sortResult = PhCompareStringRef(&node1->Architecture, &node2->Architecture, TRUE);
+}
+END_SORT_FUNCTION
+
+BEGIN_SORT_FUNCTION(FrameDistance)
+{
+    sortResult = uintcmp(node1->FrameDistance, node2->FrameDistance);
+}
+END_SORT_FUNCTION
+
 VOID ThreadStackLoadSettingsTreeList(
     _Inout_ PPH_THREAD_STACK_CONTEXT Context
     )
@@ -300,7 +316,8 @@ VOID DestroyThreadStackNode(
         PhDereferenceObject(Node->TooltipText);
     if (Node->IndexString)
         PhDereferenceObject(Node->IndexString);
-
+    if (Node->FrameDistanceString)
+        PhDereferenceObject(Node->FrameDistanceString);
     PhDereferenceObject(Node);
 }
 
@@ -384,26 +401,19 @@ VOID UpdateThreadStackNode(
 BOOLEAN NTAPI ThreadStackTreeNewCallback(
     _In_ HWND hwnd,
     _In_ PH_TREENEW_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2,
-    _In_opt_ PVOID Context
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2,
+    _In_ PVOID Context
     )
 {
     PPH_THREAD_STACK_CONTEXT context = Context;
     PPH_STACK_TREE_ROOT_NODE node;
-
-    if (!context)
-        return FALSE;
 
     switch (Message)
     {
     case TreeNewGetChildren:
         {
             PPH_TREENEW_GET_CHILDREN getChildren = Parameter1;
-
-            if (!getChildren)
-                break;
-
             node = (PPH_STACK_TREE_ROOT_NODE)getChildren->Node;
 
             if (!getChildren->Node)
@@ -422,8 +432,12 @@ BOOLEAN NTAPI ThreadStackTreeNewCallback(
                     SORT_FUNCTION(ReturnAddress),
                     SORT_FUNCTION(FileName),
                     SORT_FUNCTION(LineText),
+                    SORT_FUNCTION(Architecture),
+                    SORT_FUNCTION(FrameDistance),
                 };
                 int (__cdecl *sortFunction)(void *, const void *, const void *);
+
+                static_assert(RTL_NUMBER_OF(sortFunctions) == TREE_COLUMN_ITEM_MAXIMUM, "SortFunctions must equal maximum.");
 
                 if (context->TreeNewSortColumn < TREE_COLUMN_ITEM_MAXIMUM)
                     sortFunction = sortFunctions[context->TreeNewSortColumn];
@@ -443,10 +457,6 @@ BOOLEAN NTAPI ThreadStackTreeNewCallback(
     case TreeNewIsLeaf:
         {
             PPH_TREENEW_IS_LEAF isLeaf = (PPH_TREENEW_IS_LEAF)Parameter1;
-
-            if (!isLeaf)
-                break;
-
             node = (PPH_STACK_TREE_ROOT_NODE)isLeaf->Node;
 
             isLeaf->IsLeaf = TRUE;
@@ -455,10 +465,6 @@ BOOLEAN NTAPI ThreadStackTreeNewCallback(
     case TreeNewGetCellText:
         {
             PPH_TREENEW_GET_CELL_TEXT getCellText = (PPH_TREENEW_GET_CELL_TEXT)Parameter1;
-
-            if (!getCellText)
-                break;
-
             node = (PPH_STACK_TREE_ROOT_NODE)getCellText->Node;
 
             switch (getCellText->Id)
@@ -502,6 +508,16 @@ BOOLEAN NTAPI ThreadStackTreeNewCallback(
             case PH_STACK_TREE_COLUMN_LINETEXT:
                 getCellText->Text = PhGetStringRef(node->LineTextString);
                 break;
+            case PH_STACK_TREE_COLUMN_ARCHITECTURE:
+                getCellText->Text = node->Architecture;
+                break;
+            case PH_STACK_TREE_COLUMN_FRAMEDISTANCE:
+                {
+                    if (node->FrameDistance)
+                        PhMoveReference(&node->FrameDistanceString, PhFormatSize(node->FrameDistance, ULONG_MAX));
+                    getCellText->Text = PhGetStringRef(node->FrameDistanceString);
+                }
+                break;
             default:
                 return FALSE;
             }
@@ -512,10 +528,6 @@ BOOLEAN NTAPI ThreadStackTreeNewCallback(
     case TreeNewGetNodeColor:
         {
             PPH_TREENEW_GET_NODE_COLOR getNodeColor = Parameter1;
-
-            if (!getNodeColor)
-                break;
-
             node = (PPH_STACK_TREE_ROOT_NODE)getNodeColor->Node;
 
             if (context->HighlightInlineFrames && PhIsStackFrameTypeInline(node->StackFrame.InlineFrameContext))
@@ -544,7 +556,7 @@ BOOLEAN NTAPI ThreadStackTreeNewCallback(
     case TreeNewContextMenu:
         {
             PPH_TREENEW_CONTEXT_MENU contextMenuEvent = Parameter1;
-            
+
             SendMessage(
                 context->WindowHandle,
                 WM_COMMAND,
@@ -557,13 +569,18 @@ BOOLEAN NTAPI ThreadStackTreeNewCallback(
         {
             PPH_TREENEW_KEY_EVENT keyEvent = Parameter1;
 
-            if (!keyEvent)
-                break;
-
             switch (keyEvent->VirtualKey)
             {
             case VK_F5:
                 SendMessage(context->WindowHandle, WM_COMMAND, IDC_REFRESH, 0);
+                break;
+            case 'C':
+                if (GetKeyState(VK_CONTROL) < 0)
+                    SendMessage(context->WindowHandle, WM_COMMAND, IDC_COPY, 0);
+                break;
+            case 'A':
+                if (GetKeyState(VK_CONTROL) < 0)
+                    TreeNew_SelectRange(context->TreeNewHandle, 0, -1);
                 break;
             }
         }
@@ -581,7 +598,7 @@ BOOLEAN NTAPI ThreadStackTreeNewCallback(
             data.MouseEvent = Parameter1;
             data.DefaultSortColumn = 0;
             data.DefaultSortOrder = AscendingSortOrder;
-            PhInitializeTreeNewColumnMenu(&data);
+            PhInitializeTreeNewColumnMenuEx(&data, PH_TN_COLUMN_MENU_SHOW_RESET_SORT);
 
             data.Selection = PhShowEMenu(data.Menu, hwnd, PH_EMENU_SHOW_LEFTRIGHT,
                 PH_ALIGN_LEFT | PH_ALIGN_TOP, data.MouseEvent->ScreenLocation.x, data.MouseEvent->ScreenLocation.y);
@@ -592,10 +609,6 @@ BOOLEAN NTAPI ThreadStackTreeNewCallback(
     case TreeNewGetCellTooltip:
         {
             PPH_TREENEW_GET_CELL_TOOLTIP getCellTooltip = Parameter1;
-
-            if (!getCellTooltip)
-                break;
-
             node = (PPH_STACK_TREE_ROOT_NODE)getCellTooltip->Node;
 
             if (getCellTooltip->Column->Id != 0)
@@ -617,14 +630,33 @@ BOOLEAN NTAPI ThreadStackTreeNewCallback(
                     &lineInfo
                     ))
                 {
+                    PH_FORMAT format[5];
+                    SIZE_T returnLength;
+                    WCHAR buffer[0x100];
+
                     PhMoveReference(&fileName, PhGetFileName(fileName));
 
-                    PhAppendFormatStringBuilder(
-                        &stringBuilder,
-                        L"File: %s: line %lu\n",
-                        fileName->Buffer,
-                        lineInfo.LineNumber
-                        );
+                    // File: %s: line %lu\n
+                    PhInitFormatS(&format[0], L"File: ");
+                    PhInitFormatSR(&format[1], fileName->sr);
+                    PhInitFormatS(&format[2], L": line ");
+                    PhInitFormatU(&format[3], lineInfo.LineNumber);
+                    PhInitFormatS(&format[4], L"\n");
+
+                    if (PhFormatToBuffer(format, RTL_NUMBER_OF(format), buffer, sizeof(buffer), &returnLength))
+                    {
+                        PhAppendStringBuilderEx(&stringBuilder, buffer, returnLength - sizeof(UNICODE_NULL));
+                    }
+                    else
+                    {
+                        PhAppendFormatStringBuilder(
+                            &stringBuilder,
+                            L"File: %s: line %lu\n",
+                            fileName->Buffer,
+                            lineInfo.LineNumber
+                            );
+                    }
+
                     PhDereferenceObject(fileName);
                 }
 
@@ -767,6 +799,7 @@ VOID InitializeThreadStackTree(
     PhSetControlTheme(Context->TreeNewHandle, L"explorer");
 
     TreeNew_SetCallback(Context->TreeNewHandle, ThreadStackTreeNewCallback, Context);
+    TreeNew_SetRedraw(Context->TreeNewHandle, FALSE);
 
     PhAddTreeNewColumn(Context->TreeNewHandle, PH_STACK_TREE_COLUMN_INDEX, TRUE, L"#", 30, PH_ALIGN_LEFT, 0, 0);
     PhAddTreeNewColumn(Context->TreeNewHandle, PH_STACK_TREE_COLUMN_SYMBOL, TRUE, L"Name", 250, PH_ALIGN_LEFT, 1, 0);
@@ -780,7 +813,10 @@ VOID InitializeThreadStackTree(
     PhAddTreeNewColumn(Context->TreeNewHandle, PH_STACK_TREE_COLUMN_RETURNADDRESS, FALSE, L"Return address", 100, PH_ALIGN_LEFT, ULONG_MAX, 0);
     PhAddTreeNewColumn(Context->TreeNewHandle, PH_STACK_TREE_COLUMN_FILENAME, FALSE, L"File name", 100, PH_ALIGN_LEFT, ULONG_MAX, 0);
     PhAddTreeNewColumn(Context->TreeNewHandle, PH_STACK_TREE_COLUMN_LINETEXT, FALSE, L"Line number", 100, PH_ALIGN_LEFT, ULONG_MAX, 0);
+    PhAddTreeNewColumn(Context->TreeNewHandle, PH_STACK_TREE_COLUMN_ARCHITECTURE, FALSE, L"Architecture", 100, PH_ALIGN_LEFT, ULONG_MAX, 0);
+    PhAddTreeNewColumn(Context->TreeNewHandle, PH_STACK_TREE_COLUMN_FRAMEDISTANCE, FALSE, L"Frame distance", 100, PH_ALIGN_RIGHT, ULONG_MAX, DT_RIGHT);
 
+    TreeNew_SetRedraw(Context->TreeNewHandle, TRUE);
     TreeNew_SetTriState(Context->TreeNewHandle, FALSE);
     TreeNew_SetSort(Context->TreeNewHandle, PH_STACK_TREE_COLUMN_INDEX, AscendingSortOrder);
 
@@ -837,10 +873,13 @@ VOID PhShowThreadStackDialog(
     PPH_THREAD_STACK_CONTEXT context;
 
     // If the user is trying to view a system thread stack
-    // but KProcessHacker is not loaded, show an error message.
-    if (ProcessId == SYSTEM_PROCESS_ID && !KphIsConnected())
+    // but KSystemInformer is not loaded, show an error message.
+    if (ProcessId == SYSTEM_PROCESS_ID && (KsiLevel() < KphLevelMed))
     {
-        PhShowError2(ParentWindowHandle, PH_KPH_ERROR_TITLE, L"%s", PH_KPH_ERROR_MESSAGE);
+        PhShowKsiNotConnected(
+            ParentWindowHandle,
+            L"Inspecting kernel stacks requires a connection to the kernel driver."
+            );
         return;
     }
 
@@ -858,14 +897,11 @@ VOID PhShowThreadStackDialog(
         ThreadId
         )))
     {
-        if (KphIsConnected())
-        {
-            status = PhOpenThread(
-                &threadHandle,
-                THREAD_QUERY_LIMITED_INFORMATION,
-                ThreadId
-                );
-        }
+        status = PhOpenThread(
+            &threadHandle,
+            THREAD_QUERY_INFORMATION | THREAD_GET_CONTEXT,
+            ThreadId
+            );
     }
 
     if (!NT_SUCCESS(status))
@@ -892,12 +928,12 @@ VOID PhShowThreadStackDialog(
     context->ThreadProvider = ThreadProvider;
     context->SymbolProvider = ThreadProvider->SymbolProvider;
 
-    DialogBoxParam(
+    PhDialogBox(
         PhInstanceHandle,
         MAKEINTRESOURCE(IDD_THRDSTACK),
         ParentWindowHandle,
         PhpThreadStackDlgProc,
-        (LPARAM)context
+        context
         );
 }
 
@@ -928,7 +964,7 @@ INT_PTR CALLBACK PhpThreadStackDlgProc(
     case WM_INITDIALOG:
         {
             NTSTATUS status;
-            
+
             context->WindowHandle = hwndDlg;
             context->TreeNewHandle = GetDlgItem(hwndDlg, IDC_TREELIST);
             context->HighlightUserPages = !!PhGetIntegerSetting(L"UseColorUserThreadStack");
@@ -977,6 +1013,7 @@ INT_PTR CALLBACK PhpThreadStackDlgProc(
                 control.u.Initializing.ProcessId = context->ProcessId;
                 control.u.Initializing.ThreadId = context->ThreadId;
                 control.u.Initializing.ThreadHandle = context->ThreadHandle;
+                control.u.Initializing.ProcessHandle = context->SymbolProvider->ProcessHandle;
                 control.u.Initializing.SymbolProvider = context->SymbolProvider;
                 control.u.Initializing.CustomWalk = FALSE;
                 PhInvokeCallback(PhGetGeneralCallback(GeneralCallbackThreadStackControl), &control);
@@ -1078,7 +1115,7 @@ INT_PTR CALLBACK PhpThreadStackDlgProc(
                             {
                             case PH_THREAD_STACK_MENUITEM_INSPECT:
                                 {
-                                    if (!PhIsNullOrEmptyString(selectedNode->FileNameString) && PhDoesFileExistsWin32(PhGetString(selectedNode->FileNameString)))
+                                    if (!PhIsNullOrEmptyString(selectedNode->FileNameString) && PhDoesFileExistWin32(PhGetString(selectedNode->FileNameString)))
                                     {
                                         PhShellExecuteUserString(
                                             hwndDlg,
@@ -1092,7 +1129,7 @@ INT_PTR CALLBACK PhpThreadStackDlgProc(
                                 break;
                             case PH_THREAD_STACK_MENUITEM_OPENFILELOCATION:
                                 {
-                                    if (!PhIsNullOrEmptyString(selectedNode->FileNameString) && PhDoesFileExistsWin32(PhGetString(selectedNode->FileNameString)))
+                                    if (!PhIsNullOrEmptyString(selectedNode->FileNameString) && PhDoesFileExistWin32(PhGetString(selectedNode->FileNameString)))
                                     {
                                         PhShellExecuteUserString(
                                             hwndDlg,
@@ -1126,7 +1163,7 @@ INT_PTR CALLBACK PhpThreadStackDlgProc(
 
                     if (selectedNode = GetSelectedThreadStackNode(context))
                     {
-                        if (!PhIsNullOrEmptyString(selectedNode->FileNameString) && PhDoesFileExistsWin32(PhGetString(selectedNode->FileNameString)))
+                        if (!PhIsNullOrEmptyString(selectedNode->FileNameString) && PhDoesFileExistWin32(PhGetString(selectedNode->FileNameString)))
                         {
                             PhShellExecuteUserString(
                                 hwndDlg,
@@ -1234,6 +1271,12 @@ INT_PTR CALLBACK PhpThreadStackDlgProc(
             PhResizingMinimumSize((PRECT)lParam, wParam, MinimumSize.right, MinimumSize.bottom);
         }
         break;
+    case WM_CTLCOLORBTN:
+        return HANDLE_WM_CTLCOLORBTN(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+    case WM_CTLCOLORDLG:
+        return HANDLE_WM_CTLCOLORDLG(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+    case WM_CTLCOLORSTATIC:
+        return HANDLE_WM_CTLCOLORSTATIC(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
     }
 
     return FALSE;
@@ -1252,7 +1295,7 @@ VOID PhpFreeThreadStackItem(
 
 BOOLEAN NTAPI PhpWalkThreadStackCallback(
     _In_ PPH_THREAD_STACK_FRAME StackFrame,
-    _In_opt_ PVOID Context
+    _In_ PVOID Context
     )
 {
     PPH_THREAD_STACK_CONTEXT threadStackContext = (PPH_THREAD_STACK_CONTEXT)Context;
@@ -1264,8 +1307,6 @@ BOOLEAN NTAPI PhpWalkThreadStackCallback(
     BOOLEAN enableStackFrameInlineInfo;
     BOOLEAN enableStackFrameLineInfo;
 
-    if (!threadStackContext)
-        return FALSE;
     if (threadStackContext->StopWalk)
         return FALSE;
 
@@ -1304,7 +1345,7 @@ BOOLEAN NTAPI PhpWalkThreadStackCallback(
             );
 
         if (symbol &&
-            (StackFrame->Flags & PH_THREAD_STACK_FRAME_I386) &&
+            (StackFrame->Machine == IMAGE_FILE_MACHINE_I386) &&
             !(StackFrame->Flags & PH_THREAD_STACK_FRAME_FPO_DATA_PRESENT))
         {
             PhMoveReference(&symbol, PhConcatStringRefZ(&symbol->sr, L" (No unwind info)"));
@@ -1368,7 +1409,7 @@ BOOLEAN NTAPI PhpWalkThreadStackCallback(
             );
 
         if (symbol &&
-            (StackFrame->Flags & PH_THREAD_STACK_FRAME_I386) &&
+            (StackFrame->Machine == IMAGE_FILE_MACHINE_I386) &&
             !(StackFrame->Flags & PH_THREAD_STACK_FRAME_FPO_DATA_PRESENT))
         {
             PhMoveReference(&symbol, PhConcatStringRefZ(&symbol->sr, L" (No unwind info)"));
@@ -1451,7 +1492,8 @@ NTSTATUS PhpRefreshThreadStackThreadStart(
 
     PhInitializeAutoPool(&autoPool);
 
-    PhLoadSymbolsThreadProvider(threadStackContext->ThreadProvider);
+    PhLoadSymbolProviderOptions(threadStackContext->SymbolProvider);
+    PhLoadSymbolProviderModules(threadStackContext->SymbolProvider, threadStackContext->ProcessId);
 
     clientId.UniqueProcess = threadStackContext->ProcessId;
     clientId.UniqueThread = threadStackContext->ThreadId;
@@ -1467,7 +1509,7 @@ NTSTATUS PhpRefreshThreadStackThreadStart(
         control.u.WalkStack.ThreadHandle = threadStackContext->ThreadHandle;
         control.u.WalkStack.ProcessHandle = threadStackContext->SymbolProvider->ProcessHandle;
         control.u.WalkStack.ClientId = &clientId;
-        control.u.WalkStack.Flags = PH_WALK_I386_STACK | PH_WALK_AMD64_STACK | PH_WALK_KERNEL_STACK;
+        control.u.WalkStack.Flags = PH_WALK_USER_WOW64_STACK | PH_WALK_USER_STACK | PH_WALK_KERNEL_STACK;
         control.u.WalkStack.Callback = PhpWalkThreadStackCallback;
         control.u.WalkStack.CallbackContext = threadStackContext;
         PhInvokeCallback(PhGetGeneralCallback(GeneralCallbackThreadStackControl), &control);
@@ -1494,7 +1536,7 @@ NTSTATUS PhpRefreshThreadStackThreadStart(
             threadStackContext->SymbolProvider->ProcessHandle,
             &clientId,
             threadStackContext->SymbolProvider,
-            PH_WALK_I386_STACK | PH_WALK_AMD64_STACK | PH_WALK_KERNEL_STACK,
+            PH_WALK_USER_WOW64_STACK | PH_WALK_USER_STACK | PH_WALK_KERNEL_STACK,
             PhpWalkThreadStackCallback,
             threadStackContext
             );
@@ -1535,7 +1577,7 @@ LRESULT CALLBACK PhpThreadStackTaskDialogSubclassProc(
 
     switch (uMsg)
     {
-    case WM_DESTROY:
+    case WM_NCDESTROY:
         {
             SetWindowLongPtr(hwndDlg, GWLP_WNDPROC, (LONG_PTR)oldWndProc);
             PhRemoveWindowContext(hwndDlg, 0xF);
@@ -1571,7 +1613,7 @@ VOID PhpSymbolProviderEventCallbackHandler(
         statusMessage = PhReferenceObject(event->EventMessage);
         break;
     case PH_SYMBOL_EVENT_TYPE_LOAD_END:
-        statusMessage = PhCreateString(L"Loading symbols from image...");
+        statusMessage = PhCreateString(L"Loading symbols...");
         break;
     case PH_SYMBOL_EVENT_TYPE_PROGRESS:
         {
@@ -1607,7 +1649,7 @@ HRESULT CALLBACK PhpThreadStackTaskDialogCallback(
             context->TaskDialogHandle = hwndDlg;
 
             PhSetApplicationWindowIcon(hwndDlg);
-            SendMessage(hwndDlg, TDM_UPDATE_ICON, TDIE_ICON_MAIN, (LPARAM)PhGetApplicationIcon(FALSE));
+            //SendMessage(hwndDlg, TDM_UPDATE_ICON, TDIE_ICON_MAIN, (LPARAM)PhGetApplicationIcon(FALSE));
 
             SendMessage(hwndDlg, TDM_SET_MARQUEE_PROGRESS_BAR, TRUE, 0);
             SendMessage(hwndDlg, TDM_SET_PROGRESS_BAR_MARQUEE, TRUE, 1);
@@ -1730,6 +1772,7 @@ BOOLEAN PhpShowThreadStackWindow(
         TDF_POSITION_RELATIVE_TO_WINDOW | TDF_SHOW_MARQUEE_PROGRESS_BAR |
         TDF_CALLBACK_TIMER;
     config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    config.hMainIcon = PhGetApplicationIcon(FALSE);
     config.pfCallback = PhpThreadStackTaskDialogCallback;
     config.lpCallbackData = (LONG_PTR)Context;
     config.hwndParent = Context->WindowHandle;
@@ -1741,7 +1784,7 @@ BOOLEAN PhpShowThreadStackWindow(
     return SUCCEEDED(TaskDialogIndirect(&config, &result, NULL, NULL)) && result != IDCANCEL;
 }
 
-static NTSTATUS PhpRefreshThreadStack(
+NTSTATUS PhpRefreshThreadStack(
     _In_ HWND hwnd,
     _In_ PPH_THREAD_STACK_CONTEXT Context
     )
@@ -1803,6 +1846,42 @@ static NTSTATUS PhpRefreshThreadStack(
                 PhPrintPointer(stackNode->PcAddressString, item->StackFrame.PcAddress);
             if (item->StackFrame.ReturnAddress)
                 PhPrintPointer(stackNode->ReturnAddressString, item->StackFrame.ReturnAddress);
+
+            switch (stackNode->StackFrame.Machine)
+            {
+            case IMAGE_FILE_MACHINE_ARM64EC:
+                PhInitializeStringRef(&stackNode->Architecture, L"ARM64EC");
+                break;
+            case IMAGE_FILE_MACHINE_CHPE_X86:
+                PhInitializeStringRef(&stackNode->Architecture, L"CHPE");
+                break;
+            case IMAGE_FILE_MACHINE_ARM64:
+                PhInitializeStringRef(&stackNode->Architecture, L"ARM64");
+                break;
+            case IMAGE_FILE_MACHINE_ARM:
+                PhInitializeStringRef(&stackNode->Architecture, L"ARM");
+                break;
+            case IMAGE_FILE_MACHINE_AMD64:
+                PhInitializeStringRef(&stackNode->Architecture, L"x64");
+                break;
+            case IMAGE_FILE_MACHINE_I386:
+                PhInitializeStringRef(&stackNode->Architecture, L"x86");
+                break;
+            default:
+                PhInitializeStringRef(&stackNode->Architecture, L"");
+                break;
+            }
+
+            if (i > 0 && item->StackFrame.StackAddress)
+            {
+                PTHREAD_STACK_ITEM previousFrame = Context->List->Items[i - 1];
+
+                // Windbg "k f" displays the distance between adjacent frames. (dmex)
+                if (previousFrame->StackFrame.StackAddress)
+                {
+                    stackNode->FrameDistance = (ULONG)((ULONG_PTR)item->StackFrame.StackAddress - (ULONG_PTR)previousFrame->StackFrame.StackAddress);
+                }
+            }
 
             UpdateThreadStackNode(Context, stackNode);
         }

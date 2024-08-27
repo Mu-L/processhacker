@@ -29,7 +29,7 @@ VOID PvpSetRichEditText(
     SendMessage(WindowHandle, WM_SETREDRAW, FALSE, 0);
     //SendMessage(WindowHandle, EM_SETSEL, 0, -1); // -2
     SendMessage(WindowHandle, WM_SETTEXT, FALSE, (LPARAM)Text);
-    //SendMessage(WindowHandle, WM_VSCROLL, SB_TOP, 0); // requires SetFocus()    
+    //SendMessage(WindowHandle, WM_VSCROLL, SB_TOP, 0); // requires SetFocus()
     SendMessage(WindowHandle, WM_SETREDRAW, TRUE, 0);
     //PostMessage(WindowHandle, EM_SETSEL, -1, 0);
     //InvalidateRect(WindowHandle, NULL, FALSE);
@@ -42,7 +42,7 @@ VOID PvpShowFilePreview(
     PPH_STRING fileText;
     PH_STRING_BUILDER sb;
 
-    if (fileText = PhFileReadAllText(PvFileName->Buffer, TRUE))
+    if (fileText = PhFileReadAllTextWin32(PvFileName->Buffer, TRUE))
     {
         PhInitializeStringBuilder(&sb, 0x1000);
 
@@ -108,14 +108,15 @@ INT_PTR CALLBACK PvpPePreviewDlgProc(
             PhAddLayoutItem(&context->LayoutManager, context->EditWindow, NULL, PH_ANCHOR_ALL);
 
             PvpShowFilePreview(hwndDlg);
-            
-            PhInitializeWindowTheme(hwndDlg, PeEnableThemeSupport);
+
+            PhInitializeWindowTheme(hwndDlg, PhEnableThemeSupport);
         }
         break;
     case WM_DESTROY:
         {
             PhDeleteLayoutManager(&context->LayoutManager);
 
+            PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
             PhFree(context);
         }
         break;

@@ -12,13 +12,13 @@
 #include "updater.h"
 
 INT_PTR CALLBACK OptionsDlgProc(
-    _In_ HWND hwndDlg,
-    _In_ UINT uMsg,
+    _In_ HWND WindowHandle,
+    _In_ UINT WindowMessage,
     _In_ WPARAM wParam,
     _In_ LPARAM lParam
     )
 {
-    switch (uMsg)
+    switch (WindowMessage)
     {
     case WM_INITDIALOG:
         {
@@ -27,7 +27,7 @@ INT_PTR CALLBACK OptionsDlgProc(
                 ULONG64 lastUpdateTimeTicks;
                 PPH_STRING lastUpdateTimeString;
 
-                Button_SetCheck(GetDlgItem(hwndDlg, IDC_AUTOCHECKBOX), BST_CHECKED);
+                Button_SetCheck(GetDlgItem(WindowHandle, IDC_AUTOCHECKBOX), BST_CHECKED);
 
                 if (lastUpdateTimeString = PhGetStringSetting(SETTING_NAME_LAST_CHECK))
                 {
@@ -46,7 +46,7 @@ INT_PTR CALLBACK OptionsDlgProc(
                         PhQuerySystemTime(&currentTime);
                         timeRelativeString = PH_AUTO(PhFormatTimeSpanRelative(currentTime.QuadPart - lastUpdateTimeTicks));
 
-                        PhSetDialogItemText(hwndDlg, IDC_TEXT, PhaFormatString(
+                        PhSetDialogItemText(WindowHandle, IDC_TEXT, PhaFormatString(
                             L"Last update check: %s (%s ago)",
                             PhGetStringOrEmpty(timeString),
                             PhGetStringOrEmpty(timeRelativeString)
@@ -60,7 +60,7 @@ INT_PTR CALLBACK OptionsDlgProc(
                         if (time.QuadPart > 0)
                         {
                             timeRelativeString = PH_AUTO(PhFormatTimeSpanRelative(time.QuadPart));
-                            PhSetDialogItemText(hwndDlg, IDC_TEXT2, PhaFormatString(
+                            PhSetDialogItemText(WindowHandle, IDC_TEXT2, PhaFormatString(
                                 L"Next update check: %s (%s)",
                                 PhGetStringOrEmpty(timeString),
                                 PhGetStringOrEmpty(timeRelativeString)
@@ -68,7 +68,7 @@ INT_PTR CALLBACK OptionsDlgProc(
                         }
                         else
                         {
-                            PhSetDialogItemText(hwndDlg, IDC_TEXT2, PhaFormatString(
+                            PhSetDialogItemText(WindowHandle, IDC_TEXT2, PhaFormatString(
                                 L"Next update check: %s",
                                 PhGetStringOrEmpty(timeString)
                                 )->Buffer);
@@ -81,7 +81,12 @@ INT_PTR CALLBACK OptionsDlgProc(
 
             if (PhGetIntegerSetting(SETTING_NAME_UPDATE_MODE))
             {
-                Button_SetCheck(GetDlgItem(hwndDlg, IDC_AUTOCHECKBOX2), BST_CHECKED);
+                Button_SetCheck(GetDlgItem(WindowHandle, IDC_SHOWSTARTPROMPTCHECK), BST_CHECKED);
+            }
+
+            if (PhGetIntegerSetting(SETTING_NAME_AUTO_CHECK_PAGE))
+            {
+                Button_SetCheck(GetDlgItem(WindowHandle, IDC_SKIPWELCOMEPAGECHECK), BST_CHECKED);
             }
         }
         break;
@@ -95,9 +100,15 @@ INT_PTR CALLBACK OptionsDlgProc(
                         Button_GetCheck(GET_WM_COMMAND_HWND(wParam, lParam)) == BST_CHECKED);
                 }
                 break;
-            case IDC_AUTOCHECKBOX2:
+            case IDC_SHOWSTARTPROMPTCHECK:
                 {
                     PhSetIntegerSetting(SETTING_NAME_UPDATE_MODE,
+                        Button_GetCheck(GET_WM_COMMAND_HWND(wParam, lParam)) == BST_CHECKED);
+                }
+                break;
+            case IDC_SKIPWELCOMEPAGECHECK:
+                {
+                    PhSetIntegerSetting(SETTING_NAME_AUTO_CHECK_PAGE,
                         Button_GetCheck(GET_WM_COMMAND_HWND(wParam, lParam)) == BST_CHECKED);
                 }
                 break;
@@ -105,11 +116,11 @@ INT_PTR CALLBACK OptionsDlgProc(
         }
         break;
     case WM_CTLCOLORBTN:
-        return HANDLE_WM_CTLCOLORBTN(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+        return HANDLE_WM_CTLCOLORBTN(WindowHandle, wParam, lParam, PhWindowThemeControlColor);
     case WM_CTLCOLORDLG:
-        return HANDLE_WM_CTLCOLORDLG(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+        return HANDLE_WM_CTLCOLORDLG(WindowHandle, wParam, lParam, PhWindowThemeControlColor);
     case WM_CTLCOLORSTATIC:
-        return HANDLE_WM_CTLCOLORSTATIC(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
+        return HANDLE_WM_CTLCOLORSTATIC(WindowHandle, wParam, lParam, PhWindowThemeControlColor);
     }
 
     return FALSE;
@@ -130,9 +141,7 @@ PPH_STRING TrimString(
     )
 {
     static PH_STRINGREF whitespace = PH_STRINGREF_INIT(L"  ");
-    PH_STRINGREF sr = String->sr;
-    PhTrimStringRef(&sr, &whitespace, 0);
-    return PhCreateString2(&sr);
+    return PhCreateString3(&String->sr, 0, &whitespace);
 }
 
 _Success_(return)
@@ -156,8 +165,8 @@ BOOLEAN PhpUpdaterExtractCoAuthorName(
 
     authoredByName = PhSubstring(
         CommitMessage,
-        authoredByNameIndex + wcslen(L"Co-Authored-By:"),
-        authoredByNameLength - wcslen(L"Co-Authored-By:")
+        authoredByNameIndex + (RTL_NUMBER_OF(L"Co-Authored-By:") - 1),
+        authoredByNameLength - (RTL_NUMBER_OF(L"Co-Authored-By:") - 1)
         );
 
     if (CommitCoAuthorName)
@@ -167,21 +176,54 @@ BOOLEAN PhpUpdaterExtractCoAuthorName(
     return TRUE;
 }
 
+PPH_STRING PhUpdaterCreateUserAgentString(
+    VOID
+    )
+{
+    PH_FORMAT format[8];
+    SIZE_T returnLength;
+    ULONG majorVersion;
+    ULONG minorVersion;
+    ULONG buildVersion;
+    ULONG revisionVersion;
+    WCHAR formatBuffer[260];
+
+    PhGetPhVersionNumbers(&majorVersion, &minorVersion, &buildVersion, &revisionVersion);
+    PhInitFormatS(&format[0], L"SystemInformer_");
+    PhInitFormatU(&format[1], majorVersion);
+    PhInitFormatC(&format[2], L'.');
+    PhInitFormatU(&format[3], minorVersion);
+    PhInitFormatC(&format[4], L'.');
+    PhInitFormatU(&format[5], buildVersion);
+    PhInitFormatC(&format[6], L'.');
+    PhInitFormatU(&format[7], revisionVersion);
+
+    if (PhFormatToBuffer(format, RTL_NUMBER_OF(format), formatBuffer, sizeof(formatBuffer), &returnLength))
+    {
+        PH_STRINGREF stringFormat;
+
+        stringFormat.Buffer = formatBuffer;
+        stringFormat.Length = returnLength - sizeof(UNICODE_NULL);
+
+        return PhCreateString2(&stringFormat);
+    }
+
+    return PhFormat(format, RTL_NUMBER_OF(format), 0);
+}
+
 PPH_LIST PhpUpdaterQueryCommitHistory(
     VOID
     )
 {
     PPH_LIST results = NULL;
     PPH_BYTES jsonString = NULL;
-    PPH_STRING versionString = NULL;
-    PPH_STRING userAgentString = NULL;
+    PPH_STRING userAgentString;
     PPH_HTTP_CONTEXT httpContext = NULL;
     PVOID jsonRootObject = NULL;
     ULONG i;
     ULONG arrayLength;
 
-    versionString = PhGetPhVersion();
-    userAgentString = PhConcatStrings2(L"ProcessHacker_", versionString->Buffer);
+    userAgentString = PhUpdaterCreateUserAgentString();
 
     if (!PhHttpSocketCreate(&httpContext, PhGetString(userAgentString)))
         goto CleanupExit;
@@ -192,7 +234,7 @@ PPH_LIST PhpUpdaterQueryCommitHistory(
     if (!PhHttpSocketBeginRequest(
         httpContext,
         NULL,
-        L"/repos/processhacker/processhacker/commits",
+        L"/repos/winsiderss/systeminformer/commits",
         PH_HTTP_FLAG_REFRESH | PH_HTTP_FLAG_SECURE
         ))
     {
@@ -271,12 +313,12 @@ PPH_LIST PhpUpdaterQueryCommitHistory(
 
                 PhInitializeStringBuilder(&sb, 0x100);
 
-                for (SIZE_T i = 0; i < entry->CommitMessageString->Length / sizeof(WCHAR); i++)
+                for (SIZE_T j = 0; j < entry->CommitMessageString->Length / sizeof(WCHAR); j++)
                 {
-                    if (entry->CommitMessageString->Data[i] == L'\n')
+                    if (entry->CommitMessageString->Data[j] == L'\n')
                         PhAppendStringBuilder2(&sb, L" ");
                     else
-                        PhAppendCharStringBuilder(&sb, entry->CommitMessageString->Data[i]);
+                        PhAppendCharStringBuilder(&sb, entry->CommitMessageString->Data[j]);
                 }
 
                 PhMoveReference(&entry->CommitMessageString, PhFinalStringBuilderString(&sb));
@@ -311,7 +353,6 @@ CleanupExit:
         PhFreeJsonObject(jsonRootObject);
 
     PhClearReference(&jsonString);
-    PhClearReference(&versionString);
     PhClearReference(&userAgentString);
 
     return results;
@@ -336,32 +377,72 @@ PPH_STRING PhpUpdaterCommitStringToTime(
     _In_ PPH_STRING Time
     )
 {
-    PPH_STRING result = NULL;
-    SYSTEMTIME time = { 0 };
+    SYSTEMTIME time;
     SYSTEMTIME localTime = { 0 };
-    INT count;
+    PH_STRINGREF yyPart;
+    PH_STRINGREF mmPartSr;
+    PH_STRINGREF ddPartSr;
+    PH_STRINGREF hrPartSr;
+    PH_STRINGREF mnPartSr;
+    PH_STRINGREF ssPartSr;
+    PH_STRINGREF remainingPart;
+    LONG64 year, month, day, hour, minute, second;
 
-    count = swscanf(
-        PhGetString(Time),
-        L"%hu-%hu-%huT%hu:%hu:%huZ",
-        &time.wYear,
-        &time.wMonth,
-        &time.wDay,
-        &time.wHour,
-        &time.wMinute,
-        &time.wSecond
-        );
+    // %hu-%hu-%huT%hu:%hu:%huZ
+    remainingPart = PhGetStringRef(Time);
 
-    if (count == 6)
-    {
-        if (SystemTimeToTzSpecificLocalTime(NULL, &time, &localTime))
-        {
-            //result = PhFormatDateTime(&localTime);
-            result = PhFormatDate(&localTime, NULL);
-        }
-    }
+    if (!PhSplitStringRefAtChar(&remainingPart, L'-', &yyPart, &remainingPart))
+        return NULL;
+    if (!PhSplitStringRefAtChar(&remainingPart, L'-', &mmPartSr, &remainingPart))
+        return NULL;
+    if (!PhSplitStringRefAtChar(&remainingPart, L'T', &ddPartSr, &remainingPart))
+        return NULL;
+    if (!PhSplitStringRefAtChar(&remainingPart, L':', &hrPartSr, &remainingPart))
+        return NULL;
+    if (!PhSplitStringRefAtChar(&remainingPart, L':', &mnPartSr, &remainingPart))
+        return NULL;
+    if (!PhSplitStringRefAtChar(&remainingPart, L'Z', &ssPartSr, &remainingPart))
+        return NULL;
 
-    return result;
+    if (!PhStringToInteger64(&yyPart, 10, &year))
+        return NULL;
+    if (!PhStringToInteger64(&mmPartSr, 10, &month))
+        return NULL;
+    if (!PhStringToInteger64(&ddPartSr, 10, &day))
+        return NULL;
+    if (!PhStringToInteger64(&hrPartSr, 10, &hour))
+        return NULL;
+    if (!PhStringToInteger64(&mnPartSr, 10, &minute))
+        return NULL;
+    if (!PhStringToInteger64(&ssPartSr, 10, &second))
+        return NULL;
+
+    if (year < SHRT_MIN || year > SHRT_MAX)
+        return NULL;
+    if (month < SHRT_MIN || month > SHRT_MAX)
+        return NULL;
+    if (day < SHRT_MIN || day > SHRT_MAX)
+        return NULL;
+    if (hour < SHRT_MIN || hour > SHRT_MAX)
+        return NULL;
+    if (minute < SHRT_MIN || minute > SHRT_MAX)
+        return NULL;
+    if (second < SHRT_MIN || second > SHRT_MAX)
+        return NULL;
+
+    memset(&time, 0, sizeof(SYSTEMTIME));
+    time.wYear = (short)year;
+    time.wMonth = (short)month;
+    time.wDay = (short)day;
+    time.wHour = (short)hour;
+    time.wMinute = (short)minute;
+    time.wSecond = (short)second;
+
+    if (!PhSystemTimeToTzSpecificLocalTime(&time, &localTime))
+        return NULL;
+
+    //return PhFormatDateTime(&localTime);
+    return PhFormatDate(&localTime, NULL);
 }
 
 NTSTATUS NTAPI PhpUpdaterQueryCommitHistoryThread(
@@ -383,13 +464,9 @@ VOID PhpUpdaterFreeListViewEntries(
     _In_ PPH_UPDATER_COMMIT_CONTEXT Context
     )
 {
-    ULONG index = ULONG_MAX;
+    INT index = INT_ERROR;
 
-    while ((index = PhFindListViewItemByFlags(
-        Context->ListViewHandle,
-        index,
-        LVNI_ALL
-        )) != ULONG_MAX)
+    while ((index = PhFindListViewItemByFlags(Context->ListViewHandle, index, LVNI_ALL)) != INT_ERROR)
     {
         PPH_UPDATER_COMMIT_ENTRY entry;
 
@@ -514,11 +591,12 @@ INT_PTR CALLBACK TextDlgProc(
                 DeleteFont(context->ListViewBoldFont);
 
             PhpUpdaterFreeListViewEntries(context);
-
+        }
+        break;
+    case WM_NCDESTROY:
+        {
             PhRemoveWindowContext(hwndDlg, PH_WINDOW_CONTEXT_DEFAULT);
-
             PhFree(context);
-            context = NULL;
         }
         break;
     case WM_SIZE:
@@ -560,7 +638,7 @@ INT_PTR CALLBACK TextDlgProc(
                         if (entry = PhGetSelectedListViewItemParam(context->ListViewHandle))
                         {
                             if (commitHashUrl = PhConcatStrings2(
-                                L"https://github.com/processhacker/processhacker/commit/",
+                                L"https://github.com/winsiderss/systeminformer/commit/",
                                 PhGetString(entry->CommitHashString)
                                 ))
                             {
@@ -622,7 +700,7 @@ INT_PTR CALLBACK TextDlgProc(
 
                                     PhDereferenceObject(commitHash);
                                 }
-        
+
                                 if (newFont)
                                 {
                                     SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, CDRF_NEWFONT);
@@ -674,6 +752,8 @@ INT_PTR CALLBACK TextDlgProc(
             }
 
             PhHandleListViewNotifyForCopy(lParam, context->ListViewHandle);
+
+            REFLECT_MESSAGE_DLG(hwndDlg, context->ListViewHandle, uMsg, wParam, lParam);
         }
         break;
     case WM_CONTEXTMENU:
@@ -690,7 +770,7 @@ INT_PTR CALLBACK TextDlgProc(
                 point.y = GET_Y_LPARAM(lParam);
 
                 if (point.x == -1 && point.y == -1)
-                    PhGetListViewContextMenuPoint((HWND)wParam, &point);
+                    PhGetListViewContextMenuPoint(context->ListViewHandle, &point);
 
                 PhGetSelectedListViewItemParams(context->ListViewHandle, &listviewItems, &numberOfItems);
 
@@ -727,14 +807,14 @@ INT_PTR CALLBACK TextDlgProc(
                                     PPH_STRING commitHashUrl;
                                     INT lvItemIndex;
 
-                                    lvItemIndex = PhFindListViewItemByFlags(context->ListViewHandle, -1, LVNI_SELECTED);
+                                    lvItemIndex = PhFindListViewItemByFlags(context->ListViewHandle, INT_ERROR, LVNI_SELECTED);
 
-                                    if (lvItemIndex != -1)
+                                    if (lvItemIndex != INT_ERROR)
                                     {
                                         if (PhGetListViewItemParam(context->ListViewHandle, lvItemIndex, &entry))
                                         {
                                             if (commitHashUrl = PhConcatStrings2(
-                                                L"https://github.com/processhacker/processhacker/commit/",
+                                                L"https://github.com/winsiderss/systeminformer/commit/",
                                                 PhGetString(entry->CommitHashString)
                                                 ))
                                             {
@@ -800,11 +880,6 @@ INT_PTR CALLBACK TextDlgProc(
         return HANDLE_WM_CTLCOLORDLG(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
     case WM_CTLCOLORSTATIC:
         return HANDLE_WM_CTLCOLORSTATIC(hwndDlg, wParam, lParam, PhWindowThemeControlColor);
-    }
-
-    if (context)
-    {
-        REFLECT_MESSAGE_DLG(hwndDlg, context->ListViewHandle, uMsg, wParam, lParam);
     }
 
     return FALSE;

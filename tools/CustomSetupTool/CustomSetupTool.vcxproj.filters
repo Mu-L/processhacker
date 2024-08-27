@@ -39,27 +39,15 @@
     <ClCompile Include="startpage.c">
       <Filter>Source Files\pages</Filter>
     </ClCompile>
-    <ClCompile Include="licencepage.c">
-      <Filter>Source Files\pages</Filter>
-    </ClCompile>
-    <ClCompile Include="configpage.c">
-      <Filter>Source Files\pages</Filter>
-    </ClCompile>
-    <ClCompile Include="downloadpage.c">
-      <Filter>Source Files\pages</Filter>
-    </ClCompile>
-    <ClCompile Include="extractpage.c">
-      <Filter>Source Files\pages</Filter>
-    </ClCompile>
-    <ClCompile Include="websetuppage.c">
-      <Filter>Source Files\pages</Filter>
-    </ClCompile>
     <ClCompile Include="util.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="install.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\setup.h">
+    <ClInclude Include="setup.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="resource.h">
@@ -80,8 +68,8 @@
     </Manifest>
   </ItemGroup>
   <ItemGroup>
-    <Image Include="SystemInformer.ico">
-      <Filter>Resource Files\Content</Filter>
+    <Image Include="..\..\SystemInformer\SystemInformer.ico">
+      <Filter>Resource Files</Filter>
     </Image>
   </ItemGroup>
 </Project>

@@ -1,3 +1,15 @@
+/*
+ * Copyright (c) 2022 Winsider Seminars & Solutions, Inc.  All rights reserved.
+ *
+ * This file is part of System Informer.
+ *
+ * Authors:
+ *
+ *     wj32    2016
+ *     dmex    2017-2023
+ *
+ */
+
 #ifndef PH_MODLIST_H
 #define PH_MODLIST_H
 
@@ -33,8 +45,12 @@
 #define PHMOTLC_TIMELINE 22
 #define PHMOTLC_ORIGINALNAME 23
 #define PHMOTLC_SERVICE 24
+#define PHMOTLC_ENCLAVE_TYPE 25
+#define PHMOTLC_ENCLAVE_BASE_ADDRESS 26
+#define PHMOTLC_ENCLAVE_SIZE 27
+#define PHMOTLC_ARCHITECTURE 28
 
-#define PHMOTLC_MAXIMUM 25
+#define PHMOTLC_MAXIMUM 29
 
 // begin_phapppub
 typedef struct _PH_MODULE_NODE
@@ -52,6 +68,7 @@ typedef struct _PH_MODULE_NODE
 
     PPH_STRING TooltipText;
 
+    PPH_STRING FileNameWin32;
     PPH_STRING SizeText;
     WCHAR LoadCountText[PH_INT32_STR_LEN_1];
     PPH_STRING TimeStampText;
@@ -60,6 +77,7 @@ typedef struct _PH_MODULE_NODE
     PPH_STRING FileSizeText;
     PPH_STRING ImageCoherencyText;
     PPH_STRING ServiceText;
+    PPH_STRING EnclaveSizeText;
 
     struct _PH_MODULE_NODE *Parent;
     PPH_LIST Children;
@@ -83,6 +101,7 @@ typedef struct _PH_MODULE_NODE
 #define PH_MODULE_FLAGS_HIGHLIGHT_LOWIMAGECOHERENCY_OPTION 14
 #define PH_MODULE_FLAGS_IMAGEKNOWNDLL_OPTION 15
 #define PH_MODULE_FLAGS_HIGHLIGHT_IMAGEKNOWNDLL 16
+#define PH_MODULE_FLAGS_ZERO_PAD_ADDRESSES 17
 #define PH_MODULE_FLAGS_SAVE_OPTION 40 // Always last (dmex)
 
 typedef struct _PH_MODULE_LIST_CONTEXT
@@ -119,7 +138,8 @@ typedef struct _PH_MODULE_LIST_CONTEXT
             ULONG HighlightLowImageCoherency : 1;
             ULONG HideImageKnownDll : 1;
             ULONG HighlightImageKnownDll : 1;
-            ULONG Spare : 17;
+            ULONG ZeroPadAddresses : 1;
+            ULONG Spare : 16;
         };
     };
 
@@ -173,6 +193,14 @@ VOID PhRemoveModuleNode(
 VOID PhUpdateModuleNode(
     _In_ PPH_MODULE_LIST_CONTEXT Context,
     _In_ PPH_MODULE_NODE ModuleNode
+    );
+
+VOID PhInvalidateAllModuleNodes(
+    _In_ PPH_MODULE_LIST_CONTEXT Context
+    );
+
+VOID PhInvalidateAllModuleBaseAddressNodes(
+    _In_ PPH_MODULE_LIST_CONTEXT Context
     );
 
 VOID PhExpandAllModuleNodes(

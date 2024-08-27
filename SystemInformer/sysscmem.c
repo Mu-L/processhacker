@@ -6,7 +6,7 @@
  * Authors:
  *
  *     wj32    2010-2016
- *     dmex    2017-2022
+ *     dmex    2017-2023
  *
  */
 
@@ -22,6 +22,7 @@
 #include <procprv.h>
 #include <phsettings.h>
 
+static BOOLEAN ShowCommitInSummary;
 static PPH_SYSINFO_SECTION MemorySection;
 static HWND MemoryDialog;
 static PH_LAYOUT_MANAGER MemoryLayoutManager;
@@ -51,14 +52,15 @@ static ULONGLONG ReservedMemory;
 BOOLEAN PhSipMemorySectionCallback(
     _In_ PPH_SYSINFO_SECTION Section,
     _In_ PH_SYSINFO_SECTION_MESSAGE Message,
-    _In_opt_ PVOID Parameter1,
-    _In_opt_ PVOID Parameter2
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2
     )
 {
     switch (Message)
     {
     case SysInfoCreate:
         {
+            ShowCommitInSummary = !!PhGetIntegerSetting(L"ShowCommitInSummary");
             MemorySection = Section;
         }
         return TRUE;
@@ -81,7 +83,7 @@ BOOLEAN PhSipMemorySectionCallback(
         return TRUE;
     case SysInfoViewChanging:
         {
-            PH_SYSINFO_VIEW_TYPE view = (PH_SYSINFO_VIEW_TYPE)Parameter1;
+            PH_SYSINFO_VIEW_TYPE view = (PH_SYSINFO_VIEW_TYPE)PtrToUlong(Parameter1);
             PPH_SYSINFO_SECTION section = (PPH_SYSINFO_SECTION)Parameter2;
 
             if (view == SysInfoSummaryView || section != Section)
@@ -106,9 +108,6 @@ BOOLEAN PhSipMemorySectionCallback(
         {
             PPH_SYSINFO_CREATE_DIALOG createDialog = Parameter1;
 
-            if (!createDialog)
-                break;
-
             createDialog->Instance = PhInstanceHandle;
             createDialog->Template = MAKEINTRESOURCE(IDD_SYSINFO_MEM);
             createDialog->DialogProc = PhSipMemoryDialogProc;
@@ -119,20 +118,30 @@ BOOLEAN PhSipMemorySectionCallback(
             PPH_GRAPH_DRAW_INFO drawInfo = Parameter1;
             ULONG i;
 
-            if (!drawInfo)
-                break;
-
-            if (PhGetIntegerSetting(L"ShowCommitInSummary"))
+            if (ShowCommitInSummary)
             {
-                drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y;
-                Section->Parameters->ColorSetupFunction(drawInfo, PhCsColorPrivate, 0);
+                drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (PhCsEnableGraphMaxText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                Section->Parameters->ColorSetupFunction(drawInfo, PhCsColorPrivate, 0, Section->Parameters->WindowDpi);
                 PhGetDrawInfoGraphBuffers(&Section->GraphState.Buffers, drawInfo, PhCommitHistory.Count);
 
                 if (!Section->GraphState.Valid)
                 {
-                    for (i = 0; i < drawInfo->LineDataCount; i++)
+                    if (PhCsEnableAvxSupport)
                     {
-                        Section->GraphState.Data1[i] = (FLOAT)PhGetItemCircularBuffer_ULONG(&PhCommitHistory, i);
+                        PhCopyConvertCircularBufferULONG(&PhCommitHistory, Section->GraphState.Data1, drawInfo->LineDataCount);
+#ifdef DEBUG
+                        for (i = 0; i < drawInfo->LineDataCount; i++)
+                        {
+                            assert(Section->GraphState.Data1[i] == (FLOAT)PhGetItemCircularBuffer_ULONG(&PhCommitHistory, i));
+                        }
+#endif
+                    }
+                    else
+                    {
+                        for (i = 0; i < drawInfo->LineDataCount; i++)
+                        {
+                            Section->GraphState.Data1[i] = (FLOAT)PhGetItemCircularBuffer_ULONG(&PhCommitHistory, i);
+                        }
                     }
 
                     if (PhPerfInformation.CommitLimit != 0)
@@ -145,20 +154,39 @@ BOOLEAN PhSipMemorySectionCallback(
                             );
                     }
 
+                    if (PhCsEnableGraphMaxText)
+                    {
+                        drawInfo->LabelYFunction = PhSiSizeLabelYFunction;
+                        drawInfo->LabelYFunctionParameter = (FLOAT)UInt32x32To64(PhPerfInformation.CommitLimit, PAGE_SIZE);
+                    }
+
                     Section->GraphState.Valid = TRUE;
                 }
             }
             else
             {
-                drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y;
-                Section->Parameters->ColorSetupFunction(drawInfo, PhCsColorPhysical, 0);
+                drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (PhCsEnableGraphMaxText ? PH_GRAPH_LABEL_MAX_Y : 0);
+                Section->Parameters->ColorSetupFunction(drawInfo, PhCsColorPhysical, 0, Section->Parameters->WindowDpi);
                 PhGetDrawInfoGraphBuffers(&Section->GraphState.Buffers, drawInfo, PhPhysicalHistory.Count);
 
                 if (!Section->GraphState.Valid)
                 {
-                    for (i = 0; i < drawInfo->LineDataCount; i++)
+                    if (PhCsEnableAvxSupport)
                     {
-                        Section->GraphState.Data1[i] = (FLOAT)PhGetItemCircularBuffer_ULONG(&PhPhysicalHistory, i);
+                        PhCopyConvertCircularBufferULONG(&PhPhysicalHistory, Section->GraphState.Data1, drawInfo->LineDataCount);
+#ifdef DEBUG
+                        for (i = 0; i < drawInfo->LineDataCount; i++)
+                        {
+                            assert(Section->GraphState.Data1[i] == (FLOAT)PhGetItemCircularBuffer_ULONG(&PhPhysicalHistory, i));
+                        }
+#endif
+                    }
+                    else
+                    {
+                        for (i = 0; i < drawInfo->LineDataCount; i++)
+                        {
+                            Section->GraphState.Data1[i] = (FLOAT)PhGetItemCircularBuffer_ULONG(&PhPhysicalHistory, i);
+                        }
                     }
 
                     if (PhSystemBasicInformation.NumberOfPhysicalPages != 0)
@@ -169,6 +197,12 @@ BOOLEAN PhSipMemorySectionCallback(
                             (FLOAT)PhSystemBasicInformation.NumberOfPhysicalPages,
                             drawInfo->LineDataCount
                             );
+                    }
+
+                    if (PhCsEnableGraphMaxText)
+                    {
+                        drawInfo->LabelYFunction = PhSiSizeLabelYFunction;
+                        drawInfo->LabelYFunctionParameter = (FLOAT)UInt32x32To64(PhSystemBasicInformation.NumberOfPhysicalPages, PAGE_SIZE);
                     }
 
                     Section->GraphState.Valid = TRUE;
@@ -182,10 +216,7 @@ BOOLEAN PhSipMemorySectionCallback(
             ULONG usedPages;
             PH_FORMAT format[3];
 
-            if (!getTooltipText)
-                break;
-
-            if (PhGetIntegerSetting(L"ShowCommitInSummary"))
+            if (ShowCommitInSummary)
             {
                 usedPages = PhGetItemCircularBuffer_ULONG(&PhCommitHistory, getTooltipText->Index);
 
@@ -218,10 +249,7 @@ BOOLEAN PhSipMemorySectionCallback(
             ULONG usedPages;
             PH_FORMAT format[5];
 
-            if (!drawPanel)
-                break;
-
-            if (PhGetIntegerSetting(L"ShowCommitInSummary"))
+            if (ShowCommitInSummary)
             {
                 totalPages = PhPerfInformation.CommitLimit;
                 usedPages = PhPerfInformation.CommittedPages;
@@ -276,7 +304,7 @@ VOID PhSipInitializeMemoryDialog(
 
     MemoryTicked = 0;
 
-    if (!MmAddressesInitialized && KphIsConnected())
+    if (!MmAddressesInitialized)
     {
         PhQueueItemWorkQueue(PhGetGlobalWorkQueue(), PhSipLoadMmAddresses, NULL);
         MmAddressesInitialized = TRUE;
@@ -330,6 +358,7 @@ INT_PTR CALLBACK PhSipMemoryDialogProc(
         {
             PPH_LAYOUT_ITEM graphItem;
             PPH_LAYOUT_ITEM panelItem;
+            RECT margin;
             HWND totalPhysicalLabel;
 
             PhSipInitializeMemoryDialog();
@@ -346,7 +375,7 @@ INT_PTR CALLBACK PhSipMemoryDialogProc(
             SetWindowFont(GetDlgItem(hwndDlg, IDC_TITLE), MemorySection->Parameters->LargeFont, FALSE);
             SetWindowFont(totalPhysicalLabel, MemorySection->Parameters->MediumFont, FALSE);
 
-            if (PhSipGetMemoryLimits(&InstalledMemory, &ReservedMemory))
+            if (PhGetPhysicallyInstalledSystemMemory(&InstalledMemory, &ReservedMemory))
             {
                 PhSetWindowText(totalPhysicalLabel, PhaConcatStrings2(
                     PhaFormatSize(InstalledMemory, ULONG_MAX)->Buffer, L" installed")->Buffer);
@@ -359,7 +388,10 @@ INT_PTR CALLBACK PhSipMemoryDialogProc(
 
             MemoryPanel = PhCreateDialog(PhInstanceHandle, MAKEINTRESOURCE(IDD_SYSINFO_MEMPANEL), hwndDlg, PhSipMemoryPanelDialogProc, NULL);
             ShowWindow(MemoryPanel, SW_SHOW);
-            PhAddLayoutItemEx(&MemoryLayoutManager, MemoryPanel, NULL, PH_ANCHOR_LEFT | PH_ANCHOR_RIGHT | PH_ANCHOR_BOTTOM, panelItem->Margin);
+
+            margin = panelItem->Margin;
+            PhGetSizeDpiValue(&margin, MemorySection->Parameters->WindowDpi, TRUE);
+            PhAddLayoutItemEx(&MemoryLayoutManager, MemoryPanel, NULL, PH_ANCHOR_LEFT | PH_ANCHOR_RIGHT | PH_ANCHOR_BOTTOM, margin);
 
             PhSipCreateMemoryGraphs();
             PhSipUpdateMemoryGraphs();
@@ -371,15 +403,34 @@ INT_PTR CALLBACK PhSipMemoryDialogProc(
             PhDeleteLayoutManager(&MemoryLayoutManager);
         }
         break;
+    case WM_DPICHANGED_AFTERPARENT:
+        {
+            if (MemorySection->Parameters->LargeFont)
+            {
+                SetWindowFont(GetDlgItem(hwndDlg, IDC_TITLE), MemorySection->Parameters->LargeFont, FALSE);
+            }
+
+            if (MemorySection->Parameters->MediumFont)
+            {
+                SetWindowFont(GetDlgItem(hwndDlg, IDC_TOTALPHYSICAL), MemorySection->Parameters->MediumFont, FALSE);
+            }
+
+            CommitGraphState.Valid = FALSE;
+            CommitGraphState.TooltipIndex = ULONG_MAX;
+            PhysicalGraphState.Valid = FALSE;
+            PhysicalGraphState.TooltipIndex = ULONG_MAX;
+            PhLayoutManagerLayout(&MemoryLayoutManager);
+            PhSipLayoutMemoryGraphs(hwndDlg);
+        }
+        break;
     case WM_SIZE:
         {
             CommitGraphState.Valid = FALSE;
             CommitGraphState.TooltipIndex = ULONG_MAX;
             PhysicalGraphState.Valid = FALSE;
             PhysicalGraphState.TooltipIndex = ULONG_MAX;
-
             PhLayoutManagerLayout(&MemoryLayoutManager);
-            PhSipLayoutMemoryGraphs();
+            PhSipLayoutMemoryGraphs(hwndDlg);
         }
         break;
     case WM_NOTIFY:
@@ -428,6 +479,13 @@ INT_PTR CALLBACK PhSipMemoryPanelDialogProc(
             case IDC_MORE:
                 {
                     PhShowMemoryListsDialog(PhSipWindow, PhSipRegisterDialog, PhSipUnregisterDialog);
+                }
+                break;
+            case IDC_EMPTY:
+                {
+                    extern VOID PhShowMemoryListCommand(_In_ HWND ParentWindow, _In_ HWND ButtonWindow, _In_ BOOLEAN ShowTopAlign); // memlists.c (dmex);
+
+                    PhShowMemoryListCommand(PhSipWindow, GET_WM_COMMAND_HWND(wParam, lParam), TRUE);
                 }
                 break;
             }
@@ -480,29 +538,33 @@ VOID PhSipCreateMemoryGraphs(
 }
 
 VOID PhSipLayoutMemoryGraphs(
-    VOID
+    _In_ HWND hwnd
     )
 {
     RECT clientRect;
     RECT labelRect;
+    RECT marginRect;
     ULONG graphWidth;
     ULONG graphHeight;
     HDWP deferHandle;
     ULONG y;
 
+    marginRect = MemoryGraphMargin;
+    PhGetSizeDpiValue(&marginRect, MemorySection->Parameters->WindowDpi, TRUE);
+
     GetClientRect(MemoryDialog, &clientRect);
     GetClientRect(GetDlgItem(MemoryDialog, IDC_COMMIT_L), &labelRect);
-    graphWidth = clientRect.right - MemoryGraphMargin.left - MemoryGraphMargin.right;
-    graphHeight = (clientRect.bottom - MemoryGraphMargin.top - MemoryGraphMargin.bottom - labelRect.bottom * 2 - MemorySection->Parameters->MemoryPadding * 3) / 2;
+    graphWidth = clientRect.right - marginRect.left - marginRect.right;
+    graphHeight = (clientRect.bottom - marginRect.top - marginRect.bottom - labelRect.bottom * 2 - MemorySection->Parameters->MemoryPadding * 3) / 2;
 
     deferHandle = BeginDeferWindowPos(4);
-    y = MemoryGraphMargin.top;
+    y = marginRect.top;
 
     deferHandle = DeferWindowPos(
         deferHandle,
         GetDlgItem(MemoryDialog, IDC_COMMIT_L),
         NULL,
-        MemoryGraphMargin.left,
+        marginRect.left,
         y,
         0,
         0,
@@ -514,7 +576,7 @@ VOID PhSipLayoutMemoryGraphs(
         deferHandle,
         CommitGraphHandle,
         NULL,
-        MemoryGraphMargin.left,
+        marginRect.left,
         y,
         graphWidth,
         graphHeight,
@@ -526,7 +588,7 @@ VOID PhSipLayoutMemoryGraphs(
         deferHandle,
         GetDlgItem(MemoryDialog, IDC_PHYSICAL_L),
         NULL,
-        MemoryGraphMargin.left,
+        marginRect.left,
         y,
         0,
         0,
@@ -538,10 +600,10 @@ VOID PhSipLayoutMemoryGraphs(
         deferHandle,
         PhysicalGraphHandle,
         NULL,
-        MemoryGraphMargin.left,
+        marginRect.left,
         y,
         graphWidth,
-        clientRect.bottom - MemoryGraphMargin.bottom - y,
+        clientRect.bottom - marginRect.bottom - y,
         SWP_NOACTIVATE | SWP_NOZORDER
         );
 
@@ -560,8 +622,8 @@ VOID PhSipNotifyCommitGraph(
             PPH_GRAPH_DRAW_INFO drawInfo = getDrawInfo->DrawInfo;
             ULONG i;
 
-            drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y;
-            PhSiSetColorsGraphDrawInfo(drawInfo, PhCsColorPrivate, 0);
+            drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (PhCsEnableGraphMaxText ? PH_GRAPH_LABEL_MAX_Y : 0);
+            PhSiSetColorsGraphDrawInfo(drawInfo, PhCsColorPrivate, 0, MemorySection->Parameters->WindowDpi);
 
             PhGraphStateGetDrawInfo(
                 &CommitGraphState,
@@ -571,9 +633,22 @@ VOID PhSipNotifyCommitGraph(
 
             if (!CommitGraphState.Valid)
             {
-                for (i = 0; i < drawInfo->LineDataCount; i++)
+                if (PhCsEnableAvxSupport)
                 {
-                    CommitGraphState.Data1[i] = (FLOAT)PhGetItemCircularBuffer_ULONG(&PhCommitHistory, i);
+                    PhCopyConvertCircularBufferULONG(&PhCommitHistory, CommitGraphState.Data1, drawInfo->LineDataCount);
+#ifdef DEBUG
+                    for (i = 0; i < drawInfo->LineDataCount; i++)
+                    {
+                        assert(CommitGraphState.Data1[i] == (FLOAT)PhGetItemCircularBuffer_ULONG(&PhCommitHistory, i));
+                    }
+#endif
+                }
+                else
+                {
+                    for (i = 0; i < drawInfo->LineDataCount; i++)
+                    {
+                        CommitGraphState.Data1[i] = (FLOAT)PhGetItemCircularBuffer_ULONG(&PhCommitHistory, i);
+                    }
                 }
 
                 if (PhPerfInformation.CommitLimit != 0)
@@ -584,6 +659,12 @@ VOID PhSipNotifyCommitGraph(
                         (FLOAT)PhPerfInformation.CommitLimit,
                         drawInfo->LineDataCount
                         );
+                }
+
+                if (PhCsEnableGraphMaxText)
+                {
+                    drawInfo->LabelYFunction = PhSiSizeLabelYFunction;
+                    drawInfo->LabelYFunctionParameter = (FLOAT)UInt32x32To64(PhPerfInformation.CommitLimit, PAGE_SIZE);
                 }
 
                 CommitGraphState.Valid = TRUE;
@@ -631,8 +712,8 @@ VOID PhSipNotifyPhysicalGraph(
             PPH_GRAPH_DRAW_INFO drawInfo = getDrawInfo->DrawInfo;
             ULONG i;
 
-            drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y;
-            PhSiSetColorsGraphDrawInfo(drawInfo, PhCsColorPhysical, 0);
+            drawInfo->Flags = PH_GRAPH_USE_GRID_X | PH_GRAPH_USE_GRID_Y | (PhCsEnableGraphMaxText ? PH_GRAPH_LABEL_MAX_Y : 0);
+            PhSiSetColorsGraphDrawInfo(drawInfo, PhCsColorPhysical, 0, MemorySection->Parameters->WindowDpi);
 
             PhGraphStateGetDrawInfo(
                 &PhysicalGraphState,
@@ -642,9 +723,22 @@ VOID PhSipNotifyPhysicalGraph(
 
             if (!PhysicalGraphState.Valid)
             {
-                for (i = 0; i < drawInfo->LineDataCount; i++)
+                if (PhCsEnableAvxSupport)
                 {
-                    PhysicalGraphState.Data1[i] = (FLOAT)PhGetItemCircularBuffer_ULONG(&PhPhysicalHistory, i);
+                    PhCopyConvertCircularBufferULONG(&PhPhysicalHistory, PhysicalGraphState.Data1, drawInfo->LineDataCount);
+#ifdef DEBUG
+                    for (i = 0; i < drawInfo->LineDataCount; i++)
+                    {
+                        assert(PhysicalGraphState.Data1[i] == (FLOAT)PhGetItemCircularBuffer_ULONG(&PhPhysicalHistory, i));
+                    }
+#endif
+                }
+                else
+                {
+                    for (i = 0; i < drawInfo->LineDataCount; i++)
+                    {
+                        PhysicalGraphState.Data1[i] = (FLOAT)PhGetItemCircularBuffer_ULONG(&PhPhysicalHistory, i);
+                    }
                 }
 
                 if (PhSystemBasicInformation.NumberOfPhysicalPages != 0)
@@ -655,6 +749,12 @@ VOID PhSipNotifyPhysicalGraph(
                         (FLOAT)PhSystemBasicInformation.NumberOfPhysicalPages,
                         drawInfo->LineDataCount
                         );
+                }
+
+                if (PhCsEnableGraphMaxText)
+                {
+                    drawInfo->LabelYFunction = PhSiSizeLabelYFunction;
+                    drawInfo->LabelYFunctionParameter = (FLOAT)UInt32x32To64(PhSystemBasicInformation.NumberOfPhysicalPages, PAGE_SIZE);
                 }
 
                 PhysicalGraphState.Valid = TRUE;
@@ -803,34 +903,36 @@ VOID PhSipUpdateMemoryPanel(
     else
         PhSetDialogItemText(MemoryPanel, IDC_ZNONPAGEDFREESDELTA_V, L"-");
 
-    // Pools (KPH)
+    // Pools
 
-    if (MmAddressesInitialized && (MmSizeOfPagedPoolInBytes || MmMaximumNonPagedPoolInBytes))
+    if (MmAddressesInitialized)
     {
         SIZE_T paged;
         SIZE_T nonPaged;
 
         PhSipGetPoolLimits(&paged, &nonPaged);
 
-        if (paged != -1)
+        if (paged != MAXSIZE_T)
             pagedLimit = PhaFormatSize(paged, ULONG_MAX)->Buffer;
         else
-            pagedLimit = L"N/A";
+            pagedLimit = KsiLevel() ? L"no symbols" : L"no driver";
 
-        if (nonPaged != -1)
+        if (nonPaged != MAXSIZE_T)
             nonPagedLimit = PhaFormatSize(nonPaged, ULONG_MAX)->Buffer;
         else
             nonPagedLimit = L"N/A";
     }
     else
     {
-        if (!KphIsConnected())
+        if (KsiLevel())
         {
-            pagedLimit = nonPagedLimit = L"no driver";
+            pagedLimit = L"no symbols";
+            nonPagedLimit = L"N/A";
         }
         else
         {
-            pagedLimit = nonPagedLimit = L"no symbols";
+            pagedLimit = L"no driver";
+            nonPagedLimit = L"N/A";
         }
     }
 
@@ -935,36 +1037,35 @@ NTSTATUS PhSipLoadMmAddresses(
     _In_ PVOID Parameter
     )
 {
-    PRTL_PROCESS_MODULES kernelModules;
-    PPH_SYMBOL_PROVIDER symbolProvider;
     PPH_STRING kernelFileName;
+    PVOID kernelImageBase;
+    ULONG kernelImageSize;
+    PPH_SYMBOL_PROVIDER symbolProvider;
     PH_SYMBOL_INFORMATION symbolInfo;
 
-    if (NT_SUCCESS(PhEnumKernelModules(&kernelModules)))
+    if (NT_SUCCESS(PhGetKernelFileNameEx(&kernelFileName, &kernelImageBase, &kernelImageSize)))
     {
-        if (kernelModules->NumberOfModules >= 1)
+        symbolProvider = PhCreateSymbolProvider(NULL);
+        PhLoadSymbolProviderOptions(symbolProvider);
+
+        PhLoadModuleSymbolProvider(
+            symbolProvider,
+            kernelFileName,
+            (ULONG64)kernelImageBase,
+            kernelImageSize
+            );
+
+        if (PhGetSymbolFromName(
+            symbolProvider,
+            L"MmSizeOfPagedPoolInBytes",
+            &symbolInfo
+            ))
         {
-            symbolProvider = PhCreateSymbolProvider(NULL);
-            PhLoadSymbolProviderOptions(symbolProvider);
+            MmSizeOfPagedPoolInBytes = (PSIZE_T)symbolInfo.Address;
+        }
 
-            kernelFileName = PH_AUTO(PhConvertMultiByteToUtf16(kernelModules->Modules[0].FullPathName));
-
-            PhLoadModuleSymbolProvider(
-                symbolProvider,
-                kernelFileName,
-                (ULONG64)kernelModules->Modules[0].ImageBase,
-                kernelModules->Modules[0].ImageSize
-                );
-
-            if (PhGetSymbolFromName(
-                symbolProvider,
-                L"MmSizeOfPagedPoolInBytes",
-                &symbolInfo
-                ))
-            {
-                MmSizeOfPagedPoolInBytes = (PSIZE_T)symbolInfo.Address;
-            }
-
+        if (WindowsVersion < WINDOWS_8)
+        {
             if (PhGetSymbolFromName(
                 symbolProvider,
                 L"MmMaximumNonPagedPoolInBytes",
@@ -973,11 +1074,10 @@ NTSTATUS PhSipLoadMmAddresses(
             {
                 MmMaximumNonPagedPoolInBytes = (PSIZE_T)symbolInfo.Address;
             }
-
-            PhDereferenceObject(symbolProvider);
         }
 
-        PhFree(kernelModules);
+        PhDereferenceObject(symbolProvider);
+        PhDereferenceObject(kernelFileName);
     }
 
     return STATUS_SUCCESS;
@@ -988,12 +1088,12 @@ VOID PhSipGetPoolLimits(
     _Out_ PSIZE_T NonPaged
     )
 {
-    SIZE_T paged = -1;
-    SIZE_T nonPaged = -1;
+    SIZE_T paged = MAXSIZE_T;
+    SIZE_T nonPaged = MAXSIZE_T;
 
-    if (MmSizeOfPagedPoolInBytes && WindowsVersion < WINDOWS_8)
+    if (MmSizeOfPagedPoolInBytes && (KsiLevel() >= KphLevelMed))
     {
-        KphReadVirtualMemoryUnsafe(
+        KphReadVirtualMemory(
             NtCurrentProcess(),
             MmSizeOfPagedPoolInBytes,
             &paged,
@@ -1002,9 +1102,27 @@ VOID PhSipGetPoolLimits(
             );
     }
 
-    if (MmMaximumNonPagedPoolInBytes)
+    if (WindowsVersion >= WINDOWS_8)
     {
-        KphReadVirtualMemoryUnsafe(
+        // The maximum nonpaged pool size was fixed on Windows 8 and above? The kernel does use
+        // a function named MmGetMaximumNonPagedPoolInBytes() but it's not exported. We return
+        // the fixed limit value from the documentation here similar to MS tools. (dmex)
+        // https://learn.microsoft.com/en-us/windows/win32/memory/memory-limits-for-windows-releases#memory-and-address-space-limits
+        //
+        // Windows 8.1 and Windows Server 2012 R2: RAM or 16 TB, whichever is smaller:
+
+        if (UInt32x32To64(PhSystemBasicInformation.NumberOfPhysicalPages, PAGE_SIZE) <= 16ULL * 1024ULL * 1024ULL * 1024ULL)
+        {
+            nonPaged = UInt32x32To64(PhSystemBasicInformation.NumberOfPhysicalPages, PAGE_SIZE);
+        }
+        else
+        {
+            nonPaged = (SIZE_T)(16ULL * 1024ULL * 1024ULL * 1024ULL);
+        }
+    }
+    else if (WindowsVersion < WINDOWS_8 && MmMaximumNonPagedPoolInBytes && (KsiLevel() >= KphLevelMed))
+    {
+        KphReadVirtualMemory(
             NtCurrentProcess(),
             MmMaximumNonPagedPoolInBytes,
             &nonPaged,
@@ -1018,58 +1136,18 @@ VOID PhSipGetPoolLimits(
 }
 
 _Success_(return)
-BOOLEAN PhSipGetMemoryLimits(
-    _Out_ PULONGLONG TotalMemory,
-    _Out_ PULONGLONG ReservedMemory
-    )
-{
-    static BOOL (WINAPI *getPhysicallyInstalledSystemMemory)(PULONGLONG TotalMemoryInKilobytes) = NULL;
-    ULONGLONG physicallyInstalledSystemMemory = 0;
-
-    if (!getPhysicallyInstalledSystemMemory)
-        getPhysicallyInstalledSystemMemory = PhGetDllProcedureAddress(L"kernel32.dll", "GetPhysicallyInstalledSystemMemory", 0);
-
-    if (getPhysicallyInstalledSystemMemory && getPhysicallyInstalledSystemMemory(&physicallyInstalledSystemMemory))
-    {
-        *TotalMemory = physicallyInstalledSystemMemory * 1024ULL;
-        *ReservedMemory = physicallyInstalledSystemMemory * 1024ULL - UInt32x32To64(PhSystemBasicInformation.NumberOfPhysicalPages, PAGE_SIZE);
-        return TRUE;
-    }
-
-    return FALSE;
-}
-
-_Success_(return)
 BOOLEAN PhSipGetMemoryCompressionLimits(
     _Out_ DOUBLE *CurrentCompressedMemory,
     _Out_ DOUBLE *TotalCompressedMemory,
     _Out_ DOUBLE *TotalSavedMemory
     )
 {
-    NTSTATUS status;
-    SYSTEM_STORE_INFORMATION storeInfo;
-    SM_MEM_COMPRESSION_INFO_REQUEST compressionInfo;
+    PH_SYSTEM_STORE_COMPRESSION_INFORMATION compressionInfo;
     DOUBLE current;
     DOUBLE total;
     DOUBLE saved;
 
-    memset(&compressionInfo, 0, sizeof(SM_MEM_COMPRESSION_INFO_REQUEST));
-    compressionInfo.Version = SYSTEM_STORE_COMPRESSION_INFORMATION_VERSION;
-
-    memset(&storeInfo, 0, sizeof(SYSTEM_STORE_INFORMATION));
-    storeInfo.Version = SYSTEM_STORE_INFORMATION_VERSION;
-    storeInfo.StoreInformationClass = MemCompressionInfoRequest;
-    storeInfo.Data = &compressionInfo;
-    storeInfo.Length = sizeof(compressionInfo);
-
-    status = NtQuerySystemInformation(
-        SystemStoreInformation,
-        &storeInfo,
-        sizeof(SYSTEM_STORE_INFORMATION),
-        NULL
-        );
-
-    if (!NT_SUCCESS(status))
+    if (!NT_SUCCESS(PhGetSystemCompressionStoreInformation(&compressionInfo)))
         return FALSE;
     if (!(compressionInfo.TotalDataCompressed && compressionInfo.TotalCompressedSize))
         return FALSE;
